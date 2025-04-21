@@ -1,0 +1,688 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The BFQ I/O scheduler [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/601799/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/601382/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/601799/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The BFQ I/O scheduler</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 11, 2014</br>
+           </div>
+A block-layer I/O scheduler is charged with dispatching I/O requests to
+storage devices in a way that maximizes throughput while minimizing
+latencies.  The Linux kernel currently includes a few different
+I/O schedulers, but, for the most part, development in this area has been
+slow in recent years, with no new schedulers (or major changes to existing
+schedulers) proposed for some time.  That situation has changed with the
+posting of the <a href="/Articles/600366/">"budget fair queuing" (BFQ) I/O
+scheduler</a>, which 
+brings some interesting new ideas to this part of the kernel.
+<p>
+<h4>Basic BFQ</h4>
+<p>
+BFQ, which has been developed and used out of tree for some years,  is, in
+many ways, modeled after the "completely fair queuing" (CFQ) I/O 
+scheduler currently found 
+in the mainline kernel.  CFQ separates each process's I/O requests into
+a separate queue, then rotates through the queues trying to divide the
+available bandwidth as fairly as it can.  CFQ does a reasonably good job
+and is normally the I/O scheduler of choice for rotating drives, but it is
+not without its problems.  The code has gotten more complex over the years
+as attempts have been made to improve its performance, but, despite the
+added heuristics, it can still
+create I/O latencies that are longer than desired.
+<p>
+The BFQ I/O scheduler also maintains per-process queues of I/O requests,
+but it does away with the round-robin approach used by CFQ.  Instead, it
+assigns an "I/O budget" to each process.  This budget is expressed as the
+number of sectors that the process is allowed to transfer when it is next
+scheduled for access to the drive.  The calculation of the budget is
+complicated (more on this below), but, in the end, it is based on each
+process's "I/O weight" and observations of
+the process's past behavior.  The I/O weight functions like a priority
+value; it is set by the administrator (or by default) and is normally constant.
+Processes with the same weight should all get
+the same allocation of I/O bandwidth.  Different processes may get
+different budgets, but BFQ tries to preserve fairness overall, so a process
+getting a smaller budget now will get another turn at the drive sooner than
+a process that was given a large budget.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+When it comes time to figure out whose requests should be serviced, BFQ
+examines the assigned budgets and, to simplify a bit, it chooses the
+process whose I/O budget would, on an otherwise idle disk, be exhausted
+first.  So processes with small I/O budgets tend not to wait as long as
+those with large budgets.  Once a process is selected, it has exclusive
+access to the storage device until it has transferred its budgeted number
+of sectors, with a couple of exceptions.  Those are:
+<p>
+<ul>
+<li> Normally, a process's access to the device ends if it has no more
+     requests to be serviced.  If, however, the last request was
+     synchronous (a read request, essentially), BFQ will let the drive sit
+     idle for a short period to give the process a chance to generate
+     another I/O request.  Since the process was probably waiting for the
+     read to complete before generating more I/O traffic, that request
+     comes quite often, and it tends to 
+     be contiguous with the last request (or close to it) and, thus, fast
+     to service.  It may be counter-intuitive, but idling a drive briefly
+     after synchronous requests tends to increase throughput overall.
+<p>
+<li> There is a maximum period of time allowed for a process to
+     complete its requests.  If its I/O load is slow to complete (mostly
+     likely because it consists of random I/O patterns requiring a lot of
+     seeking by the drive), it will lose access to the drive before it has
+     transferred its full budget.  In this case, the process will be
+     charged for the full budget anyway to reflect its overall effect on
+     the drive's I/O throughput.
+</ul>
+<p>
+There is still the question of how each process's budget is assigned.  In
+its simplest form, the algorithm is this: each process's budget is set to
+the number of sectors it transferred the last time it was scheduled,
+subject to a systemwide maximum.  So processes that tend to do small
+transfers then stop for a while will get small budgets, while I/O-intensive
+processes will get larger budgets.  The processes with the smaller budgets,
+which often tend to be more sensitive to latency, will be scheduled
+more often, leading to a more responsive system.  The processes doing a lot
+of I/O may wait a bit longer, but they will get an extended time slice with
+the storage device, allowing the transfer of a large amount of data and,
+hopefully, good throughput.
+<p>
+<h4>Bring on the heuristics</h4>
+<p>
+Some experience with BFQ has evidently shown that the above-described
+algorithm can yield good results, but that there is room for improvement in
+a number of areas.  The current posting of the code has, in response, added
+a set of heuristics intended to push the behavior of the system in the
+desired direction.  These include:
+<p>
+<ul>
+<li> Newly started processes get a medium-sized budget and an increased
+     weight; this allows them to do a fair amount of I/O with minimal delay
+     from the outset.  The idea here is to improve application startup time
+     by giving new processes some extra I/O bandwidth to fault their code
+     into memory.  The increased weight decays linearly as the process
+     runs.
+<p>
+<li> BFQ's budget calculations, including the maximum allowed budget, are
+     dependent on an estimate of the underlying device's peak I/O rate.
+     The peak I/O rate can vary considerably, though, depending on where
+     the data 
+     is located on the disk and how much caching is going on inside the
+     drive.  A number of tweaks to the peak-rate calculator try to account
+     for these effects.  For example, the observed I/O rate for
+     processes that run out of time without exhausting their budgets is now
+     factored in, even though a timeout of this nature usually indicates
+     that the I/O pattern is random and the drive is not operating at its
+     peak rate.  The reasoning is that a timeout can also indicate that the
+     maximum budget value is too large.  There is also a low-pass filter
+     used to exclude especially high rate calculations, since those are
+     more likely to be measuring drive caching than actual I/O rates.
+<p>
+<li> The budget calculations themselves have been tweaked.  If a process
+     runs out of requests before exhausting its budget, the old response
+     was to lower the budget to the number of requests issued.  In the
+     current code, instead, the scheduler will look to see if any of the
+     process's I/O requests are still outstanding; if so, the rate will be
+     doubled on the theory that more requests will be forthcoming
+     when those outstanding requests complete.  In the case of a timeout,
+     the budget is, once again, doubled; this tweak is meant to help
+     processes working from slow parts of a drive and to cause processes
+     with truly random I/O patterns to be serviced less frequently.
+     Finally, if a process
+     still has requests outstanding after using its entire budget, it's
+     likely to be an I/O-intensive process; in this case the budget is
+     quadrupled. 
+<p>
+<li> Write operations are more costly than reads because disk drives
+     tend to cache the data and signal completion immediately; the actual
+     write to media is done at some later time.  That can cause starvation
+     of read requests later on.  BFQ tries to account for this cost by
+     counting writes more heavily against the budget; indeed, one write is
+     charged like ten reads.
+<p>
+<li> On drives that can queue multiple commands internally, idling (as
+     described above) can cause the internal queue to empty out, reducing
+     throughput.  So BFQ will disable idling on solid-state devices with
+     command queuing.  Idling will also be disabled on rotational devices,
+     but only when servicing processes with random I/O patterns.
+<p>
+<li> When multiple processes are operating on the same portion of the disk,
+     it can be better to keep their queues together rather than servicing
+     them separately.  Evidently QEMU, which divides I/O among a number of
+     worker threads, is a good example of this type of workload.  BFQ
+     includes an algorithm called "early queue merge" that attempts to
+     detect such processes and join their queues together.
+<p>
+<li> BFQ attempts to detect "soft realtime" applications — media players,
+     for example — and boost their weight to help ensure that they
+     experience low latencies.  This detection works by looking for a
+     pattern of issuing a set of I/O requests, then going idle (from a disk
+     I/O point of view) for a period of time.  Processes that exhibit that
+     pattern will have their weight increased.
+</ul>
+<p>
+The list of heuristics is longer than this, but one should get the idea:
+tuning the I/O patterns of a system to optimize for a wide range of
+workloads is a complex task.  From the results posted by BFQ developer
+Paolo Valente, it seems that a fair amount of success has been achieved.
+The task of getting this code into the mainline may be just a little bit
+harder, though.
+<p>
+<h4>The path toward merging</h4>
+<p>
+If BFQ does have a slow path into the mainline, it will not be
+because the kernel developers dislike it; indeed, almost all
+of the comments have been quite positive.  The results speak for
+themselves, but there was also a lot of happiness about how the scheduler
+has been studied and all of the heuristics have been extensively described
+and tested.  The CFQ I/O scheduler also contains a lot of heuristics, but
+few people understand what they are or how they work.  BFQ appears to be a
+cleaner and much better documented alternative.
+<p>
+What the kernel developers do not want to see, though, is the merging of
+another complex I/O scheduler that tries to fill the same niche as CFQ.
+Instead, they would like to see a set of patches that evolves CFQ into BFQ,
+leaving the kernel with a single, improved I/O scheduler.  As Tejun Heo <a
+href="/Articles/601808/">put it</a>:
+<p>
+<div class="BigQuote">
+	Well, it's all about how to actually route the changes and in
+	general whenever avoidable we try to avoid whole-sale code
+	replacement especially when most of the structural code is similar
+	like in this case.  Gradually evolving cfq to bfq is likely to take
+	more work but I'm very positive that it'd definitely be a lot
+	easier to merge the changes that way and people involved, including
+	the developers and reviewers, would acquire a lot clearer picture
+	of what's going on in the process.
+</div>
+<p>
+Changing CFQ in an evolutionary way would also help when the inevitable
+performance regressions turn up.  Finding the source of regressions in BFQ
+could be challenging; bisecting a series of changes to CFQ would, instead,
+point directly to the offending change.
+<p>
+The BFQ scheduler has been around for a while, and has seen a fair amount
+of use.  Distributions like Sabayon and OpenMandriva ship it, as does
+CyanogenMod.  It seems to be a well-proven technology.  All that's needed
+is some time put into packaging it properly for inclusion into the
+mainline.  Once 
+that has been done, more extensive performance testing can be done.  After
+any issues found there are resolved, this scheduler could replace CFQ (or,
+more properly, become the future CFQ) in the kernel relatively quickly.
+<p>
+(See <a
+href="http://www.algogroup.unimo.it/people/paolo/disk_sched/bf1-v1-suite-results.pdf">this
+paper [PDF]</a> for a lot more information on how BFQ works).<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Block_layer-IO_scheduling">Block layer/I/O scheduling</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Elevator">Elevator</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#IO_scheduler">I/O scheduler</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/601799/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor602247"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Tangential question</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 12, 2014 22:29 UTC (Thu)
+                               by <b>Max.Hyre</b> (subscriber, #1054)
+                              [<a href="/Articles/602247/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      &nbsp;&nbsp;&nbsp;If modern disk drives routinely lie about write completion, do they provide any way to ask for a ``really, truly'' complete signal?  If not, how can we tell when it's safe to remove power after shutdown?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/602247/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor602254"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Tangential question</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 12, 2014 23:24 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/602254/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+send a cache flush and wait for it to finish.<br>
+<p>
+or run the disks with write caching disabled (and hope that it's not one of the drives that lie about complying with that command)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/602254/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor602267"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Tangential question</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 13, 2014 2:58 UTC (Fri)
+                               by <b>magila</b> (guest, #49627)
+                              [<a href="/Articles/602267/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In fact since all modern hard drives support command queuing there is little reason to run them with write cache enabled these days. It's unlikely you'll notice the difference in performance, especially for typical desktop workloads.<br>
+<p>
+I'm only familiar with the spinning rust side of things though. For SSDs it probably makes a bigger difference since they have much higher IOP throughput.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/602267/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor602887"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Tangential question</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2014 15:10 UTC (Thu)
+                               by <b>quanstro</b> (guest, #77996)
+                              [<a href="/Articles/602887/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+modern sata drives also have 64M of ram, but only 32 outstanding queued commands.  i doubt on sata drives, one can get full write efficiency without also write caching.  sas firmware is a different story.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/602887/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor602892"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Tangential question</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2014 16:26 UTC (Thu)
+                               by <b>magila</b> (guest, #49627)
+                              [<a href="/Articles/602892/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Performance improvements diminish rapidly at queue depths beyond 32. This is especially true for desktop workloads which tend to be mostly sequential. For random access increased queue depth is all about improving rotational priority optimization (RPO). With 32 outstanding commands there's not much room for improvement since you're already down to only burning an average of 1/32 of a revolution per operation.<br>
+<p>
+Also, the size of the DRAM makes less difference than you might think. Regardless of how much DRAM is available, consumer SATA drives typically only support queuing up to 128 read/write operations. Big DRAMs are more about read caching than write.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/602892/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor602268"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Throwing the baby without the bath water</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 13, 2014 2:46 UTC (Fri)
+                               by <b>ras</b> (subscriber, #33059)
+                              [<a href="/Articles/602268/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Seems one of the reasons they like BFQ is the documentation.<br>
+<p>
+I'm sure someone will do a good job of migrating the BFQ code to CFQ, and maybe improve it in the process.  But a kernel developer taking the trouble to ensure that excellent documentation reflects the re-factored code?  Seems unlikely.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/602268/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor603585"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lala dream land?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 26, 2014 12:46 UTC (Thu)
+                               by <b>dakas</b> (guest, #88146)
+                              [<a href="/Articles/603585/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+The results speak for themselves, but there was also a lot of happiness about how the scheduler has been studied and all of the heuristics have been extensively described and tested. The CFQ I/O scheduler also contains a lot of heuristics, but few people understand what they are or how they work. BFQ appears to be a cleaner and much better documented alternative.
+</blockquote>
+which is stated as the reason people like it.
+<blockquote>
+Instead, they would like to see a set of patches that evolves CFQ into BFQ, leaving the kernel with a single, improved I/O scheduler.</blockquote>
+is stated as the kernel developers' idea of moving forward.
+<p/>
+It doesn't work that way.  You can't "evolve" badly documented and badly studied code into well-documented and well-studied code after the fact.  You would have to start with documenting and studying the current code first, and documenting and studying the effects of every step of "evolution" to have this actually make sense.
+<p/>
+But if the main advantage of the new code is that it is designed and studied more cleanly, documenting and studying the old code and every change will be harder than coming up with the new code and its documentation was.
+<p/>
+And since the "evolutionary" steps will be retrofitted, their "meaning" is an artificial construct, and making sure that each of those steps individually constitutes a net improvement will be meaningless with regard to its importance in the end product.
+<p/>
+It's like trying to "evolve" a current-day reptile into a current-day mammal.  Constructing a monotonic sequence of meaningful improvements leading to the end product will not be feasible.
+<p/>
+And it defeats the point of starting from scratch with clear and justifiable design goals and processes.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/603585/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor603629"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lala dream land?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 26, 2014 16:53 UTC (Thu)
+                               by <b>roblucid</b> (guest, #48964)
+                              [<a href="/Articles/603629/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Good point.  I thought when I first read it, I thought that BF stood for something else, which reminded me of past CPU scheduler controversies... so I wondered if BFQ was perhaps a strategy, a competing scheduler designed not really with expectation of inclusion but to inspire another "Silver Bullet" implementation.<br>
+<p>
+To me it seems to be quadratically more work and harder to mutate poorly understood code, step by step without breakage into the new implementation, than to allow competing implementations for a while allowing CFQ I/O advocates to produce documentation and cleanup without regressions until there's a clear winner.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/603629/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor603895"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lala dream land?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 30, 2014 0:35 UTC (Mon)
+                               by <b>morganf</b> (guest, #97672)
+                              [<a href="/Articles/603895/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Jens Axboe is being unreasonable by refusing to allow an additional I/O scheduler into the kernel. It is not like we are talking about untested code here. BFQ has been tested and optimized for years.<br>
+<p>
+And BFQ is nothing like CFQ. It makes no sense to force BFQ to morph CFQ into BFQ with a series of patches. That is like saying that there is not enough room in the kernel for both ext4 and btrfs, so btrfs will have to replace ext4 through a series of patches to ext4.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/603895/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor605844"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lala dream land?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 17, 2014 20:38 UTC (Thu)
+                               by <b>blujay</b> (guest, #39961)
+                              [<a href="/Articles/605844/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree completely. Isn't this the whole point of having a hot-swappable I/O scheduler subsystem?  I've been waiting for BFQ to go mainline for years while watching desktop I/O performance decrease steadily, especially regarding latency, which is what BFQ fixes.<br>
+<p>
+Regressions?  That's what the swappable system lets you fix!  If you find a bad regression, type a one line command and go back to CFQ!  No harm done!<br>
+<p>
+Instead, they want to gradually break both CFQ and BFQ at the same time, resulting in a weird hybrid that is neither?  All because having another hot-swappable scheduler makes someone uncomfortable?<br>
+<p>
+And in the process, they dump months of extra work on Mr. Valente and his helpers, who have been laboring on BFQ for many years. I read the entire thread on GMANE, and he demonstrates extraordinary patience and humility in the face of what would seem disappointing and rude to many people. <br>
+<p>
+This is nearly looking a gift horse in the mouth. I was hoping LWN would cover this, but this article misses a huge part of the story.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/605844/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor611602"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lala dream land?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2014 15:26 UTC (Thu)
+                               by <b>bgm0</b> (guest, #98829)
+                              [<a href="/Articles/611602/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hi,<br>
+<p>
+Well after the excellent summary in the LKML 30/May thread of the reasons why BFQ do what it does like:<br>
+<p>
+"I think that Tejun has already highlighted the key points and provided many details. To contribute to answer your questions about the reasons why bfq outperforms cfq, here is a summary of the most relevant underlying facts:<br>
+<p>
+1) cfq is based on a round-robin scheme, in which an unlucky queue that should be served immediately may happen instead to wait for all the other busy queues before being served. In this respect, combining round robin with virtual-time-based improvements is likely to lead to not very clear solutions, and probably to sub-optimal results with respect to just using an optimal scheduler with provable deterministic guarantees (as the internal scheduler of bfq).<br>
+<p>
+2) To provide a queue with a higher fraction of the throughput, a round-robin scheduler serves the queue for a longer time slice. Increasing time slices further increases per-request latencies. The problem may be mitigated by using preemption, but the result is a combination of a basic algorithm and a ‘corrective’ heuristic. This is again a more convoluted, and likely less accurate, solution than using directly an optimal algorithm with provable guarantees.<br>
+<p>
+3) In bfq, budgets play a similar role as time slices in cfq, i.e., once a queue has been granted access to the device, the queue is served, in the simplest case, until it finishes its budget. But, under bfq, the fraction of the throughput received by a queue is *independent* of the budget assigned to the queue. I agree that this may seem counterintuitive in the first place, especially if one is accustomed to thinking a la round-robin. Differently from a round-robin algorithm, the internal scheduler of bfq controls throughput distribution by controlling the frequency at which queues are served. The resulting degree of freedom with respect to budget sizes has the following two main advantages:<br>
+3.a) bfq can choose for each queue the budget that best fits the requirements or characteristics of the queue. For example, queues corresponding to time-sensitive applications are assigned small budgets, which guarantees that they are served quickly. On the opposite side, queues associated to I/O-bound processes performing mostly sequential I/O are assigned large budgets, which helps boost the throughput.<br>
+3.b) bfq does not need to assign large budgets to queues to provide them with large fractions of the throughput; hence bfq does not need to deteriorate per-request latencies to guarantee a differentiated throughput distribution.<br>
+<p>
+3) The internal scheduler of bfq guarantees that a queue that needs to be served quickly may wait, unjustly, for the service of at most one queue. More formally, bfq guarantees that each budget is completed with the smallest possible delay, for a budget-by-budget scheduler, with respect to an ideal, perfectly fair scheduler (i.e., an ideal scheduler that serves all busy queues at the same, providing each with a fraction of the throughput proportional to its weight).<br>
+<p>
+4) Assigning temporarily a large fraction of the throughput is the main mechanism through which bfq provides interactive and soft real-time applications with a low latency. Thanks to fact 3.b, bfq achieves this goal without increasing per-request latencies. As for how applications are deemed as interactive or soft real-time, I have tried to describe both detection heuristics in patches 06 and 07.<br>
+<p>
+Finally, as for adding to cfq the heuristics I have added to bfq, I think that this would probably improve application latencies also with cfq. But, because of the above facts, the result would unavoidably be worse than with bfq."<br>
+<p>
+There is really just one reasonable answer put BFQ and remove CFQ because in an effort perspective future fixes in BFQ will be easier than try to fix and understand CFQ in light of the BFQ analysis.  So why this is not merged in mainline?  <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/611602/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor611644"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lala dream land?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2014 18:34 UTC (Thu)
+                               by <b>morganf</b> (guest, #97672)
+                              [<a href="/Articles/611644/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You seem to be linking the removal of CFQ with the addition of BFQ. I do not see why they need to be linked.<br>
+<p>
+I think the reasonable thing to do is to add BFQ as an additional I/O scheduler, just as it is. The code has been tested and optimized for years now.<br>
+<p>
+If, at some point in the future, the kernel developers decide that CFQ is obsolete, then it can be removed at that time. But that decision depends on a number of factors, not just on BFQ. And there is no reason that the decision must be made at the same time that BFQ is added to the kernel.<br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/611644/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,842 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Fighting Spectre with cache flushes [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/768418/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/768153/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/768418/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Fighting Spectre with cache flushes</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 15, 2018</br>
+           </div>
+One of the more difficult aspects of the Spectre hardware vulnerability is
+finding all of the locations in the code that might be exploitable.  There
+are many locations that look vulnerable that aren't, and others that are
+exploitable without being obvious.  It has long been clear that finding all
+of the exploitable spots is a long-term task, and keeping new ones from
+being introduced will not be easy.  But there may be a simple technique that
+can block a large subset of the possible exploits with a minimal cost.
+<p>
+Speculative-execution vulnerabilities are only exploitable if they leave a
+sign somewhere else in the system.  As a general rule, that "somewhere
+else" is the CPU's memory cache.  Speculative execution can be used to load
+data into the cache (or not) depending on the value of the data the
+attacker is trying to exfiltrate; timing attacks can then be employed to
+query the state of the cache and complete the attack.  This side channel is a
+necessary part of any speculative-execution exploit.
+
+<p>
+It has thus been clear from the beginning that one way of blocking these
+attacks is to flush the memory caches at well-chosen times, clearing out
+the exfiltrated information before the attacker can get to it.  That is,
+unfortunately, an
+expensive thing to do.  Flushing the cache after every system call would
+likely block a wide range of speculative attacks, but it would also slow
+the system to the point that users would be looking for ways to turn the
+mechanism off.  Security is all-important — except when you have to get
+some work done.
+<p>
+Kristen Carlson Accardi recently posted <a
+href="/ml/linux-kernel/20181011185458.10186-1-kristen@linux.intel.com/">a
+patch</a> that is based on an interesting observation.  Attacks using
+speculative execution involve convincing the processor
+to speculate down a path that non-speculative execution will not follow.
+For example, a kernel function may contain a bounds check that will prevent the
+code from accessing beyond the end of an array, causing an error to be
+returned instead.  An attack using the Spectre vulnerability will bypass
+that check speculatively, accessing data that the code was specifically
+(and correctly) written not to access.
+<p>
+In other words, the attack is doing something speculatively that, when the
+speculation is unwound, results in an error return to the calling program —
+but, by then, the damage is done.  The error return is a clue that
+there maybe something inappropriate going on.  So Accardi's patch will, in
+the case of certain error returns from system calls, flush the L1 processor
+cache before returning to user space.  In particular, the core of the
+change looks like this:
+<p>
+<pre>
+    __visible inline void l1_cache_flush(struct pt_regs *regs)
+    {
+	if (IS_ENABLED(CONFIG_SYSCALL_FLUSH) &amp;&amp;
+	    static_cpu_has(X86_FEATURE_FLUSH_L1D)) {
+	    if (regs-&gt;ax == 0 || regs-&gt;ax == -EAGAIN ||
+		regs-&gt;ax == -EEXIST || regs-&gt;ax == -ENOENT ||
+		regs-&gt;ax == -EXDEV || regs-&gt;ax == -ETIMEDOUT ||
+		regs-&gt;ax == -ENOTCONN || regs-&gt;ax == -EINPROGRESS)
+			return;
+
+	    wrmsrl(MSR_IA32_FLUSH_CMD, L1D_FLUSH);
+	}
+    }
+</pre>
+<p>
+
+The code  exempts some of the most common errors from the cache-flush
+policy, which makes sense.  Errors like <tt>EAGAIN</tt> and <tt>ENOENT</tt>
+are common in normal program execution but are not the sort of errors that
+are likely to be generated by speculative attacks; one would expect
+an error like <tt>EINVAL</tt> in such cases.  So exempting those errors
+should significantly reduce the cost of this mitigation without
+significantly reducing the protection that it provides.
+<p>
+(Of course, the code as written above doesn't quite work right, as was <a
+href="/ml/linux-kernel/alpine.DEB.2.21.1810120030530.1457@nanos.tec.linutronix.de/">pointed
+out</a> by Thomas Gleixner, but the fix is easy and the posted patch shows
+the desired result.)
+<p>
+Alan Cox <a
+href="/ml/linux-kernel/20181012152515.1d816906@alans-desktop/">argued
+for</a> this patch, saying:
+<p>
+<div class="BigQuote">
+	The current process of trying to find them all with smatch and the
+	like is a game of whack-a-mole that will go on for a long long
+	time. In the meantime (and until the tools get better) it's nice to
+	have an option that takes a totally non-hot path (the fast path
+	change is a single test for &gt;= 0) and provides additional defence
+	in depth.
+</div>
+<p>
+Andy Lutomirski <a
+href="/ml/linux-kernel/77F59E25-5244-4CBC-A3CB-DCF863803CD2@amacapital.net/">is
+not convinced</a>, though.  He argued that there are a number of possible
+ways around this protection.  An attacker running on a hyperthreaded
+sibling could attempt to get the data out of the L1 cache between the
+speculative exploit and the cache flush, though Cox said that the time
+window available would be difficult to hit.  Fancier techniques, such as
+loading the cache lines of interest onto a different CPU and watching to
+see when they are "stolen" by the CPU running the attack could be
+attempted.  Or perhaps the data of interest is still in the L2 cache and
+could be probed for there.  In the end, <a
+href="/ml/linux-kernel/CALCETrWTHtqdQNQmk9taMRxOOEE8XanibEbP73AQNvNKJZjrEg@mail.gmail.com/">he
+said</a>:
+<p>
+<div class="BigQuote">
+	Adding ~1600 cycles plus the slowdown due to the fact that the
+	cache got flushed to a code path that we hope isn't hot to mitigate
+	one particular means of exploiting potential bugs seems a bit
+	dubious to me.
+</div>
+<p>
+Answering Lutomirski's criticisms is probably necessary to get this patch
+set merged.  Doing so would require providing some numbers for what the
+overhead of this change really is; Cox <a
+href="/ml/linux-kernel/20181011212504.012c3ece@alans-desktop/">claimed</a>
+that it is "<q>pretty much zero</q>" but no hard numbers have been
+posted.  The other useful piece would be to show some current exploits that
+would be blocked by this change.
+
+If that information can be provided, though (and the bug in the patch
+fixed), flushing the L1 cache could yet prove to be a relatively cheap and
+effective way to block Spectre exploits that have not yet been fixed by
+more direct means.  As a way of hardening the system overall, it seems
+worthy of consideration.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Meltdown_and_Spectre">Security/Meltdown and Spectre</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Meltdown_and_Spectre">Meltdown and Spectre</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/768418/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor768428"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 6:46 UTC (Tue)
+                               by <b>blackwood</b> (guest, #44174)
+                              [<a href="/Articles/768428/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Instead of a global whitelist for all syscalls/ioctls, why not a special errno flag to indicate an expected failure? Expected here meaning that it's expected to hit this as part of normal uapi usage.<br>
+<p>
+We use EINVAL in drm to iteratively discover an optimal configuration in the atomic display api. But it's only one specific source of EINVAL, all others should still be treated as possible exploits. So anything at the global level, or even just at the ioctl level, isn't a fine-grained enough filter. And I suspect there's lots of other places.<br>
+<p>
+The flag would also serve as nice documentation for the fast-path error case.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768428/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor768429"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 7:12 UTC (Tue)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/768429/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because going through all kernel entry points (syscalls, ioctls, etc) and marking "expected failures" would defeat the purpose of catching the vast majority of cases in one place with one cheap test.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768429/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor768432"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 8:07 UTC (Tue)
+                               by <b>lkundrak</b> (subscriber, #43452)
+                              [<a href="/Articles/768432/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You wouldn't have to walk through all of them, merely the ones where the expected error would need to be whitelisted in order to avoid a performance hit.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768432/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor768438"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 10:38 UTC (Tue)
+                               by <b>blackwood</b> (guest, #44174)
+                              [<a href="/Articles/768438/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, that's what I had in mind. E.g. for EEXISTS I suspect the only case we really care about for performance is the dentry cache hit fastpath, and nothing else. That would greatly reduce the amount of code you have to audit for spectre hardening even more, much better than what the current patch already achieves.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768438/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor768430"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 7:13 UTC (Tue)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/768430/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This seems like an absolutely brilliant idea; simple in hindsight, elegant, effective, and likely to catch the vast majority of issues.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768430/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor768431"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 7:44 UTC (Tue)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/768431/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess the same should be added to netlink, and I'm missing -ERANGE in the list?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768431/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor769103"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2018 7:04 UTC (Mon)
+                               by <b>cpitrat</b> (subscriber, #116459)
+                              [<a href="/Articles/769103/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You mean you would want to flush the cache for -ERANGE right ? The mentioned errors are the ones for which the cache is NOT flushed, so that's OK.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/769103/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor769118"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2018 13:00 UTC (Mon)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/769118/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oh, right, that's the negative list, so yeah ... I guess I wasn't paying attention.<br>
+<p>
+Regarding netlink: "syscall" exit point is different there (it's a message reporting the error, not the syscall itself), so similar code would have to be added there<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/769118/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor768435"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Instead of flushing, return on a different CPU?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 8:45 UTC (Tue)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/768435/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On multi-CPU systems (where the CPUs don't share a level 1 cache, that is, they are not just hyperthreads on the same core) you could kick the calling process off the current CPU when it hits a system call error, and let it continue executing on a different CPU at least for a short while.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768435/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor769104"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Instead of flushing, return on a different CPU?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2018 7:05 UTC (Mon)
+                               by <b>cpitrat</b> (subscriber, #116459)
+                              [<a href="/Articles/769104/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Which would be worse in terms of performances as on top of impacting this process, you would potentially kick another one (on the destination core)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/769104/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor768434"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 8:46 UTC (Tue)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/768434/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Lutomirski is probably right that flushing the L1 is not enough; extracting information from the L2 or L3 may take longer because virtual-to-physical mapping distributes the accesses over more potential places, but it's probably still possible.
+
+<p>If the non-whitelisted error returns are as rare as Alan Cox suggests, flushing the L2 and the L3 should not impose a significant performance penalty, either.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768434/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor768437"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 10:19 UTC (Tue)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/768437/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think it's the nature of Spectre and similar hardware bugs that you can never defend against them completely.  Making the attacker's life ten times harder seems like a very worthwhile improvement.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768437/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor768439"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 11:50 UTC (Tue)
+                               by <b>nhaehnle</b> (subscriber, #114772)
+                              [<a href="/Articles/768439/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Higher-level caches are shared, so flushing them would affect other threads as well. That'd be a rather big performance issue.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768439/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor768498"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 20:11 UTC (Tue)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/768498/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+L2 and L3 flushes are (I think) a per-package thing, not a per-core thing.  WBINVD in particular is *incredibly* expensive.  Letting an unprivileged program trigger WBINVD would be a major DoS problem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768498/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor768549"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 17, 2018 8:30 UTC (Wed)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/768549/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      L2 is per-core on mainstream Intel and AMD CPUs.  L3 is per-package.  Overall, with 20-30GB/s of memory bandwidth and 2-16MB L3 cache, the flush costs on the order of 1ms for refilling the L3; I doubt that the WBINVD itself makes that much worse.  But if there is &lt;1 such error per second, the performance impact will only be &lt;0.1%.
+
+<p>Concerning DoS attacks, unprivileged programs can thrash the caches anyway (with ordinary memory accesses).  Is it easier for a remote attacker to trigger such OS error returns than to induce the attacked program to perform thrashing memory accesses?  It could be.
+
+<p>Another, cheaper, thing in the same vein that could be done is to CLFLUSH(OPT) the speculatively accessed memory.  Problems: This would need compiler support to make it generally applicable with little programmer effort; CLFLUSH reports page faults, so probably has to be protected from that (how?); it would open a side channel that allows determining which cache lines in one process conflict with which cache lines in another process (can attackers do something with that that they cannot do now?).
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768549/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor768559"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 17, 2018 8:59 UTC (Wed)
+                               by <b>matthias</b> (subscriber, #94967)
+                              [<a href="/Articles/768559/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The cost for refilling L3 will be higher. The 1ms is calculated on the assumption that the cache is read as one piece. However, the many cache misses due to the cold cache will stall the CPU and prevent it from using the full memory bandwidth.<br>
+<p>
+Triggering this kind of error is trivial, while the cache replacement strategies of the CPU should take care of not throwing away heavily used content in the cache. Also trashing the cache is very slow, as by the nature of trashing every memory access is a cache miss.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768559/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor768441"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">TLB</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 12:05 UTC (Tue)
+                               by <b>geert</b> (subscriber, #98403)
+                              [<a href="/Articles/768441/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That "somewhere else" is not just the CPU's memory cache, but also other caches, like the TLB.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768441/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor768442"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 12:28 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/768442/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think there's a real risk this will hurt performance in unexpected ways. Two examples I know of off the top of my head:<br>
+<p>
+* Some applications close all open file descriptors before they exec a subprocess. There are various ways to do this but I've seen code that uses getrlimit() to get the maximum FD number and then simply calls close() on every possible FD value up to that limit. (Maybe they don't want to depend on /proc being mounted.) That could be tens of thousands or maybe even a million close() calls returning EBADF. I guess this patch would make each of those significantly more expensive.<br>
+<p>
+* Some applications want to probe their address space to see if memory is mapped at an address. You can do this using various syscalls that return ENOMEM or EFAULT if the memory is not mapped ... maybe faster and definitely more conveniently than using a signal handler. I guess those operations would get significantly slower with this patch.<br>
+<p>
+I don't think it's safe to assume that a particular error path is not a hot path for any application.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768442/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor768452"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 14:10 UTC (Tue)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/768452/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I imagine that particular calls like close() could be whitelisted to say that they don't need the cache flushing -- after someone has checked they are not vulnerable to known speculation attacks.  Doing it with a whitelist is a safer approach than playing whack-a-mole trying to find all the cases where there might be a vulnerability.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768452/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor768505"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 21:48 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/768505/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How do you develop and maintain such a whitelist? "Make it slow and wait for users to figure what went wrong and file bug reports" is not ideal.<br>
+<p>
+<font class="QuotedText">&gt; Doing it with a whitelist is a safer approach than playing whack-a-mole trying to find all the cases where there might be a vulnerability.</font><br>
+<p>
+Maybe so if this approach was a comprehensive bulletproof fix to a defined class of Spectre vulnerabilities. But it's really just a heuristic to make exploitation harder in some set of cases that aren't easily characterized.<br>
+<p>
+Adding patches to the kernel to achieve not-very-well-understood security benefits, in exchange for not-very-well-understood performance costs, should make people nervous.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768505/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor768496"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fighting Spectre with cache flushes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 19:19 UTC (Tue)
+                               by <b>xorbe</b> (guest, #3165)
+                              [<a href="/Articles/768496/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree, the cost is "pretty much zero" until someone unexpectedly trips over it, then blames Linux as being dog slow compared to Windows.  Seems like a bad strategy since the effects can't concretely quantified wrt other changes down the line.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768496/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor768445"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Flush+Flush</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 12:56 UTC (Tue)
+                               by <b>azilian</b> (guest, #47340)
+                              [<a href="/Articles/768445/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It seams to me, that such flushes, may actually help if we are using flush + flush (<a href="https://gruss.cc/files/flushflush.pdf">https://gruss.cc/files/flushflush.pdf</a>) attack.<br>
+And as it was stated above, hyperthreads are still a real problem. On busy systems it is not so hard to run your code in the same time window, when your first thread is working.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768445/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor768448"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">rowhammer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 13:53 UTC (Tue)
+                               by <b>abatters</b> (<b>&#x272D; supporter &#x272D;</b>, #6932)
+                              [<a href="/Articles/768448/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Rowhammer required cache flushes, and the mitigation was to disallow cache flushes from certain environments.  Could this be used to make rowhammer exploits possible again?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768448/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

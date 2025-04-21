@@ -1,0 +1,496 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Per-vector software-interrupt masking [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/779738/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/779826/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/779738/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Per-vector software-interrupt masking</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 15, 2019</br>
+           </div>
+Software interrupts (or "softirqs") are one of the oldest
+deferred-execution mechanisms in the kernel, and that age shows at times.
+Some developers have been occasionally heard to mutter about removing them, but
+softirqs are too deeply embedded into how the kernel works to be easily ripped
+out; most developers just leave them alone.  So the recent <a
+href="/ml/linux-kernel/20190212171423.8308-1-frederic@kernel.org/">per-vector
+softirq masking patch set</a> from Frederic Weisbecker is noteworthy as an
+exception to that rule.  Weisbecker is not getting rid of softirqs, but he
+is trying to reduce their impact and improve their latency.
+<p>
+Hardware interrupts are the means by which the hardware can gain a CPU's
+attention to signal the completion of an I/O operation or some other
+situation of interest.  When an interrupt is raised, the currently running
+code is (usually) preempted and an interrupt handler within the kernel is
+executed.  A cardinal rule for interrupt handlers is that they must execute
+quickly, since they interfere with the other work the CPU is meant to be
+doing.  That usually implies that an interrupt handler will do little more
+than acknowledge the interrupt to the hardware and set aside enough
+information to allow the real processing work to be done in a
+lower-priority mode.
+<p>
+The kernel offers a number of deferred-execution mechanisms through which
+that work can eventually be done.   In current kernels, the most commonly
+used of those is workqueues, which can be used to queue a function call to
+be run in kernel-thread context at some later time.  Another is tasklets,
+which execute at a higher priority than workqueues; adding new tasklet
+users tends to be mildly discouraged for reasons we'll get to.  Other
+kernel subsystems might use timers or dedicated kernel threads to get their
+deferred work done.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+<h4>Softirqs</h4>
+<p>
+
+Then, there are softirqs which, as their name would suggest, are a software
+construct; they are patterned after hardware interrupts, but hardware
+interrupts are enabled while software interrupts execute.  Softirqs have
+assigned numbers ("vectors"); "raising" a particular softirq will cause the
+handler function for the indicated vector to be called at a convenient time
+in the near future.  That "convenient time" is usually either at the end of
+hardware-interrupt processing or when a processor that has disabled softirq
+processing re-enables it.  Softirqs thus run outside of the CPU scheduler as a
+relatively high-priority activity.
+<p>
+In the 5.0-rc kernel, there are ten softirq vectors defined:
+<p>
+<ul class="spacylist">
+<li> <tt>HI_SOFTIRQ</tt> and <tt>TASKLET_SOFTIRQ</tt> are both for the
+     execution of tasklets; this is part of why tasklets are discouraged.
+     High-priority tasklets are run ahead of any other softirqs, while
+     normal-priority tasklets are run in the middle of the pack.
+<li> <tt>TIMER_SOFTIRQ</tt> is for the handling of timer events.
+     <tt>HRTIMER_SOFTIRQ</tt> is also defined; it was once used for
+     high-resolution timers, but that has not been the case since <a
+     href="https://git.kernel.org/linus/c6eb3f70d448">this change</a> was
+     made for the 4.2 release.
+<li> <tt>NET_TX_SOFTIRQ</tt> and <tt>NET_RX_SOFTIRQ</tt> are used for
+     network transmit and receive processing, respectively.
+<li> <tt>BLOCK_SOFTIRQ</tt> handles block I/O completion events; this
+     functionality was <a
+     href="https://git.kernel.org/linus/ff856bad67cb">moved to softirq</a>
+     mode for the 2.6.16 kernel in 2006.
+<li> <tt>IRQ_POLL_SOFTIRQ</tt> is used by the <a
+     href="https://elixir.bootlin.com/linux/v5.0-rc6/source/lib/irq_poll.c">irq_poll
+     mechanism</a>, which was <a
+     href="https://git.kernel.org/linus/511cbce2ff">generalized</a> from the
+     block interrupt-polling mechanism for the 4.5 release in 2015.  Its
+     predecessor, <tt>BLOCK_IOPOLL_SOFTIRQ</tt> was <a
+     href="https://git.kernel.org/linus/5e605b64a183">added</a> for the
+     2.6.32 release in 2009; no softirq vectors have been added since
+     then. 
+<li> <tt>SCHED_SOFTIRQ</tt> is used by the scheduler to perform
+     load-balancing and other scheduling tasks.
+<li> <tt>RCU_SOFTIRQ</tt> performs read-copy-update processing.  There was
+     <a href="https://git.kernel.org/linus/a26ac2455ffcf3">an attempt</a>
+     made by the late Shaohua Li in 2011 to move this processing to a
+     kernel thread, but performance regressions forced that change to be
+     reverted shortly thereafter.
+</ul>
+<p>
+Thomas Gleixner once <a href="/Articles/518993/">summarized</a> the
+software-interrupt mechanism as "<q>a conglomerate of mostly unrelated
+jobs, which run in the context of a randomly chosen victim w/o the ability
+to put any control on them</q>".
+For historical reasons that long predate Linux, software interrupts also
+sometimes go by the name "bottom halves" — they are the half of interrupt
+processing that is done outside of hardware interrupt mode.  For this
+reason, one will often see the term "BH" used to refer to software
+interrupts.
+<p>
+Since software interrupts execute at a high priority, they can create high
+levels of latency in the system if they are not carefully managed.  As
+little work as possible is done in softirq mode, but certain kinds of
+system workloads (high network traffic, for example) can still cause softirq
+processing to adversely impact the system as a whole.  The kernel will
+actually kick softirq handling out to a set of <tt>ksoftirqd</tt> kernel
+threads if it starts taking too much time, but there can be performance
+costs even if the total CPU time used by softirq processing is relatively
+low.
+<p>
+<h4>Softirq concurrency</h4>
+<p>
+Part of the problem, especially for latency-sensitive workloads, results
+from the fact that softirqs are another source of concurrency in the system
+that must be controlled.  Any work that might try to access data
+concurrently with a softirq handler must use some sort of mutual exclusion
+mechanism and, since softirqs are essentially interrupts, special care must
+be taken to avoid deadlocks.  If, for example, a kernel function acquires a
+spinlock, but is then interrupted by a softirq that tries to take the same
+lock, that softirq handler will wait forever — the sort of situation that
+latency-sensitive users tend to get especially irritable over.
+<p>
+To avoid such problems, the kernel provides a number of ways to prevent
+softirq handlers from running for a period of time.  For example, a call to
+<tt>spin_lock_bh()</tt> will acquire the indicated spinlock and also
+disable softirq processing for as long as the lock is held, preventing the
+deadlock scenario described above.  Any subsystem that uses software
+interrupts must take care to ensure that they are disabled in places where
+unwanted concurrency could occur.
+<p>
+Linux software interrupts have an interesting problem — interesting because
+it is seemingly obvious but has been there since the beginning.  The
+softirq vectors described above are all independent of each other, and
+their handlers are unlikely to interfere with each other.  Network transmit
+processing should not be bothered if the block softirq handler runs
+concurrently, for example.  So code that must protect against concurrent
+access from a 
+softirq handler need only disable the one handler that it might race with,
+but functions like <tt>spin_lock_bh()</tt> disable <i>all</i> softirq
+handling.  That can cause unrelated handlers to be delayed needlessly, once
+again leading to bad temper in the low-latency camp.
+<p>
+<h4>Per-vector masking</h4>
+<p>
+Weisbecker's answer to this is to allow individual softirq vectors to be
+disabled while the others remain enabled.  The <a
+href="/ml/linux-kernel/1539213137-13953-1-git-send-email-frederic@kernel.org/">first
+attempt</a>, posted in October 2018, changed the prototypes of functions
+like <tt>spin_lock_bh()</tt>, <tt>local_bh_disable()</tt>, and
+<tt>rcu_read_lock_bh()</tt> to contain a mask of the vectors to disable.
+There was just one little problem: there are a lot of callers to those
+functions in the kernel.  So the bottom line for that patch set was:
+<p>
+<pre>
+    945 files changed, 13857 insertions(+), 9767 deletions(-)
+</pre>
+<p>
+The kernel community has gotten good at merging large, invasive patch sets,
+but that one still pushed the limits a bit.  That is especially true given
+that almost all call sites still disabled all vectors; doing anything else
+requires careful auditing of every change.  The second time around,
+Weisbecker decided to take an easier approach and define new functions,
+leaving the old ones unchanged.  So this patch set introduces functions
+like:
+<p>
+<pre>
+    unsigned int spin_lock_bh_mask(spinlock_t *lock, unsigned int mask);
+    unsigned int local_bh_disable_mask(unsigned int mask);
+    /* ... */
+</pre>
+<p>
+After the call, only the softirq vectors indicated by the given
+<tt>mask</tt> will have been disabled; the rest can still be run if they
+were enabled before the call.
+The return value of these functions is the previous set of masked softirqs;
+it is needed when renabling softirqs to their previous state.
+<p>
+This patch set is rather less intrusive:
+<p>
+<pre>
+    36 files changed, 690 insertions(+), 281 deletions(-)
+</pre>
+<p>
+That is true even though it goes beyond the core changes to, for example,
+add support to the lockdep locking checker to ensure that the use of the
+vector masks is consistent.  One thing that has not yet been done is to
+allow one softirq handler to preempt another; that's on the list for future
+work.
+<p>
+No performance numbers have been provided, so it is not possible to know
+for sure that this work has achieved its goal of providing better latencies
+for specific softirq handlers.  Still, networking maintainer David Miller
+<a
+href="/ml/linux-kernel/20190212.102912.1498886718723769885.davem@davemloft.net/">indicated
+his approval</a>, saying: "<q>I really like this stuff, nice
+work</q>".  Linus Torvalds had some low-level comments that will need to be
+addressed in the next iteration of the patch set.  Some other important
+reviewers have yet to weigh in, so it would be too soon to say that this
+work is nearly ready.  But, in the absence of a complete removal of
+softirqs, there is clear value in not disabling them needlessly, so this
+change seems likely to vector itself into the mainline sooner or later.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Interrupts-Software">Interrupts/Software</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/779738/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor779961"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-vector software-interrupt masking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 15, 2019 21:31 UTC (Fri)
+                               by <b>pj</b> (subscriber, #4506)
+                              [<a href="/Articles/779961/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I feel like some kind of code analysis could determine what the mask _could_ or maybe _should_ be.  But maybe I'm too optimistic.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779961/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor779966"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-vector software-interrupt masking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 16, 2019 0:14 UTC (Sat)
+                               by <b>chantecode</b> (subscriber, #54535)
+                              [<a href="/Articles/779966/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sure, just rename a spin_lock_bh(lock) to spin_lock(lock) and lockdep should complain about which vector it<br>
+has seen the lock used on.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779966/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor780008"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-vector software-interrupt masking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 17, 2019 17:24 UTC (Sun)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/780008/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sounds cool but I suspect PJ was hoping for some kind of *static* analysis finding all instances without having to run the corresponding code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/780008/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor780017"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-vector software-interrupt masking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 18, 2019 2:43 UTC (Mon)
+                               by <b>chantecode</b> (subscriber, #54535)
+                              [<a href="/Articles/780017/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That wouldn't be easy to do. It could easily miss out some subtleties, callback mazes, things hidden behind macros. Careful reviews plus some help from runtime analysis with lockdep seem to me the most reliable approach. But you have a point: we may not be able to test all the code we need to convert. The coverage is huge.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/780017/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor779967"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-vector software-interrupt masking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 16, 2019 1:26 UTC (Sat)
+                               by <b>chantecode</b> (subscriber, #54535)
+                              [<a href="/Articles/779967/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Little correction: hrtimer softirq have been reintroduced since<br>
+"hrtimer: Implement support for softirq based hrtimers" 5da70160462e80b0ab8a6960cdd0cdd476907523<br>
+<p>
+We should remove the comment saying it's obsolete.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779967/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor779969"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-vector software-interrupt masking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 16, 2019 3:36 UTC (Sat)
+                               by <b>unixbhaskar</b> (guest, #44758)
+                              [<a href="/Articles/779969/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Cool !! looks promising and useful.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779969/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor779984"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-vector software-interrupt masking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 16, 2019 16:01 UTC (Sat)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/779984/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Bottom half" is an old term, and it had nothing to do with high-priority vs. low-priority interrupts.  Top half of (kernel/driver/networking/etc.) consists of the process-synchronous parts; bottom half is everything async.<br>
+<p>
+Hardware interrupts certainly belong in the latter.  So do software interrupts.  If anything, top half is *easier* to interrupt or preempt; the opposite of high-priority hwints.<br>
+<p>
+Linux originally had all bottom-half work done in hardware interrupt handlers.  Mechanism for doing bottom-half stuff outside of those had been added circa 0.98, when the first networking patchset went in.  Got labelled as "bh", without clear opposition to IRQ handlers...  Eventually, they've got renamed^Wreplaced with somewhat less sucky analogue called softirq.<br>
+<p>
+You'd probably have to ask Linus to find out what was the rationale for naming conventions, but I suspect that it was something along the lines of "mechanism for doing bottom-half stuff outside of hardware interrupts - those we already have a term for"...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779984/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2019, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>
