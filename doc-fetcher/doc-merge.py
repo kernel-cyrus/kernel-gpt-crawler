@@ -24,4 +24,4 @@ def merge_rst_files(src_dir, output_file):
     print(f"✅ 合并完成，输出文件: {output_file}")
 
 # 示例使用
-merge_rst_files('docs/Documentation', 'merged.rst')
+merge_rst_files('docs/Documentation', 'doc_merged.rst')
