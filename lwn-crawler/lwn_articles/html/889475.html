@@ -1,0 +1,985 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Indirect branch tracking for Intel CPUs [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/889475/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/889854/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/889475/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Indirect branch tracking for Intel CPUs</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 31, 2022</br>
+           </div>
+"Control-flow integrity" (CFI) is a set of technologies intended to prevent
+an attacker from redirecting a program's control flow and taking it over.
+One of the
+approaches taken by CFI is called "indirect branch tracking" (IBT); its
+purpose is to prevent an attacker from causing an indirect branch (a
+function call via a pointer variable, for example) to go to an unintended
+place.  IBT for Intel processors has been under development for some time;
+after an abrupt turn, support for protecting the kernel with IBT has been
+merged for the upcoming 5.18 release.
+<p>
+The kernel, like many C programs, makes extensive use of indirect branches.
+As a simple example, consider system calls; user space provides a number
+indicating which system call is required, and the kernel responds by looking
+up the appropriate function from a table (using that number) and calling
+that function via an indirect branch.  Function pointers abound in the
+kernel; among other things, 
+they are used to implement its vaguely object-oriented programming model.
+<p>
+If an attacker is able to somehow corrupt a variable that is used for
+indirect branches, they may be able to redirect the kernel's execution flow
+to an arbitrary location.  That could result in unintended function calls;
+on complex processors like x86, it is also possible to get interesting
+results by jumping into the middle of a multi-byte instruction.  Exploit
+techniques like <a
+href="https://en.wikipedia.org/wiki/Return-oriented_programming">return-oriented
+programming</a> and <a
+href="https://developer.arm.com/documentation/102433/0100/Jump-oriented-programming">jump-oriented
+programming</a> depend on this kind of redirection.
+<p>
+IBT is meant as a defense against jump-oriented programming; it works by
+trying to ensure that the target of every indirect branch is, in fact,
+intended to be reached that way.  There are a number of approaches to IBT,
+each with its own advantages and disadvantages.  For example, the kernel gained support
+for <a href="/Articles/856514/">a compiler-implemented IBT mechanism</a>
+during the 5.13 development cycle.  In this mode, the compiler routes every
+indirect branch through a "jump table", ensuring that the target is not only
+meant to be reached by indirect branches, but that the prototype of the
+called function matches what the caller is expecting.  This approach works,
+at the cost of a fair amount of compile-time and run-time overhead.
+<p>
+<h4>Intel's IBT</h4>
+<p>
+The Intel IBT approach is rather simpler, but it has the advantage of being
+supported by the hardware and, as a result, being faster.  If IBT is enabled, the CPU will
+ensure that every indirect branch lands on a special instruction
+(<tt>endbr32</tt> or <tt>endbr64</tt>), which executes as a no-op; if
+anything else is found, the 
+processor will raise a control-protection (<tt>#CP</tt>) exception.  Unlike
+the more complete scheme described above, IBT cannot ensure that the target
+of an indirect branch matches the caller's expectations, but it can ensure
+that the target was meant to be reached in this way.
+<p>
+Turning on a mechanism like this will only work if every possible target of
+an indirect branch begins with one of the <tt>endbr</tt> instructions.  For
+the most part, this task can be handled by the compiler; both GCC (as of
+GCC&nbsp;9) and Clang (as of version&nbsp;14) implement the
+<tt>-fcf-protection=branch</tt> option and will insert these instructions
+when it is present.  That doesn't help with all of the assembly code in the
+kernel, though.  So the bulk of the work (in terms of changesets) is
+devoted to adding <tt>endbr</tt> instructions wherever they seem to be
+needed.
+<p>
+One other small complication comes about when the kernel calls into
+somebody else's code, which may not have been built with IBT in mind.  The
+kernel does not call outside code often, but one big exception is the
+system's firmware, which must often be invoked to carry out specific
+functions.  To be safe, the kernel makes a point of turning off IBT around
+calls into firmware.  The current implementation also turns off IBT when
+giving control to user space.
+<p>
+The need to add <tt>endbr</tt> instructions to all indirect jump targets
+sets a potential trap for the future; developers may add assembly functions
+and forget that instruction.  If they do their testing without IBT enabled,
+the omission will not be noticed, and it may not pop up until some
+extremely inconvenient time after the faulty work has been merged.  To
+prevent this eventuality, the kernel's <tt>objtool</tt> utility has been
+enhanced to check all indirect branches and ensure that all targets are
+appropriately annotated.
+<p>
+With that checking in place, though, there's another step that can be
+taken: <tt>objtool</tt> can also make a list of all functions containing
+<tt>endbr</tt> instructions that can never be called via an indirect
+branch.  Those functions do not need that annotation, and the kernel would
+be a little more secure without them.  So the kernel build process takes
+that list from <tt>objtool</tt> and "seals" those functions by overwriting
+the <tt>endbr</tt> with a <tt>nop4</tt> instruction.  That reduces the
+number of targets an attacker can still choose from when IBT is enabled.
+<p>
+As Peter Zijlstra <a
+href="/ml/linux-kernel/YZyuPffZU5bOjzBQ@hirez.programming.kicks-ass.net/">pointed
+out</a>, there is another, perhaps surprising advantage to removing the
+unneeded <tt>endbr</tt> instructions.  The kernel limits the functions that
+are available to loadable modules, and proprietary modules are limited even
+further.  It is a common technique for proprietary modules to look up the
+non-exported
+functions they need in the kernel's symbol table, then call them via an
+indirect branch, thus bypassing the kernel's limitations.  But, with IBT
+enabled,  any function lacking an <tt>endbr</tt> instruction will no longer
+be callable in this way.
+<p>
+<h4>An indirect path to the mainline</h4>
+<p>
+The effort to get Intel IBT support into the Linux kernel has been ongoing for
+some time; the first patches implementing support (for user-space code
+rather than for the kernel) were <a
+href="/ml/linux-kernel/20180607143855.3681-1-yu-cheng.yu@intel.com/">posted
+by Yu-cheng Yu</a> in 2018.  This work then seemingly became one of those
+<a href="https://en.wikipedia.org/wiki/Flying_Dutchman">flying-Dutchman</a>
+patches that continually cross the mailing lists without ever managing to
+land in the mainline; <a
+href="/ml/linux-kernel/20210830182221.3535-1-yu-cheng.yu@intel.com/">version&nbsp;30</a>
+was posted in August 2021 and seemed no closer to merging.  A similar fate
+befell the user-space shadow-stack patches, 
+which were recently <a href="/Articles/885220/">taken over by Rick
+Edgecombe</a> after many previous revisions.
+<p>
+Late last year, Peter Zijlstra decided to create a separate Intel IBT
+implementation to protect the kernel itself; the first version was <a
+href="/ml/linux-kernel/20211122170301.764232470@infradead.org/">posted last
+November</a> after Zijlstra evidently "<q>hacked this up on Friday night
+/ Saturday morning</q>".  The work evolved quickly, and the <a
+href="/ml/linux-kernel/20220308153011.021123062@infradead.org/">fourth
+revision</a>, posted in early March, is the code that was merged for 5.18.
+<p>
+That is where things stand today.  IBT is supported, for kernel code only,
+in Intel processors starting with the <a
+href="https://en.wikipedia.org/wiki/Tiger_Lake">Tiger Lake</a> generation,
+which hit the market in late 2020.  It is not a perfect tool, but it will
+raise the bar for attackers on systems where it is present and enabled.
+Meanwhile, it is not clear when (or whether) user-space support will find its way
+into the kernel; many of the 30 revisions posted so far have received no
+comments at all.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Releases-5.18">Releases/5.18</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Control-flow_integrity">Security/Control-flow integrity</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/889475/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor889877"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 31, 2022 16:35 UTC (Thu)
+                               by <b>Hello71</b> (subscriber, #103412)
+                              [<a href="/Articles/889877/">Link</a>] (19 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; As Peter Zijlstra pointed out, there is another, perhaps surprising advantage to removing the unneeded endbr instructions. The kernel limits the functions that are available to loadable modules, and proprietary modules are limited even further. It is a common technique for proprietary modules to look up the non-exported functions they need in the kernel&#x27;s symbol table, then call them via an indirect branch, thus bypassing the kernel&#x27;s limitations. But, with IBT enabled, any function lacking an endbr instruction will no longer be callable in this way. </font><br>
+<p>
+Why can&#x27;t the crap module simply turn off IBT before calling the function (and hopefully turn it back on afterwards)?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/889877/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor889890"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 31, 2022 18:19 UTC (Thu)
+                               by <b>JoeBuck</b> (subscriber, #2330)
+                              [<a href="/Articles/889890/">Link</a>] (16 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Seems that would be a blatant DMCA violation in the US (distributing a mechanism to bypass copyright protection), though perhaps it would be considered against the spirit of free software for the kernel developers to enforce that?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/889890/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor889891"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 31, 2022 18:28 UTC (Thu)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/889891/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If that&#x27;s the case, then<br>
+<p>
+func = kallsym_lookup_name(&quot;unexported_function&quot;);<br>
+(*func)(args);<br>
+<p>
+would also be a DMCA violation already.<br>
+<p>
+The hypothesis was: IBT could to be used to technically prevent the illegal kallsym_lookup_name.<br>
+But can it prevent it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/889891/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor889897"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 31, 2022 20:25 UTC (Thu)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/889897/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think, kallsym_lookup_name itself is no longer exported. But you can work around that, too.<br>
+<p>
+There are legitimate reasons to call a non-exported kernel function from a module. E.g. when you create a module to install a ftrace-based wrapper around a kernel function with a security problem because you can&#x27;t immediately reboot into a fixed kernel for one reason or another and you are not prepared for live patching.<br>
+<p>
+We recently had to do that [1] and needed to work around a missing kallsym_lookup_name, which we did with register_kprobe.<br>
+<p>
+The attempt of the kernel to restrict modules reminds me of DRM. You don&#x27;t really succeed, bad guys work around anyway, but you make life harder for legitimate users.<br>
+<p>
+[1]: <a href="https://github.molgen.mpg.de/mariux64/fix-lpp/blob/main/fix-lpp/fix-lpp.c">https://github.molgen.mpg.de/mariux64/fix-lpp/blob/main/f...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/889897/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor890041"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2022 1:45 UTC (Sat)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/890041/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On philosophical grounds I also half-object to the indifference about what licence that code is under. There&#x27;s no love for fellow copyleft brethren who aren&#x27;t specifically GPL. (despite Torvalds&#x27; insistence on getting changes back being his real only aim)<br>
+<p>
+Half-object because there would be *some* maintenance burden to making changes for out of tree code. The kernel already has to periodically sync against other upstream projects whose code it uses.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890041/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor890471"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 6, 2022 16:34 UTC (Wed)
+                               by <b>immibis</b> (guest, #105511)
+                              [<a href="/Articles/890471/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+All derivative works of the kernel must be GPLv2 - that&#x27;s how the GPL works. AFAIK Linus&#x27;s opinion is that if you only use non-GPL-marked exported functions - functions you might expect to find in any kernel - then your module is not a derivative work of Linux in particular, but GPL exports are functions that are sufficiently entangled with Linux in particular that you can&#x27;t reasonably claim your driver is not derived from Linux.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890471/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor890470"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 6, 2022 16:32 UTC (Wed)
+                               by <b>immibis</b> (guest, #105511)
+                              [<a href="/Articles/890470/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Aren&#x27;t they already in violation of copyright by being non-GPL derivative works of the kernel?<br>
+<p>
+I believe common opinion is settled: exported functions form an arms-length public API, but if you go digging in deeply, you&#x27;re a derivative work. Of course, that has not been tested in court.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890470/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor890482"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 6, 2022 18:04 UTC (Wed)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/890482/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A program that references a function or variable from some other software is no more a &quot;derivative work&quot; of that external code than a research paper is a &quot;derivative work&quot; of all the other papers cited in its bibliography.<br>
+<p>
+From 17 U.S.C. § 101 &lt;<a href="http://www.copyright.gov/title17/92chap1.html#101">http://www.copyright.gov/title17/92chap1.html#101</a>&gt;:<br>
+<p>
+<font class="QuotedText">&gt; A “derivative work” is a work based upon one or more preexisting works, such as a translation, musical arrangement, dramatization, fictionalization, motion picture version, sound recording, art reproduction, abridgment, condensation, or any other form in which a work may be recast, transformed, or adapted. A work consisting of editorial revisions, annotations, elaborations, or other modifications, which, as a whole, represent an original work of authorship, is a “derivative work”.</font><br>
+<p>
+What all the examples have in common is that they actually incorporate the original work—not just a reference but the actual creative expression in some form or another—as part of the derivative work. Source code or dynamically linked object code which merely *references* some external API is not a &quot;recast, transformed, or adapted&quot; version of that other software in the form in which it is distributed and does not resemble any of the examples given here.<br>
+<p>
+I am not your lawyer, this is not legal advice, yada yada, but IMHO the idea that your original loadable kernel module should be treated as a derivative work of the kernel just because it *references* certain kernel APIs by name is completely without basis under any reasonable interpretation of US copyright law.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890482/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor890522"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 6, 2022 23:21 UTC (Wed)
+                               by <b>immibis</b> (guest, #105511)
+                              [<a href="/Articles/890522/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Cool, then dynamic linking does not create a derivative work and the GPL is pointless. Microsoft and Amazon are free to take away your software freedom as long as the open source components are in separate files. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890522/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor890525"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2022 0:28 UTC (Thu)
+                               by <b>sfeam</b> (subscriber, #2841)
+                              [<a href="/Articles/890525/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+&quot;dynamic linking does not create a derivative work&quot; - probably correct, but argued about endlessly.<br>
+<p>
+&quot;and the GPL is pointless&quot;  - Maybe you meant the LGPL?  In which case I agree with you; the LGPL is in essence identical to the GPL with the addition of a promise not to get into the above endless argument. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890525/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor890633"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2022 15:22 UTC (Thu)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/890633/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Question: Do the library header files contain a non-trivial amount of in-line code ...<br>
+<p>
+Cue endless bikeshedding about the meaning of &quot;non-trivial&quot; :-)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890633/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor890639"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2022 16:04 UTC (Thu)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/890639/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Do the library header files contain a non-trivial amount of in-line code ...</font><br>
+<p>
+a) Non-trivial code shouldn&#x27;t be inlined. b) This has no bearing on the question of &quot;GPL-only&quot; kernel symbols as inline code isn&#x27;t accessed through the symbol table. c) Inline code in headers files would have no effect on modules distributed in source form (including obfuscated source), as the source distribution doesn&#x27;t include those headers. d) If the inclusion of certain nontrivial inline code is required for the interoperability for a binary module distribution this could reasonably be argued to be fair use.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890639/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor890887"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2022 11:09 UTC (Mon)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/890887/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Dynamic linking is static after the linking has happened.<br>
+<p>
+Like there is a statically linked file on disk, there is a statically linked file in RAM.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890887/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor890950"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2022 14:04 UTC (Mon)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/890950/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><em>Dynamic linking is static after the linking has happened.</em></blockquote>
+<p>
+Yes, but the result isn't distributed to others, so copyright doesn't kick in. FWIW, the GPL explicitly says that, on your own machine, you get to do whatever you want with the code, which would presumably include dynamically linking stuff to it.
+</p>
+<p>
+IOW, I'm perfectly free to take my own copy of <em>Harry Potter</em> and replace all occurrences of “Albus Dumbledore” with “Alfred E. Newman”. As long as I don't distribute the result to anybody else, the fact that this has created a “derived work” of the original book is of concern to nobody except myself.
+</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890950/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor891003"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2022 4:20 UTC (Tue)
+                               by <b>calumapplepie</b> (guest, #143655)
+                              [<a href="/Articles/891003/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Actually, assuming you mean a physical book, it&#x27;s totally fine for you to take that edited version and sell it.  You own the book, after all: the author got her cut, and the publisher theirs.  Trademark law MIGHT get involved, but as far as copyright is concerned, since you aren&#x27;t diluting the market of the original, you&#x27;re golden.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/891003/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor890725"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2022 14:10 UTC (Fri)
+                               by <b>kronat</b> (subscriber, #117266)
+                              [<a href="/Articles/890725/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Microsoft and Amazon are free to take away your software freedom as long as the open source components are in separate files. </font><br>
+<p>
+s/separate files/in the cloud, and problem solved, without caring about linking.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890725/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor890728"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2022 14:29 UTC (Fri)
+                               by <b>immibis</b> (guest, #105511)
+                              [<a href="/Articles/890728/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That&#x27;s what the AGPL is for<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890728/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor890964"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2022 15:14 UTC (Mon)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/890964/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Cool, then dynamic linking does not create a derivative work and the GPL is pointless. Microsoft and Amazon are free to take away your software freedom as long as the open source components are in separate files. </font><br>
+<p>
+I think Microsoft would vastly prefer the opposite to be true, given that they could&#x27;ve sued Wine users out of existence for using their ABIs if it were.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/890964/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor889893"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Loadable kernel modules could be vetted</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 31, 2022 19:02 UTC (Thu)
+                               by <b>sdalley</b> (subscriber, #18550)
+                              [<a href="/Articles/889893/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe the kernel module loader could check for any such IBT-fiddling instruction opcodes before permitting the load?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/889893/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor889895"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Loadable kernel modules could be vetted</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 31, 2022 19:49 UTC (Thu)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/889895/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+While it&#x27;s at it, perhaps it could check for the HLT opcode on a taken path… =)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/889895/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor889940"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 1, 2022 4:02 UTC (Fri)
+                               by <b>milesrout</b> (subscriber, #126894)
+                              [<a href="/Articles/889940/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I often wonder how much faster my system would be if *all* of these layers upon layers of security mitigations were removed. Would it be 10% faster? 30% faster? All to protect against security issues that almost always come down to running untrusted code on my machine or something to do with web browsers. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/889940/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor889942"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 1, 2022 4:56 UTC (Fri)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/889942/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Good question. It looks like Make Linux Fast Again benchmarks find only 2% gain (10% maximum on some specific tests) and that you don&#x27;t perceive a difference during normal interactive usage outside of benchmarks. [1] [2] [...]<br>
+<p>
+[1]: <a href="https://wonky.computer/post/make-linux-fast-again/">https://wonky.computer/post/make-linux-fast-again/</a><br>
+[2]: <a href="https://www.linux-community.de/ausgaben/linuxuser/2019/08/schnell-oder-sicher/">https://www.linux-community.de/ausgaben/linuxuser/2019/08...</a> (german)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/889942/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor889948"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 1, 2022 7:35 UTC (Fri)
+                               by <b>Villemoes</b> (subscriber, #91911)
+                              [<a href="/Articles/889948/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; For example, the kernel gained support for a compiler-implemented IBT mechanism during the 5.13 development cycle. In this mode, the compiler routes every indirect branch through a &quot;jump table&quot;, ensuring that the target is not only meant to be reached by indirect branches, but that the prototype of the called function matches what the caller is expecting. This approach works, at the cost of a fair amount of compile-time and run-time overhead. </font><br>
+<p>
+That mechanism also proactively prevents attackers from gaining control over the machine by inducing NULL pointer derefs (and who knows what other malfunctions) in perfectly fine C code. If you consider enabling that, make sure none of the code included in your build relies on function pointer (in)equality testing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/889948/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor889958"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 1, 2022 9:46 UTC (Fri)
+                               by <b>andy_shev</b> (subscriber, #75870)
+                              [<a href="/Articles/889958/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What does motivates the author to send 30 versions if no getting any comments?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/889958/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor889961"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 1, 2022 10:28 UTC (Fri)
+                               by <b>jamescrake-merani</b> (subscriber, #157540)
+                              [<a href="/Articles/889961/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Probably in the hope that one of the revisions will actually get noticed. But personally that hope would be running very thin if I were doing that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/889961/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor898053"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 16, 2022 1:50 UTC (Thu)
+                               by <b>josephcsible</b> (guest, #159073)
+                              [<a href="/Articles/898053/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It is a common technique for proprietary modules to look up the non-exported functions they need in the kernel&#x27;s symbol table, then call them via an indirect branch, thus bypassing the kernel&#x27;s limitations. But, with IBT enabled, any function lacking an endbr instruction will no longer be callable in this way.</font><br>
+<p>
+This won&#x27;t stop that. An indirect branch instruction can have a NOTRACK prefix, which suppresses IBT for just that one branch. The proprietary modules will just start using that prefix on their branches, and they can carry on just as before.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898053/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor904016"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Indirect branch tracking for Intel CPUs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2022 16:26 UTC (Fri)
+                               by <b>josephcsible</b> (guest, #159073)
+                              [<a href="/Articles/904016/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I stand corrected: it turns out that the Linux kernel sets NOTRACK_EN=0, which makes that prefix ineffective. I wonder whether a similar goal could be accomplished by using the shadow stack manipulation instructions and then doing what&#x27;s basically a retpoline, though.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/904016/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

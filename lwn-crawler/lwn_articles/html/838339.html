@@ -1,0 +1,1618 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Scheduling for asymmetric Arm systems [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/838339/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/837813/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/838339/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Scheduling for asymmetric Arm systems</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 30, 2020</br>
+           </div>
+The Arm processor architecture has pushed the boundaries in a number of
+ways, some of which have required significant kernel changes in response.
+For example, the <a href="/Articles/481055/">big.LITTLE architecture</a>
+placed fast (but power-hungry) and slower (but more power-efficient) CPUs
+in the same system-on-chip (SoC); significant scheduler changes were needed
+for Linux to be able to properly distribute tasks on such systems.  For all
+their quirkiness, big.LITTLE systems still feature CPUs that are in some
+sense identical: they can all run any task in the system.  What is the
+scheduler to do, though, if confronted with a system where that is no
+longer true?
+
+<p>
+Multiprocessor support on Linux was born in the era of <i>symmetric</i>
+multiprocessing — systems where all CPUs are, to a first approximation,
+identical.  Any CPU can run any task with essentially the same performance;
+the scheduler's main concern on SMP systems is keeping all of the CPUs
+busy.  While cache effects and NUMA locality discourage moving tasks
+between CPUs, the 
+specific CPU chosen for any given task is usually a matter of indifference
+otherwise.
+<p>
+Big.LITTLE changed that assumption by bundling together CPUs with different
+performance characteristics; as a result, the specific CPU chosen for each
+task became more important.  Putting tasks on the wrong CPU can result in
+poor performance or excessive power consumption, so it is unsurprising that
+a lot of work has gone
+into the problem of optimally distributing workloads on big.LITTLE
+systems.  When the scheduler gets it wrong, though, performance will
+suffer, but things will still work.
+<p>
+Future Arm designs, though, include systems where some CPUs can run both
+64-bit and 32-bit tasks, while others are limited to 64-bit tasks only.
+The advantage of such a design will be reduced chip area devoted to 32-bit
+support which, on many systems, may never actually be used at all;
+meanwhile, the ability to run the occasional 32-bit program still exists.
+The cost, though, is the creation of a system where some CPUs cannot run
+some tasks at all.  The result of an incorrect scheduling choice is no
+longer a matter of performance; it could be catastrophic for the workload
+involved.
+<p>
+An <a
+href="/ml/linux-arch/20201008181641.32767-1-qais.yousef@arm.com/">initial
+attempt to address this problem</a> was posted by Qais Yousef in October.
+The bulk of this work — and of the ensuing discussion — was focused on what
+should happen if a 32-bit task attempts to run on a 64-bit-only CPU.
+Yousef initially had the kernel just kill such tasks outright, but
+added an optional patch that would, in such cases, recalculate the
+task's CPU-affinity mask (a user-controllable bitmask indicating which
+CPUs the task can run on) to include only 32-bit-capable CPUs.  If user
+space could be trusted to properly set the CPU affinity of 32-bit tasks, he
+said, that last patch would be unnecessary.
+<p>
+Scheduler maintainer Peter Zijlstra <a
+href="/ml/linux-arch/20201009072943.GD2628@hirez.programming.kicks-ass.net/">responded</a>
+that the affinity-mask tweaking was "<q>not going to happen</q>";
+that mask is under user-space control, and should not be changed by the
+kernel, he said.  Will Deacon <a
+href="/ml/linux-arch/20201009083146.GA29594@willie-the-truck/">added</a>
+that the kernel should not try to hide the system's asymmetry from user
+space: "<q>I'd be *much* happier to let the scheduler do its thing, and if one
+of these 32-bit tasks ends up on a core that can't deal with it, then
+tough, it gets killed</q>".
+<p>
+Toward the end of October, Deacon posted <a
+href="/ml/linux-arch/20201027215118.27003-1-will@kernel.org/">a patch set
+of his own</a> addressing a number of problems he saw with Yousef's
+implementation.  It removed the affinity-mask manipulation in favor of just
+killing tasks that attempt to run on CPUs that cannot support them.  To
+help user space set affinity masks properly, the patch added a sysfs file
+indicating which CPUs can run 32-bit tasks.
+<p>
+By the time this patch series <a
+href="/ml/linux-arch/20201113093720.21106-1-will@kernel.org/">hit version
+3</a> in mid-November, though, that behavior had changed.  If a 32-bit task
+attempts to run on a 64-bit-only CPU, its affinity mask will be narrowed as
+with Yousef's first patch.  If, however, the original affinity mask
+included no 32-bit-capable CPUs, this operation will zero the mask
+entirely, leaving the task no CPU to run on.  In that case, a fallback mask
+will be used; its definition is architecture-specific but, on Arm (the only
+architecture that needs this feature currently), the fallback mask contains
+the set of CPUs that can run 32-bit tasks.  This can have the effect of
+enabling the task to run on CPUs outside of its original mask.
+<p>
+Zijlstra <a
+href="/ml/linux-kernel/20201119161127.GQ3121392%40hirez.programming.kicks-ass.net/">questioned</a>
+the move away from killing misplaced tasks: "<q>I thought we were okay
+with that... User does stupid, user gets SIGKILL. What changed?</q>"  The
+problem, it turns out, was finding the right response when a 64-bit task
+calls <a
+href="https://man7.org/linux/man-pages/man2/execve.2.html"><tt>execve()</tt></a>
+to run a 32-bit program — while running on a 64-bit-only CPU.  The 64-bit
+code may not know that the new executable is incompatible with the current
+CPU, so it is hard to expect that task to set the CPU affinity properly.
+The new program cannot even run to call <a
+href="https://man7.org/linux/man-pages/man2/sched_setaffinity.2.html"><tt>sched_setaffinity()</tt></a>
+to fix the problem, even if it was written with an awareness of such
+systems.  In fact, by the time the problem is found, it cannot even run to
+have the <tt>SIGKILL</tt> signal delivered to it.  Rather than try to
+handle all of that, Deacon decided to just override the affinity mask if
+need be.
+<p>
+The result is arguably a violation of the kernel's ABI rules, which say
+that the CPU-affinity mask is supposed to survive across an
+<tt>execve()</tt> call (and not be modified by the kernel in general).  The
+alternative, as Marc Zyngier <a
+href="/ml/linux-arch/93df8d6ed8842b83d76fa57ad1ef5bb4@kernel.org/">pointed
+out</a>, "<q>'only' results in an unreliable system</q>".  
+Bending the ABI rules seems preferable to unreliability, even if the other
+issues can be worked out.
+<p>
+
+So, most likely, some variant of this behavior will be in the patch set
+when it eventually makes its way upstream.  Yousef <a
+href="/ml/linux-kernel/20201127135805.iubhh7albp3nsyxd@e107158-lin.cambridge.arm.com/">endorsed</a>
+Deacon's approach, saying: "<q>My only worry is that this approach might
+be too elegant to deter these SoCs from proliferating</q>".  It remains
+to be seen how widespread this hardware will eventually be but, once it's
+in use, Linux should be ready for it.  Stay tuned to see what the next
+interesting asymmetry dreamed up by CPU designers will be.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Architectures-Arm">Architectures/Arm</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Scheduler">Scheduler</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/838339/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor838586"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2020 20:22 UTC (Mon)
+                               by <b>lwn@pck.email</b> (guest, #121154)
+                              [<a href="/Articles/838586/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Aren&#x27;t the new Apple M1 systems big.LITTLE?<br>
+<p>
+If so, I suspect &quot;how widespread this hardware will eventually be&quot; is going to be a more urgent question in kernel world, given the M1 seems to be smashing its Intel comparables in combined performance / battery consumption metrics.  Copycats are surely headed down the line!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838586/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838588"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2020 20:41 UTC (Mon)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/838588/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are various kinds of big.LITTLE. Some of them only have different maximum frequencies, other have different CPU capabilities that can result in SIGILL when a task is migrated from one CPU to the other [1][2]. This article is concerned with a third kind of asymmetry.<br>
+<p>
+[1] <a href="https://www.mono-project.com/news/2016/09/12/arm64-icache/">https://www.mono-project.com/news/2016/09/12/arm64-icache/</a><br>
+[2] <a href="https://medium.com/@niaow/a-big-little-problem-a-tale-of-big-little-gone-wrong-e7778ce744bb">https://medium.com/@niaow/a-big-little-problem-a-tale-of-...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838588/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838632"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 13:51 UTC (Tue)
+                               by <b>lwn@pck.email</b> (guest, #121154)
+                              [<a href="/Articles/838632/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ahh, missed that nuance, thank you!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838632/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor838613"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 6:20 UTC (Tue)
+                               by <b>liam</b> (guest, #84133)
+                              [<a href="/Articles/838613/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      There's also Intel's <a href="https://www.anandtech.com/show/15877/intel-hybrid-cpu-lakefield-all-you-need-to-know">Lakefield</a> and next year's Alder Lake. For their efficiency cores they're using the successor of the old Atom line. 
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838613/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor869533"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 17, 2021 15:29 UTC (Fri)
+                               by <b>mwsealey</b> (guest, #71282)
+                              [<a href="/Articles/869533/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The comment is in reference to asymmetric 64-bit and 32-bit CPUs i.e. a big.LITTLE system where the big cores may be 64-bit only, and the LITTLE, or a subset of the LITTLE cores, are the only things that can handle 32-bit applications.<br>
+<p>
+big.LITTLE isn&#x27;t rare or undesirable, but the above kind of asymmetry really should be discouraged. The whole point of big.LITTLE is to create a flexible performance/power environment. One of the fundamental premises is that this works better when the processors are all architecturally similar and an OS can treat them all the same to reduce the complexity of any schedulers or CPU management an OS has to do besides the performance/power situation.<br>
+<p>
+If you build a system with SIMD/FP on some cores and no SIMD/FP on others, wildly differing feature sets of any sort, you have to either mask off the &#x27;advanced&#x27; features so they can&#x27;t run on any CPU at all or know about every use case which requires a hard migration to another CPU as in this case. The 64-&gt;32 case is pretty simple, all told, but now there&#x27;s one special case in the scheduler for it.. it opens the door for others. I suppose Intel just walked into this bear trap with Alder Lake, so this is now the world we live in.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/869533/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor838587"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2020 20:27 UTC (Mon)
+                               by <b>dxin</b> (guest, #136611)
+                              [<a href="/Articles/838587/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One next asymmetry could be small cores without NEON, then kernel will need to trap on NEON and reschedule if NEON code is found on a small core.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838587/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838591"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2020 21:21 UTC (Mon)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/838591/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If I remember correctly, the Cortex-A7&#x27;s NEON unit is essentially 32-bit wide for floats (and 64-bit for ints). If you&#x27;ve already got an FPU then I suspect there&#x27;s little extra cost in including that minimal level of NEON support, and if you haven&#x27;t even got an FPU then you&#x27;ll have way more problems in a big.LITTLE pairing. So I&#x27;d be surprised if it was ever considered worthwhile to omit NEON from the little cores - it would be a major compatibility pain for little cost/power saving. (But I&#x27;m not an expert and it&#x27;s possible the cost is much greater than I suspect.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838591/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838593"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2020 21:44 UTC (Mon)
+                               by <b>wildea01</b> (subscriber, #71011)
+                              [<a href="/Articles/838593/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I once had a dual Cortex-A9 ASIC that only had NEON on one of the two cores, so maybe now is the time to get it supported upstream!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838593/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor907846"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2022 12:48 UTC (Tue)
+                               by <b>dxin</b> (guest, #136611)
+                              [<a href="/Articles/907846/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This seems to have already happened on the Intel side. New Intel CPUs, like 12900k, have small cores that doesn&#x27;t support AVX512. Currently those systems disables AVX512 if small cores are enabled. Neither Linux nor Windows is ready to trap and handle unsupported AVX512.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907846/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor838604"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 1:01 UTC (Tue)
+                               by <b>GhePeU</b> (subscriber, #56133)
+                              [<a href="/Articles/838604/">Link</a>] (26 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It’s not just an Arm thing, and it could become a subtler problem than managing 32-bit/64-bit tasks, the Intel Lakefield CPUs for example (<a href="https://www.anandtech.com/show/15877/intel-hybrid-cpu-lakefield-all-you-need-to-know/5">https://www.anandtech.com/show/15877/intel-hybrid-cpu-lak...</a>) have cores based on different microarchitectures who may not support the same sets of instructions. Either both types of cores will be limited to the lowest common denominator (that seems to be what Intel plans to do) or schedulers will need to know more to decide where to run a task.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838604/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838627"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 13:18 UTC (Tue)
+                               by <b>nilsmeyer</b> (guest, #122604)
+                              [<a href="/Articles/838627/">Link</a>] (16 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At least for Lakefield the instruction set is limited to what both types of core support, so for example no AVX-512. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838627/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838629"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 13:23 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/838629/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is there any way an executable can have a structure that says, eg, &quot;this executable requires 32-bit&quot;. At which point, the execve can then stall with &quot;I can&#x27;t run until you put me on a 32-bit core&quot;.<br>
+<p>
+Of course, that then hits the problem that it is interacting with the old process, which may have a mask saying &quot;don&#x27;t run on 32-bit-capable cores&quot;. OUCH!<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838629/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838712"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 5:28 UTC (Wed)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/838712/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Of course, that then hits the problem that it is interacting with the old process, which may have a mask saying &quot;don&#x27;t run on 32-bit-capable cores&quot;. OUCH!</font><br>
+<p>
+I think you basically have 4 options here:<br>
+<p>
+1. execve() fails with ENOEXEC or another non-retriable error code.<br>
+2. execve() modifies the affinity set to include at least one CPU that can run the new process.<br>
+3. execve() modifies the affinity set to be empty and the new process fails to schedule. Its parent process can &quot;rescue&quot; it by calling sched_setaffinity() with appropriate arguments.<br>
+3.5. As (3), but the process additionally receives SIGSTOP, and the parent consequently receives SIGCHLD if not ignored. After fixing affinity, the parent must also send SIGCONT.<br>
+4. execve() does not return. The process receives SIGKILL.<br>
+<p>
+The question is, which invariant do you want to break?<br>
+<p>
+1. An executable is valid or invalid, system-wide. If process A can exec it, then process B can also exec it.<br>
+2. When userspace tells the kernel &quot;Don&#x27;t schedule process X on core Y,&quot; those instructions are followed.<br>
+3. Processes eventually make forward progress unless something (that userspace knows about or could reasonably infer) actively prevents them from scheduling.<br>
+3.5. Processes are (usually) only stopped by userspace. Stopped processes can be resumed with SIGCONT, without requiring any other fixups.<br>
+4. execve() succeeds or fails; it doesn&#x27;t kill the caller.<br>
+<p>
+Other points to note:<br>
+<p>
+- (1) is probably a back-compat break. Despite arguably being the least-wrong behavior on the list, I don&#x27;t think it&#x27;s viable.<br>
+- (3) and (3.5) could easily create non-runnable processes that do not appear to be dead (if the parent doesn&#x27;t know how to fix them), and will therefore never get reaped unless a user manually intervenes by killing them.<br>
+- (4) is a surprising behavior, IMHO.<br>
+- (2) is similar to what the article describes, and is probably the least problematic choice.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838712/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838719"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 10:28 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/838719/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+(5) Could execve kick off a thread which modifies its own affinity mask (not affecting the parent), then kicks off the new process with its original affinity mask?<br>
+<p>
+That way neither of the original affinity masks need modification, at the cost possibly of a lot of work to execve.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838719/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838797"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 16:30 UTC (Wed)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/838797/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I find it difficult to imagine a version of execve() that creates new threads. execve(2) says that &quot;All threads other than the calling thread are destroyed during an execve(),&quot; but maybe I&#x27;ve misunderstood you.<br>
+<p>
+At the end of the day, the user has asked for something impossible: They want a process to run on cores which cannot run it. Some sort of violation of user expectations must occur (or else this must error out).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838797/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838832"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 23:34 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/838832/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Bear in mind I don&#x27;t know kernel internals ... but is there any way execve can disconnect from its parent such that it can modify its own mask without affecting the parent?<br>
+<p>
+Then it can fire off the child without needing to modify the child&#x27;s mask.<br>
+<p>
+Seeing as the purpose of execve is to kick off new processes, that doesn&#x27;t SOUND difficult.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838832/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838839"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2020 2:36 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/838839/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+execve does not create processes. It replaces an existing process with a brand-new program image, in-place. You&#x27;re thinking of something like posix_spawn().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838839/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838844"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2020 7:46 UTC (Thu)
+                               by <b>pabs</b> (subscriber, #43278)
+                              [<a href="/Articles/838844/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Does Linux have a syscall for posix_spawn() yet? Looks like glibc still uses clone/fork/vfork + exec.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838844/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838846"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2020 8:47 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/838846/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, and it&#x27;s unlikely to be added.<br>
+<p>
+We might eventually get a more thorough API that would allow us to create a suspended process, get its handle (represented by a file handle), tweak its state and resume it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838846/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838909"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2020 21:59 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/838909/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+clone(2) says it used to be possible to do something like that with CLONE_STOPPED, but it was deprecated and removed. I imagine there were good reasons for doing that, but the man page is frustratingly short on details.<br>
+<p>
+Regardless, the kernel still has to handle the case where userspace does the Wrong Thing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838909/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838910"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2020 22:42 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/838910/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I would guess because it&#x27;s not really that useful? You can&#x27;t do much with a process using only its PID.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838910/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838915"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 4, 2020 0:13 UTC (Fri)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/838915/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can call sched_setaffinity(), which is enough in this case.<br>
+<p>
+For other use cases, I&#x27;m not sure exactly what you had in mind. You can acquire a &quot;file handle&quot; (as you mentioned upthread) via pidfd_open, but I don&#x27;t think there&#x27;s a whole lot you can do with a pidfd that you can&#x27;t do with the PID. But that&#x27;s not really a problem with CLONE_STOPPED; it&#x27;s a problem with the entire kernel API for not exposing more features for this sort of manipulation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838915/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor842392"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 12, 2021 17:55 UTC (Tue)
+                               by <b>immibis</b> (guest, #105511)
+                              [<a href="/Articles/842392/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is basically no difference between that, and the kernel setting the affinity, except now you&#x27;ve made it glibc&#x27;s problem instead of the kernel&#x27;s. Some programs don&#x27;t use glibc, so you need to decide which invariant you want to break for Go programs for example.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/842392/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor838720"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 10:44 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/838720/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  1. An executable is valid or invalid, system-wide. If process A can exec it, then process B can also exec it.</font><br>
+This has been broken for ages by SELinux and other security modules.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838720/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838805"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 18:24 UTC (Wed)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/838805/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As I understand it, those security measures do nothing out of the box, and have to be actively enabled by the sysadmin (or distro, or somebody else). It is widely known that SELinux et al. can cause things to Not Work in a variety of interesting and subtle ways, and by turning SELinux et al. on, the sysadmin (or somebody else) is actively taking responsibility for that breakage, and so it becomes Somebody Else&#x27;s Problem.<br>
+<p>
+This would be the *default* behavior in an unmodified (no modules etc.) kernel, which is an entirely different kettle of fish. Sure, it would be limited to specific hardware configurations, and maybe you can argue that it never &quot;worked&quot; in the first place (because previously, nobody was using those hardware configurations), but I&#x27;m still a bit leery of potentially breaking software that&#x27;s perfectly compatible with both 32-bit and 64-bit architectures individually.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838805/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838809"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 19:10 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/838809/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+SELinux has been a kernel feature for a loooong time.<br>
+<p>
+But it&#x27;s not the only one that can cause failure. For example, you can try (and fail) to launch a binary for a different architecture. You can try and _succeed_ launching a binary for a different architecture (via qemu started through kernel interpreter mechanism).<br>
+<p>
+I don&#x27;t think that there has ever been a guarantee that an exec() must succeed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838809/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor839079"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 6, 2020 20:31 UTC (Sun)
+                               by <b>foom</b> (subscriber, #14868)
+                              [<a href="/Articles/839079/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How is it the default behavior here? You&#x27;d have to setup a limited scheduling affinity for there to be any problem. Certainly some people do use limited cpu sets, but it&#x27;s not the default configuration!<br>
+<p>
+And it seems to be that in the cases where it _is_ actually used, it&#x27;d be more of a problem to let processes escape the restriction, and run, unconstrained, on other in the system, than to just fail execution...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839079/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor838688"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 18:49 UTC (Tue)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/838688/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Yes, for Lakefield it's the lowest common denominator.  I doubt that they will disable AVX and AVX512 on the big cores of the upcoming Alder Lake, though, so this capability of Linux may come in handy there as well.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838688/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838690"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 19:55 UTC (Tue)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/838690/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Having a few instructions missing may want a different solution, though. The kernel doesn&#x27;t need to use AVX instructions to deliver signals to a process, and a process starting up has a chance to set its cpu affinity before it uses AVX instructions. Also, a process is likely to check whether AVX instructions are available before using them, and can probably be told they&#x27;re not unless all CPUs in the process&#x27;s mask supports them.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838690/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838693"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 22:24 UTC (Tue)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/838693/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Presumably the compiler knows if these instructions were emitted. If only because compiler probably allows you to configure which instruction set. So, it could add this information to a header in the binary, and the link loader could use this information in startup.<br>
+<p>
+However, I feel that requiring the user to configure the CPUset feels cludgy. Seems better that the program says &quot;requires instruction set X&quot; and the kernel configures the CPUset appropriately. How else could you deal with hot-swappable CPUs? Requiring programs to monitor changes in CPU configuration seems like the wrong place.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838693/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839610"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 10, 2020 12:29 UTC (Thu)
+                               by <b>mips</b> (guest, #105013)
+                              [<a href="/Articles/839610/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Can you trust the program? It may declare itself to have certain characteristics and then go ahead and violate them. You could just kill it if it does, I guess, rather than using a scheme where the program declares nothing and you treat an illegal instruction trap as a reschedule/context switch.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839610/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor842394"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 12, 2021 18:19 UTC (Tue)
+                               by <b>immibis</b> (guest, #105511)
+                              [<a href="/Articles/842394/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is nothing wrong with killing a program that declares &quot;I do not use AVX512&quot; and then uses AVX512. There&#x27;s nothing fundamentally wrong with not killing it, either, except for the compatibility nightmare it would create when people start tagging their AVX512-using programs as &quot;I do not use AVX512&quot; and then it becoming relevant on some future processor.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/842394/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor838715"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 9:16 UTC (Wed)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/838715/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      There probably are programs that use CPUID to determine whether the current CPU has AVX and uses AVX based on that rather than checking all CPUs in the process's mask.  After all, all machines up to now are homogenous wrt AVX.
+
+<p>There also does not seem to be a one-fits-all-solution for the problem.  E.g., if you have an implementation of memcpy/memmove that may use AVX512, for some programs it may pay off to restrict your CPU set to the AVX512-capable ones; but if you do that for every program that uses memcpy or memmove, the CPUs that do not have AVX512 will be hardly used.  The programmer does not know the actual CPU configuration and program usage, so cannot decide this, either; and really, memcpy and memmove should not need such complications.  The sysadmin knows the hardware configuration and program usage, but has other things to do than configuring all programs wrt these features. 
+
+<p>[Maybe this time around REP MOVS will be competetive, making this particular example moot, but I would not bet on it.]
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838715/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838829"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 22:47 UTC (Wed)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/838829/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Won&#x27;t any chips new enough to be heterogenous also be new enough to support trapping on CPUID? That doesn&#x27;t give you a way to let the program know that it could do something to make AVX512 work if it would really benefit, but it does at least allow for naive programs getting sane results.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838829/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor838722"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 12:13 UTC (Wed)
+                               by <b>james</b> (subscriber, #1325)
+                              [<a href="/Articles/838722/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>...a process starting up has a chance to set its cpu affinity before it uses AVX instructions</blockquote>
+Unfortunately, x86 chips tend to live and die by their performance on existing Windows binaries, and right now none of them have any need to do that.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838722/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor838826"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 22:26 UTC (Wed)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/838826/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This should prove &quot;interesting&quot; for programs that use the target_clones or ifunc function attributes to select between target-specific optimized versions of functions at runtime. The resolver is only called once when the symbol is first used; after that all calls go directly to the target-specific version. So what happens if the same process needs different versions of the function at different points in its execution? The result will depend on the context in which the first call was made.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838826/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor838607"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 1:47 UTC (Tue)
+                               by <b>pmulholland</b> (subscriber, #124686)
+                              [<a href="/Articles/838607/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Risc-V will potentially result in SoCs with assymetric cores using different architecture extensions and possibly different custom instructions on different cores. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838607/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor838609"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 3:33 UTC (Tue)
+                               by <b>pabs</b> (subscriber, #43278)
+                              [<a href="/Articles/838609/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if this patchset will also prepare Linux for CPUs that can run processes in multiple different ISAs at once, potentially asymmetricly.<br>
+<p>
+<a href="https://www.zhihu.com/question/414069789">https://www.zhihu.com/question/414069789</a> (needs Google Translate)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838609/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838687"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 18:47 UTC (Tue)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/838687/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      A64 and A32/T32 (ARM names for their instruction sets) are different ISAs, so yes, this patchset does prepare for that.  The 64-bit and the 32-bit stuff on AMD64 CPUs are also different (although similar) ISAs, but up to now no AMD64 CPUs with diverging ISA support have appeared.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838687/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838708"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 1:05 UTC (Wed)
+                               by <b>pabs</b> (subscriber, #43278)
+                              [<a href="/Articles/838708/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+(The Loongson CPUs in question support LoongArch (MIPSish), MIPS, x86, ARM and RISC-V)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838708/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor838610"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 4:35 UTC (Tue)
+                               by <b>rvolgers</b> (guest, #63218)
+                              [<a href="/Articles/838610/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I&#x27;m probably missing something here, but won&#x27;t the &quot;just kill the process&quot; solution be somewhat unfair towards 32 bit programs that try to divvy up the CPUs between multiple subprocesses but were compiled at a time where 64 bit did not exist, let alone big.LITTLE?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838610/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838710"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 2:07 UTC (Wed)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/838710/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It would likely be; sort of similar reasons are why they dropped it, as described in the latter part of the article.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838710/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor838619"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">execve()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 9:15 UTC (Tue)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/838619/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Perhaps this is another reason to avoid the classical fork+exec in favour of posix_spawn() or a similar system call that runs an executable in a separate process.  The kernel would then have no trouble setting the CPU affinity of the new process according to the executable file specified.  Whereas if you just fork(), the kernel has no idea what you are going to do next, and you end up with some rather silly work making a new 64-bit process and then immediately replacing it with a 32-bit process on a different core.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838619/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838630"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">execve()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 13:29 UTC (Tue)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/838630/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The question is not if the kernel _can_ set the CPU affinity; it&#x27;s whether it&#x27;s the right thing to do so. For example, maybe the CPU affinity was restricted to keep a task running undisturbed (either the one that is execve-ing, or another). If the kernel changes the CPU affinity behind userspace&#x27;s back, such a setup would not work at all anymore.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838630/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor838626"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2020 13:14 UTC (Tue)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/838626/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I imagine a distant future where the dozen or so weird ad-hoc codepaths for NUMA, [A]SMP, thermal throttling, scheduler constraints, hotplug and whatever are refactored into a single subsystem. It&#x27;d resemble ranked-choice voting, which is something humans can understand (and audit for sanity), and I guess at that point the next logical step would be letting people tweak the scheduler defaults using BPF.<br>
+<p>
+Maybe after we&#x27;ve gotten Y2k38 out of the way...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838626/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838713"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 5:31 UTC (Wed)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/838713/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you can understand how Debian conducts elections, you are way ahead of me...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838713/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838833"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 23:43 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/838833/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It&#x27;s very easy ... just needs a computer to collate the results.<br>
+<p>
+Let&#x27;s say we have four candidates, A, B, C &amp; D. That gives us six pairwise comparisons - AB, AC, AD, BC, BD, CD. For each pair you have to say which candidate you prefer (or that you don&#x27;t care).<br>
+<p>
+While it IS possible to game the system, as soon as you have a decent number of voters, the maths pretty much guarantees that one voter will win every comparison they are in, and another candidate will lose every comparison they are in.<br>
+<p>
+So whether you want to choose a winner, or eliminate a loser, you just remove that person from the process, rinse and repeat until you have the requisite number of winners.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838833/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor838706"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 0:19 UTC (Wed)
+                               by <b>glenn</b> (subscriber, #102223)
+                              [<a href="/Articles/838706/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder how many 32-bit apps might spawn a pool of worker threads based on the number of available CPUs (e.g., using C++&#x27;s `std::thread::hardware_concurrency()` to getting a CPU count).  I suppose some strange behaviors might emerge?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838706/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor838711"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2020 3:13 UTC (Wed)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/838711/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Those platform APIs should already take affinity masking into account.<br>
+<p>
+That is a good argument for having the affinity mask set correctly from the beginning of a process instead of dynamically reducing it later, though.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838711/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor838838"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2020 2:18 UTC (Thu)
+                               by <b>mm7323</b> (subscriber, #87386)
+                              [<a href="/Articles/838838/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As a user, I would like that on exec() the affinity mask should only be narrowed to just the processors that can support the binary being loaded.  If the mask ends up empty, either exec() could be made to fail with something like ENOTSUP, or better in my opinion would be to SGILL the process.  My logic is that the common fork() / exec() pattern is more likely to notice SGILL after a waitpid() than checking the result of exec() and trying to do something sensible.<br>
+<p>
+SIGILL would also cover cases where other symmetries in CPU features could exist e.g. FPU, Thumb or co-processor extensions which could theoretically differ, but which the kernel may not be aware of and so have to assume user-space set the CPU affinity correctly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838838/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor839022"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 5, 2020 12:24 UTC (Sat)
+                               by <b>Jandar</b> (subscriber, #85683)
+                              [<a href="/Articles/839022/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What happens to a 64 bit app spawned from a 32 bit app? The affinity mask is reduced to the 32 bit CPUs so the new 64 bit app is constrained to 32 bit CPUs even if no affinity mask was set at the start of the 32 bit app. This seems wrong.<br>
+<p>
+There is no sane way to put computed and user set values into one variable. If there is no way to get the original user set values this doesn&#x27;t work as expected. The original affinity mask set by the user has to be saved and considered every time the computed affinity mask would change, e.g. exec or CPU hotplug.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839022/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839026"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Scheduling for asymmetric Arm systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 5, 2020 13:59 UTC (Sat)
+                               by <b>james</b> (subscriber, #1325)
+                              [<a href="/Articles/839026/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>What happens to a 64 bit app spawned from a 32 bit app?</blockquote>
+Is this actually likely to happen?<p>
+I presume this is being designed with Android in mind, to allow 32 bit APKs to be installed on new devices (which will be natively 64 bit). Correct me if I'm wrong, but it's very unlikely for an Android app to spawn a system-provided binary, and if it does, it's unlikely to be performance-sensitive. (The whole concept revolves around these apps not being performance-critical...)
+<p>
+Outside the Android world, where are the 32 bit apps going to come from? In the server space, everything is likely to be  64 bit already. Computers like the Raspberry Pi tend to get their software as part of a distribution: any add-ons will be in the same position as Android APKs.
+<p>
+So that leaves embedded developers with an unclean mess of 32 and 64 bit binaries (which sounds horrifically plausible: my condolences to readers in this position), on a big.LITTLE-type chip (so presumably they do need performance), wanting more performance than they can get out of existing ARM cores, and unwilling or unable to put shims in place to get the affinity they actually want.
+<p>
+It's unclear if enabling this behaviour will actually help them.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839026/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2020, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,480 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>IDA: simplifying the complex task of allocating integers [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/764057/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/763790/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/764057/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>IDA: simplifying the complex task of allocating integers</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 4, 2018</br>
+           </div>
+It is common for kernel code to generate unique integers for identifiers.
+When one plugs in a flash drive, it will show up as
+<tt>/dev/sdN</tt>; that <tt>N</tt> (a letter derived from a
+number) must be generated in the
+kernel, and it should not already be in use for another drive or unpleasant
+things will happen.  One might think that generating such numbers would not
+be a difficult task, but that turns out not to be the case, especially in
+situations where many numbers must be tracked.  The IDA (for "ID
+allocator", perhaps) API exists to handle this specialized task.  In past
+kernels, it has managed to make the process of getting an unused number
+surprisingly 
+complex; the 4.19 kernel has a new IDA API that simplifies things
+considerably.
+<p>
+Why would the management of unique integer IDs be complex?  It comes down
+to the usual problems of scalability and concurrency.  The IDA code must be
+able to track potentially large numbers of identifiers in an efficient way;
+in particular, it must be able to find a free identifier within a given
+range quickly.  In practice, that means using a <a
+href="/Articles/175432/">radix tree</a> (or, soon, an <a
+href="/Articles/745073/">XArray</a>) to track allocations.  Managing such a
+data structure requires allocating memory, which may be difficult to do in
+the context where the ID is required.  Concurrency must also be managed, in
+that two threads allocating or freeing IDs in the same space should not
+step on each other's toes.
+<p>
+A particular allocation space (usually just called an "IDA") is created
+with either of the usual kernel idioms.  It can be defined and initialized
+with this macro:
+<p>
+<pre>
+    #include &lt;linux/idr.h&gt;
+
+    DEFINE_IDA(name);
+</pre>
+<p>
+Alternatively, the two steps can be separated with:
+<p>
+<pre>
+    struct ida my_ida;
+    /* ... */
+    ida_init(&amp;my_ida);
+</pre>
+<p>
+If an IDA is no longer needed, it can be freed by passing it to
+<tt>ida_destroy()</tt>; it is not necessary to free any allocated IDs
+first.
+<p>
+
+<h4>The old way</h4>
+<p>
+A longtime unwritten design pattern in the kernel community states that
+low-level utilities (such as IDA) should not perform their own locking;
+instead, protection against concurrent calls should be handled by the
+caller.  The reasoning is that, often as not, the higher-level code has its
+own locking already; in such cases, doing more locking at a lower level would be
+wasteful.  So the old IDA API expected (with an exception, see below) that
+locking would be handled by its callers.
+<p>
+That raises another issue, though.  IDA is supposed to be fast, but the
+effort past kernel developers have put into squeezing out that last
+microsecond of execution time would go to waste if IDA calls were
+surrounded by heavyweight locking.  IDA callers thus tend to use spinlocks;
+that choice may be forced by the context in which ID allocation is
+performed anyway.  The use of spinlocks means that IDA allocation tends
+to be done in
+atomic context, where memory allocation can be less reliable.  To deal with
+this problem, pre-4.19 IDA allocation is split into two phases.  First, a
+call is made to:
+<p>
+<pre>
+    int ida_pre_get(struct ida *ida, gfp_t gfp);
+</pre>
+<p>
+This function tries to ensure that memory will be available to satisfy a
+subsequent allocation request, which is done using:
+<p>
+<pre>
+    int ida_get_new_above(struct ida *ida, int start, int *id);
+</pre>
+<p>
+The <tt>ida_pre_get()</tt> call can be done outside of the locking that
+serializes calls to <tt>ida_get_new_above()</tt>, so it may be more likely
+to succeed in allocating memory.  Of course, there is no guarantee that the
+memory pre-allocated by one caller will not be snagged by a concurrent
+caller, so <tt>ida_get_new_above()</tt> can still return <tt>-EAGAIN</tt>.
+Thus, ID allocation is typically performed with a dance like:
+<p>
+<pre>
+    retry:
+        ida_pre_get(&amp;some_ida, GFP_KERNEL);
+	spin_lock(&amp;some_lock);
+	r = ida_get_new_above(&amp;some_ida, 0, &amp;id);
+	spin_unlock(&amp;some_lock);
+	if (r == -EAGAIN)
+	    goto retry;
+</pre>
+<p>
+An identifier allocated this way could be freed with <tt>ida_remove()</tt>,
+which must also be called with the appropriate lock held.
+<p>
+This kind of pattern makes a simple task start to look a bit less simple,
+especially if the spinlock must be introduced for the sole purpose of
+calling IDA functions.
+It is also the sort of code that can be easy to get wrong in subtle ways.
+In the hopes of making life easier, a set of higher-level functions was
+<a
+href="https://git.kernel.org/linus/88eca0207cf1574328c3ce8c3be537a9317261bb">added
+by Rusty Russell</a> in 2011 for the 3.1 kernel release:
+<p>
+<pre>
+    int ida_simple_get(struct ida *ida, unsigned int start, unsigned int end,
+		       gfp_t gfp_mask);
+    void ida_simple_remove(struct ida *ida, unsigned int id);
+</pre>
+<p>
+These functions use their own lock and hide the <tt>ida_pre_get()</tt>
+dance from callers.  As of 4.18, most IDA users use these functions, but
+there are still numerous sites using the more complex API.
+<p>
+<h4>The 4.19 way</h4>
+<p>
+One of the last pulls into the mainline before the release of 4.19-rc1 was
+<a
+href="/ml/linux-kernel/20180621212835.5636-1-willy%40infradead.org/">Matthew
+Wilcox's IDA series</a>, which makes a number of changes to the API.  In 
+particular, <tt>ida_pre_get()</tt> no longer exists as far as IDA users are
+concerned; all IDA functions now handle their own internal locking and
+memory allocation.  Allocation and freeing of identifiers is done with:
+<p>
+<pre>
+    int ida_alloc(struct ida *ida, gfp_t gfp);
+    void ida_free(struct ida *, unsigned int id);
+</pre>
+<p>
+There are a number of variants for callers needing more control over the
+allocated ID:
+<p>
+<pre>
+    int ida_alloc_min(struct ida *ida, unsigned int min, gfp_t gfp);
+    int ida_alloc_max(struct ida *ida, unsigned int max, gfp_t gfp);
+    int ida_alloc_range(struct ida *ida, unsigned int min, unsigned int max,
+			gfp_t gfp);
+</pre>
+<p>
+<tt>ida_simple_get()</tt> and <tt>ida_simple_remove()</tt> still exist as
+wrappers around the above functions, avoiding the need to change large
+numbers of existing callers, but those functions should probably be seen as
+deprecated at this point.  The lower-level functions have been removed
+entirely, instead, and all callers within the kernel have been changed to
+the new API.
+<p>
+The IDA interface has clearly been simplified quite a bit.  The underlying
+implementation remains surprisingly complex for such a seemingly simple
+task, though; interested readers can find it in <a
+href="https://elixir.bootlin.com/linux/v4.19-rc2/source/lib/idr.c#L312"><tt>lib/idr.c</tt></a>.
+Nothing, it seems, is simple in kernel space.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#IDA">IDA</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/764057/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor764069"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">IDA: simplifying the complex task of allocating integers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2018 3:10 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/764069/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for writing up about a third of my talk at LCA for next year, Jon ;-)<br>
+<p>
+The IDA used to be even worse than your write-up makes it sound.  Before 2017, any part of the kernel which ever allocated from an IDA had to call ida_destroy() before the IDA went out of scope, or it would leak at least a 128-byte allocation, and probably seven 1200-byte allocations.  Oh, and for most of the lifetime of the IDA, it would tie up that allocated memory even though it wasn't used.<br>
+<p>
+When I noticed this problem, my first instinct was to add ida_destroy() calls all over the kernel, then I realised that was foolish and I needed to fix the bad design.  I'm nearly done :-)<br>
+<p>
+I suspect most of the ida_destroy() calls in the kernel are now unnecessary.  Most callers free each allocation individually, then call ida_destroy() at the end just because nobody's put in the effort to check it's now unneeded.  I may put in an option to warn if ida_destroy() is called on an empty IDA, but that isn't going to prove the IDA is _always_ empty at that point.<br>
+<p>
+There's more I can say ... but I'll save it for Christchurch!<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764069/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor764076"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">IDA: simplifying the complex task of allocating integers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2018 6:13 UTC (Tue)
+                               by <b>blackwood</b> (guest, #44174)
+                              [<a href="/Articles/764076/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Would be really nice to replace these with something like ida_assert_empty(), to catch leaks. Sure we have kmemleak, but it's slow, and often fairly late at spotting the leak.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764076/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor764088"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">IDA: simplifying the complex task of allocating integers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2018 11:47 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/764088/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's spelled WARN_ON(!ida_is_empty(&amp;ida))<br>
+<p>
+I talked to GregKH last week, and it sounded like he was interested in removing a lot of the ida_destroy() calls.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764088/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor764086"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">IDA: simplifying the complex task of allocating integers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2018 9:46 UTC (Tue)
+                               by <b>nilsmeyer</b> (guest, #122604)
+                              [<a href="/Articles/764086/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>It is common for kernel code to generate unique integers for identifiers. When one plugs in a flash drive, it will show up as /dev/sdaN; that N must be generated in the kernel, and it should not already be in use for another drive or unpleasant things will happen. </blockquote>
+
+In fact, the drives will be enumerated by letters, not numbers (when using /dev/sd*). So if you plug in a flash drive it will show up as, for example, <i>/dev/sdb</i> and the first partition would be <i>/dev/sdb1</i>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764086/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor764091"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">IDA: simplifying the complex task of allocating integers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2018 11:48 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/764091/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's correct, but the SCSI code does in fact use an IDA for generating a number.  That number is displayed as a letter (a-z, aa-zz, aaa-zzz) ie a base-10 to base-26 conversion.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764091/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor764094"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">IDA: simplifying the complex task of allocating integers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2018 12:03 UTC (Tue)
+                               by <b>sjfriedl</b> (<b>&#x272D; supporter &#x272D;</b>, #10111)
+                              [<a href="/Articles/764094/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The ID allocator is used for the "a" in /dev/sdaN, where it represents the next available drive, not the "N", which is pulled from the partition table of the media.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764094/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor764097"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">IDA: simplifying the complex task of allocating integers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2018 12:58 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/764097/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      That was a silly brain failure on my part — I <i>have</i> actually plugged in drives and seen what has happened once or twice...:)  I've tweaked the language to be less obviously wrong, sorry for any confusion.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764097/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor764242"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">IDA: simplifying the complex task of allocating integers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2018 6:23 UTC (Thu)
+                               by <b>nilsmeyer</b> (guest, #122604)
+                              [<a href="/Articles/764242/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Apologies on my part for taking it to the comment section instead of contacting the editor(s). <br>
+<p>
+It's a great article otherwise, I'm very often in awe how something that sounds trivial on the surface (like assigning the next drive id) is really the result of a lot of hard work and ingenuity. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764242/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

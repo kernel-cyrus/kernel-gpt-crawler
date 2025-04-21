@@ -1,0 +1,762 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Memory-management: tiered memory, huge pages, and EROFS [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/984839/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/985784/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/984839/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Memory-management: tiered memory, huge pages, and EROFS</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 15, 2024</br>
+           </div>
+The kernel's memory-management developers have been busy in recent times;
+it can be hard to keep up with all that has been happening in this core
+area.  In an attempt to catch up, here is a look at recent work
+affecting tiered-memory systems, underutilized huge pages, and duplicated
+file data in the Enhanced Read-Only Filesystem (EROFS).
+<p>
+
+<h4>Promotion and demotion</h4>
+<p>
+Tiered-memory systems are built with multiple types of memory that have
+different performance characteristics; the upper tiers are usually faster,
+while lower tiers are slower but more voluminous.  To make the best use of
+these memory tiers, the system must be able to optimally place each page.
+Heavily used pages should normally go into the fast tiers, while memory
+that is only occasionally used is better placed in the slower tiers.  Since
+usage patterns change over time, the optimal placement of memory will also
+change; the system must be able to move pages between tiers based on
+current usage.  Promoting and demoting pages in this way is one of the
+biggest challenges in tiered-memory support.
+<p>
+Promotion is usually the easier side of the problem; it is not hard for the
+system to detect when memory is being accessed and move it to a faster
+tier.  In current kernels, though, this migration only works for memory
+that has been mapped into a process's address space; the machinery requires
+that memory be referred to by a virtual memory area (VMA) to function. As a
+result, heavily used memory that is not currently mapped will not be
+promoted.
+<p>
+This situation comes about for page-cache pages that are being accessed by
+way of system calls (such as <a
+href="https://man7.org/linux/man-pages/man2/read.2.html"><tt>read()</tt></a>
+and <a
+href="https://man7.org/linux/man-pages/man2/write.2.html"><tt>write()</tt></a>),
+but which are not mapped into any address space.  Memory-access speed can
+be just as important for such pages, though, so this inability to promote
+them can hurt performance.
+<p>
+<a href="/ml/all/20240803094715.23900-1-gourry@gourry.net">This patch
+series</a> from Gregory Price is an attempt to address that problem.  The
+migration code in current kernels (<a
+href="https://elixir.bootlin.com/linux/v6.11-rc2/source/mm/migrate.c#L2551"><tt>migrate_misplaced_folio_prepare()</tt></a>
+in particular) needs to consult the VMA that maps a given folio (set of
+pages) prior to migration; if that folio is both shared and mapped with
+execute permission, then the migration will not happen.  Pages that are not
+mapped at all, though, cannot meet that condition, so the absence of a VMA
+just means that this check need not be performed.  With that change (and a
+couple of other adjustments) in place, it is simply a matter of adding an
+appropriate call in the swap code to migrate folios from a lower to a
+higher tier when they are referenced.
+<p>
+A kernel that is trying to appropriately place memory will always be
+running a bit behind the game; it cannot detect a changed access pattern
+without first watching the new pattern play out.  Sometimes, though, an
+application will know that it will be shifting its attention from one range
+of memory to another.  Informing the kernel of that fact might help the
+system ensure that memory is in the best location before it is needed; at
+least, that is the intent behind <a
+href="/ml/all/20240801075610.12351-1-zhang.renze@h3c.com">this patch</a>
+from "BiscuitOS Broiler".
+<p>
+Quite simply, this patch adds two new operations to the <a
+href="https://man7.org/linux/man-pages/man2/madvise.2.html"><tt>madvise()</tt></a>
+system call.  They are called <tt>MADV_DEMOTE</tt> and
+<tt>MADV_PROMOTE</tt>; they do exactly what one would expect.  An
+application can use these operations to explicitly request the movement of
+memory between tiers in cases where it knows that the access pattern is
+about to change.
+<p>
+There is nothing technically challenging about this work, but it is also
+not clear that it is necessary.  The kernel already provides a system call,
+<a
+href="https://man7.org/linux/man-pages/man2/migrate_pages.2.html"><tt>migrate_pages()</tt></a>,
+that can be used to move pages between tiers; David Hildenbrand <a
+href="/ml/all/a530a614-41a3-4bd1-a2df-40ade7eca002@redhat.com/">asked</a>
+why <tt>migrate_pages()</tt> is not sufficient in this case.  The <a
+href="/ml/all/3a5785661e1b4f3381046aa5e808854c@h3c.com/">answer</a> seems
+to be that <tt>madvise()</tt> is found in the C library, but the wrapper
+for <tt>migrate_pages()</tt> is in the extra <tt>libnuma</tt> library
+instead.  As Hildenbrand <a
+href="/ml/all/bffe178c-bd97-4945-898e-97ba203f503e@redhat.com/">answered</a>,
+that is not a huge impediment to its use.  So, while making this feature
+available via <tt>madvise()</tt> might be convenient for some users, that
+convenience seems unlikely to be enough to justify adding this new feature
+to the kernel.
+<p>
+<h4>Reclaiming underutilized huge pages</h4>
+<p>
+The use of huge pages can improve application performance, by reducing both
+the usage of the system's translation lookaside buffer (TLB) and
+memory-management overhead in the kernel.  But huge pages can suffer from
+internal fragmentation; if only a small part of the memory within a huge
+page is actually used, the resulting waste can be significant.  The
+corresponding increase in memory use has inhibited the adoption of huge
+pages in many settings that would otherwise benefit from them.
+<p>
+One way to get the best of both worlds might be to actively detect huge
+pages that are not fully used, split them apart into base pages, then
+reclaim the unused base pages; that is the objective of <a
+href="/ml/all/20240813120328.1275952-1-usamaarif642@gmail.com">this patch
+series</a> from Usama Arif.  It makes two core changes to the
+memory-management subsystem aimed at recovering memory that is currently
+wasted due to internal fragmentation.
+<p>
+The first of those changes takes effect whenever a huge page is split apart
+and mapped at the base-page level, as often happens even in current
+kernels.  As things stand now, splitting a huge page will leave the full
+set of base pages in its wake, meaning that the amount of memory in use
+does not change.  But, if the huge page is an anonymous (user-space data)
+page, any base pages within it that have not been used will only contain
+zeroes.  Those base pages can be replaced in the owning process's page
+tables with references to the shared zero page, freeing that memory.
+Arif's patch set makes that happen by checking the contents of base pages
+during the splitting process and freeing any pages found to hold only
+zeroes.
+<p>
+That will free underutilized memory when a page is being split, which is a
+start.  It would work even better, though, if the kernel could actively
+find underutilized huge pages and split them when memory is tight; that is
+the objective of the second change in Arif's patch set.
+<p>
+A huge page, as represented by a folio within the kernel, can at times be
+partially mapped, meaning that not all of the base pages within the huge
+page have been mapped in the owning process's page tables.  When a fully
+mapped folio is partially unmapped for any reason, the folio is added to
+the "deferred split list".  If, at some later point, the kernel needs to
+find some free memory, it will attempt to split the folios on the deferred
+list, then work to reclaim the base pages within each of them.
+<p>
+Arif's patch set causes the kernel to add <i>all</i> huge pages to the
+deferred list whenever they are either faulted in or created from base
+pages by the <tt>khugepaged</tt> thread.  When memory gets tight and the
+deferred list is processed, these huge pages (which are probably still
+fully mapped) will be checked for zero-filled base pages; if the number of
+such pages exceeds a configurable threshold, the huge page will be split
+and all of those zero-filled base pages will be immediately freed.  If the
+threshold is not met, instead, the page will be considered to be fully used
+and removed from the deferred list.
+<p>
+It is worth noting that the threshold is an absolute number; for the tests
+mentioned in the cover letter it was set to&nbsp;409, which is roughly 80%
+of a 512-page huge page.  This mechanism means that, while this feature can
+split underutilized PMD-sized huge pages implemented by the processor, it
+will not be able to operate on smaller, multi-size huge pages implemented
+in software.  On systems using PMD-sized huge pages, though, the results
+reported in the cover letter show that this change can provide the
+performance benefits that come from enabling transparent huge pages while
+clawing back most of the extra memory that would otherwise be wasted.
+<p>
+<h4>Page-cache deduplication for EROFS</h4>
+<p>
+Surprisingly often, a system's memory will contain multiple pages
+containing the same data.  When this happens with anonymous pages, the <a
+href="https://docs.kernel.org/admin-guide/mm/ksm.html">kernel samepage
+merging</a> feature can perform deduplication, recovering some memory
+(albeit with some security concerns).  The situation with file-backed pages
+is harder, though.  Filesystems that can cause a single file to appear with
+multiple names and inodes (as can happen with Btrfs snapshots or in
+filesystems that provide a "reflink" feature) are one case in point; if
+more than one name is used, multiple copies of a file's data can appear in
+the page cache.  This can also happen in the mundane cases where files
+contain the same data; container images can duplicate data in this way.
+<p>
+The problem with deduplicating such pages is that each page in the page
+cache must refer back to the file from which it came; there is no concept
+in the kernel of a page coming from multiple files.  If a page is written
+to, or if a file changes by some other means, the kernel has to do the
+right thing at all levels.  So those duplicate pages remain duplicated.
+<p>
+Hongzhen Luo has come up with <a
+href="/ml/all/20240731080704.678259-1-hongzhen@linux.alibaba.com">a
+solution</a> for the <a
+href="https://docs.kernel.org/filesystems/erofs.html">EROFS</a> filesystem,
+though — at the file level, at least.  EROFS is a read-only filesystem, so
+the problems that come from possible changes to its files do not arise
+here.
+<p>
+An EROFS filesystem can be created with a special extended attribute,
+called <tt>trusted.erofs.fingerprint</tt>, attached to each file; the
+content of that attribute is a hash of the file's contents.  When a file in
+the filesystem is opened for reading, the hash will be stored in an <a
+href="https://docs.kernel.org/core-api/xarray.html">XArray</a>-based data
+structure, associated with the file's inode.  Anytime another file is
+opened, its hash is looked up in that data structure; if there is a match,
+the open is rerouted to the inode of the file that was opened first.
+<p>
+This mechanism can result in a number of processes holding file descriptors
+to different files on disk that all refer to a single file within the
+kernel.  Since the files have the same contents, though, this difference is
+not visible to user space (though an <a
+href="https://man7.org/linux/man-pages/man2/stat.2.html"><tt>fstat()</tt></a>
+call might return a surprising inode number).  Within the kernel,
+redirecting file descriptors for multiple identical files to  a
+single file means that only one copy of that file's contents needs to be
+stored in the page cache.
+<p>
+The benchmark results included with the series show a significant reduction
+in memory use for a number of different applications.  Since this feature
+is contained entirely within the EROFS filesystem, it seems unlikely to run
+into the sorts of challenges that often await core memory-management
+patches.  Deduplication of file-backed data in the page cache remains a
+hard problem in the general case, but it appears to have been at least
+partially solved for this one narrow case.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-EROFS">Filesystems/EROFS</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Huge_pages">Memory management/Huge pages</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Tiered-memory_systems">Memory management/Tiered-memory systems</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/984839/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor985859"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hard links?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2024 15:56 UTC (Thu)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/985859/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+SQ: why not just hard link identical files when constructing EROFS images? Most of the problems with hard links occur when mutating files behind the hard link (e.g. atomic rename versus in-place replacement), but what problems would simple hard links cause in an immutable filesystem?<br>
+<p>
+Or is the patch more about sharing content between identical files in *different* filesystems? That seems much riskier. Suppose I have /dev/sda and /dev/sdb mounted on /mnt/foo and /mnt/bar, respectively. Let's suppose both filesystems are EROFS. One program opens /mnt/foo/my.txt and another, unrelated, program opens identical /mnt/bar/my.txt. AIUI, this patch silently re-routes the second open (for the file under /mnt/bar) to the inode already opened under /mnt/foo.<br>
+<p>
+What happens when I surprise-remove /dev/sda? ISTM both programs would break, even though my expectation would be that only the program that opened /mnt/foo/my.txt would break and the program that opened /mnt/bar/my.txt would keep working.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/985859/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor985876"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hard links?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2024 20:44 UTC (Thu)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/985876/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My impression is that EROFS isn't for the use case of filesystems mapped one-to-one with physical devices. It's for the case where you have a single physical device storing a dozen images, each used with different overlays to make different containers. I believe the implementation is such that you'd have three storage areas: one with all of the file contents, one with the mapping of paths in /mnt/foo, and one with the mapping of paths in /mnt/bar, and all three would be on the same physical device. Currently, despite the fact that both /mnt/foo/my.txt and /mnt/bar/my.txt use the same storage for the file contents, the cache stores it twice.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/985876/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor985900"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hard links?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2024 9:27 UTC (Fri)
+                               by <b>hsiangkao</b> (guest, #123981)
+                              [<a href="/Articles/985900/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; SQ: why not just hard link identical files when constructing EROFS images? Most of the problems with hard links occur when mutating files behind the hard link (e.g. atomic rename versus in-place replacement), but what problems would simple hard links cause in an immutable filesystem?</span><br>
+<p>
+Simply because hardlink cannot resolve cases where files have identity data but different metadata (such as timestamps and/or file modes or likewise).  That is quite common due to image rebuild or likewise, but users need to keep different metadata.<br>
+<p>
+<span class="QuotedText">&gt; Or is the patch more about sharing content between identical files in *different* filesystems? That seems much riskier. Suppose I have /dev/sda and /dev/sdb mounted on /mnt/foo and /mnt/bar, respectively. Let's suppose both filesystems are EROFS. One program opens /mnt/foo/my.txt and another, unrelated, program opens identical /mnt/bar/my.txt. AIUI, this patch silently re-routes the second open (for the file under /mnt/bar) to the inode already opened under /mnt/foo.</span><br>
+<span class="QuotedText">&gt; What happens when I surprise-remove /dev/sda? ISTM both programs would break, even though my expectation would be that only the program that opened /mnt/foo/my.txt would break and the program that opened /mnt/bar/my.txt would keep working.</span><br>
+<p>
+This patchset is still far from complete, ideally it needs an anonymous address_space for both identified inodes.  If one instance unmounted, it will re-route to different source of another device.<br>
+<p>
+Sorry about the incomplete implementation so far due to his current kernel knowledge.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/985900/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor985904"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hard links?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2024 9:46 UTC (Fri)
+                               by <b>hsiangkao</b> (guest, #123981)
+                              [<a href="/Articles/985904/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;&gt; SQ: why not just hard link identical files when constructing EROFS images? Most of the problems with hard links occur when mutating files behind the hard link (e.g. atomic rename versus in-place replacement), but what problems would simple hard links cause in an immutable filesystem?</span><br>
+<span class="QuotedText">&gt; Simply because hardlink cannot resolve cases where files have identity data but different metadata (such as timestamps and/or file modes or likewise). That is quite common due to image rebuild or likewise, but users need to keep different metadata.</span><br>
+<p>
+Also hardlinks cannot resolve cross-mount instances, which is common for image-based golden filesystem cases, of course.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/985904/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor988677"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hard links?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2024 1:59 UTC (Wed)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/988677/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Huh?  You can't call link(2) between different mounts, but then your filesystem is readonly, so you can't call any directory-modifying syscalls anyway.  Different mounts can very well share struct inode instances - otherwise cache coherency would've been an awful PITA.<br>
+<p>
+Metadata differences make for a valid reason; any mount-related stuff is a red herring.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/988677/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor985932"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hard links?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2024 13:06 UTC (Fri)
+                               by <b>hsiangkao</b> (guest, #123981)
+                              [<a href="/Articles/985932/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;&gt; Or is the patch more about sharing content between identical files in *different* filesystems? That seems much riskier. Suppose I have /dev/sda and /dev/sdb mounted on /mnt/foo and /mnt/bar, respectively. Let's suppose both filesystems are EROFS. One program opens /mnt/foo/my.txt and another, unrelated, program opens identical /mnt/bar/my.txt. AIUI, this patch silently re-routes the second open (for the file under /mnt/bar) to the inode already opened under /mnt/foo.</span><br>
+<span class="QuotedText">&gt;&gt; What happens when I surprise-remove /dev/sda? ISTM both programs would break, even though my expectation would be that only the program that opened /mnt/foo/my.txt would break and the program that opened /mnt/bar/my.txt would keep working.</span><br>
+<span class="QuotedText">&gt; This patchset is still far from complete, ideally it needs an anonymous address_space for both identified inodes. If one instance unmounted, it will re-route to different source of another device.</span><br>
+<span class="QuotedText">&gt; Sorry about the incomplete implementation so far due to his current kernel knowledge.</span><br>
+<p>
+Also add some words, for the case you mentioned, there is nothing different from page-based page cache sharing and even page cache sharing within the same device (considering data link errors, various device mapper targets, and more);<br>
+<p>
+That is, you turn on this page cache feature _only if_ you trust all data sources since each data source can contribute data to the system shared page cache.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/985932/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986017"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hard links?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2024 14:38 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/986017/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the explanation. Super helpful; sounds like a nice feature once the kinks get worked out.<br>
+<p>
+Another SQ: might it be possible to piggyback on top of fs-verity and make it general across filesystems --- at least read only ones? fs-verity already maintainers per file hashes in metadata, and fs-verity ensures that nobody's lying about what's in the file.<br>
+<p>
+Also, have you considered some kind of "RAID 1" striped IO strategy? If I have block devices A and B with read only filesystems containing identical file X, why not read X from A and B in parallel? I can think of all sorts of fun things to do with the knowledge that two files on the same filesystem are identical.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986017/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986019"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hard links?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2024 15:14 UTC (Fri)
+                               by <b>hsiangkao</b> (guest, #123981)
+                              [<a href="/Articles/986019/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Another SQ: might it be possible to piggyback on top of fs-verity and make it general across filesystems --- at least read only ones? fs-verity already maintainers per file hashes in metadata, and fs-verity ensures that nobody's lying about what's in the file.</span><br>
+<p>
+I tend to keep this feature knob priviledged all the time (yeah, I know EROFS mounting needs priviledge).  The priviledged user mount program could decide whether it uses dm-verity/fs-verity or other(TM) technologies to enable this feature safely (so we trust the priviledged user mount program.)<br>
+<p>
+<span class="QuotedText">&gt; Also, have you considered some kind of "RAID 1" striped IO strategy? If I have block devices A and B with read only filesystems containing identical file X, why not read X from A and B in parallel? I can think of all sorts of fun things to do with the knowledge that two files on the same filesystem are identical.</span><br>
+<p>
+I guess it will be helpful (also it's still compatible if linux MM has a finer page-based page cache sharing <br>
+mechanism in the future), but I think let's make this feature work with the original use case first.<br>
+<p>
+Also I think it would be better to reuse the current EROFS trusted domain id concept. I think all sources in the same trusted domain (e.g. from the same physical device, the same network host or a user-defined trusted array could form a domain) could share page cache safely, but even some sources from different trusted domain won't share by design.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986019/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor985915"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hard links?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2024 12:17 UTC (Fri)
+                               by <b>HongzhenLuo</b> (guest, #172928)
+                              [<a href="/Articles/985915/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; SQ: why not just hard link identical files when constructing EROFS images? Most of the problems with hard links occur when mutating files behind the hard link (e.g. atomic rename versus in-place replacement), but what problems would simple hard links cause in an immutable filesystem?</span><br>
+<p>
+Let's take the container scenario as an example. Due to different mount points, accessing the same file in two containers will generate different inodes within the EROFS file system. Therefore, it's not feasible to share the page cache simply through hard links. <br>
+<p>
+<span class="QuotedText">&gt; Or is the patch more about sharing content between identical files in *different* filesystems? That seems much riskier. Suppose I have /dev/sda and /dev/sdb mounted on /mnt/foo and /mnt/bar, respectively. Let's suppose both filesystems are EROFS. One program opens /mnt/foo/my.txt and another, unrelated, program opens identical /mnt/bar/my.txt. AIUI, this patch silently re-routes the second open (for the file under /mnt/bar) to the inode already opened under /mnt/foo.</span><br>
+<span class="QuotedText">&gt; What happens when I surprise-remove /dev/sda? ISTM both programs would break, even though my expectation would be that only the program that opened /mnt/foo/my.txt would break and the program that opened /mnt/bar/my.txt would keep working.</span><br>
+<p>
+As @hsiangkao said, the current patch set is still incomplete, although it has shown positive effects in saving memory. The current implementation maps files with identical content to the same list and uses the page cache of a certain inode in that list to fulfill read requests. When an inode is destroyed, it is removed from the list. However, if the inode currently being destroyed happens to be the inode for the shared page cache, it must wait for all reads to complete before being removed from the list (this is also a drawback of the latest implementation). A solution that can alleviate this situation is to perform reads using anonymous inode: all files with the same content are mapped to the same anonymous inode, and reading is performed through the page cache of this anonymous inode. When an inode is destroyed, the anonymous inode will obtain the necessary information to complete the read request from one of the remaining inodes. From the perspective of the unmounted instance, this will hardly take any waiting time.<br>
+<p>
+Finally, I am a new kernel developer. Due to my limited knowledge of the kernel, I am sorry for the incompleteness in the current implementation.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/985915/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor988673"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hard links?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 4, 2024 0:52 UTC (Wed)
+                               by <b>fest3er</b> (guest, #60379)
+                              [<a href="/Articles/988673/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Finally, I am a new kernel developer. Due to my limited knowledge of the kernel, I am sorry for the incompleteness in the current implementation."<br>
+<p>
+No need for apologies. As a work-in-progress, it is expected to have functionality holes and to change significantly as inefficiencies are found, methods are polished, and you learn more about the kernel innards.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/988673/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor985877"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">cases where it might be better to keep less-frequently accessed data in nearer memory</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2024 20:34 UTC (Thu)
+                               by <b>dankamongmen</b> (subscriber, #35141)
+                              [<a href="/Articles/985877/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+i'm trying to think of cases where Bélády's "algorithm" doesn't strictly want this condition met i.e. where optimizing for frequency of access is suboptimal independently of policy (i probably ought reread Bélády 1969). i guess it then comes down to scheduling and timing?<br>
+<p>
+assume i have a process that continuously walks 32MB of data, snugly filling L3 (assume inclusive caches), and this is 99.999% of my memory accesses across the machine. then i have one process that touches 4KB once per second. once p1 warms cache, each time processes change, i hit a single page. if i discount the cache, it makes sense to keep P1's pages warm over P2, as they are referenced far more often. but they're actually very rarely referenced, due to cache hits. so keep P2's page warm at all costs (reducing latency of its inevitable capacity miss); P1 has a better chance of loading the page it needs early, since it's interacting with so many more pages.<br>
+<p>
+so let's say P1 is 64MB of data, and thus it can't fit in L3. now i'm actually hitting my P1 pages far more often than i hit my P2 page, and i ought prioritize them over the lousy P2 page, right? possibly not -- if P1's computation cannot keep up with L3 bandwidth, and i have sufficient memory bandwidth, L3 misses can be hidden entirely underneath the rolling computation. P2 has nothing to hide its prompt miss under, and stalls. so i probably always want to keep the P2 page live, even at the exclusion of a P1 page that is hit far more often. total transfer from memory remains the same either way, right?<br>
+<p>
+i'm sure priorities and fairness complicate this further.<br>
+<p>
+just thinking out loud.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/985877/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor985887"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are these calls prone to abuse?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2024 1:40 UTC (Fri)
+                               by <b>DanilaBerezin</b> (guest, #168271)
+                              [<a href="/Articles/985887/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Quite simply, this patch adds two new operations to the madvise() system call. They are called MADV_DEMOTE and MADV_PROMOTE; they do exactly what one would expect. An application can use these operations to explicitly request the movement of memory between tiers in cases where it knows that the access pattern is about to change. </span><br>
+<p>
+Do these calls really just explicitly tell the kernel to promote or demote the memory? As in, barring some sort of error condition, these calls are guaranteed to succeed in either demoting or promoting the memory? If that's the case, couldn't user space programs just abuse these calls to constantly give themselves memory in higher tiers? I would hope that it's just a suggestion (as is in the name of "madvise") to the kernel that may or may not be followed. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/985887/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986088"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are these calls prone to abuse?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2024 11:40 UTC (Sat)
+                               by <b>grawity</b> (subscriber, #80596)
+                              [<a href="/Articles/986088/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is that generally a problem on Linux? Do we currently have programs abusively mlocking or renicing themselves to get more resources?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986088/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986141"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Are these calls prone to abuse?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2024 16:02 UTC (Sun)
+                               by <b>DanilaBerezin</b> (guest, #168271)
+                              [<a href="/Articles/986141/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm honestly not sure, but my instinct is to not trust user space so that kind of raises alarms in my head.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986141/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor986095"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">zero pages</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2024 17:22 UTC (Sat)
+                               by <b>mst@redhat.com</b> (subscriber, #60682)
+                              [<a href="/Articles/986095/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+why is a special machinery needed to find the zero pages?<br>
+it looks like a subset of the problem that KSM is trying to address,<br>
+does it not?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986095/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

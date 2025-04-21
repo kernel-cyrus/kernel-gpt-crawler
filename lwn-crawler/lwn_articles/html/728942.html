@@ -1,0 +1,510 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Reconsidering the scheduler's wake_wide() heuristic [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/728942/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/729078/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/728942/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Reconsidering the scheduler's wake_wide() heuristic</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>We're bad at marketing</b>
+<p>
+We can admit it, marketing is not our strong suit. Our strength is
+writing the kind of articles that developers, administrators, and
+free-software supporters depend on to know what is going on in the
+Linux world. Please <a href="/Promo/nsn-bad/subscribe">subscribe today</a> to help us keep doing that, and so
+we don’t have to get good at marketing.
+</blockquote>
+<div class="GAByline">
+           <p>July 27, 2017</p>
+           <p>This article was contributed by <a href="http://www.codeblueprint.co.uk/">Matt Fleming</a></p>
+           </div>
+The kernel's CPU scheduler is charged with choosing which task to run next,
+but also with deciding where in a multi-CPU system that task should run.
+As is often the case, that choice comes down to heuristics — rules of thumb
+codifying the developers' experience of what tends to work best.  One key
+task-placement heuristic has been in place since 2015, but a recent
+discussion suggests that it may need to be revisited.
+
+<p>Scheduler wakeups happen all the time. Tasks will often wait for
+an event (e.g. timer expiration, POSIX signal, <tt>futex()</tt> system call,
+etc.); a wakeup is sent when the event occurs and the waiting task
+resumes execution. The scheduler's job is to find the best CPU to run
+the task being woken.
+
+Making the correct choice is crucial for performance. Some
+message-passing workloads benefit from running tasks on the same CPU, for example;
+the <a
+href="http://people.redhat.com/mingo/cfs-scheduler/tools/pipe-test.c">pipetest</a>
+micro-benchmark is a simple model of that kind of
+workload. Pipetest uses two communicating tasks that take turns
+sending and receiving messages; the tasks never need to run in
+parallel and thus perform best if their data is in the cache of a single
+CPU.</p>
+
+<p>In practice, many workloads do not communicate in lockstep
+— in fact most workloads do not take turns sending messages. In
+highly parallel applications, messages are sent at random times in
+response to external input. A typical communication scheme is the
+producer-consumer model, where one master task wakes up multiple slave
+tasks. These workloads perform better if the tasks run simultaneously on
+different CPUs. But modern machines have lots of CPUs to choose from
+when waking tasks. The trouble is picking the best one.</p>
+
+<p>The choice of CPU also affects power consumption. Packing tasks onto
+fewer CPUs allows the rest of them to enter low-power states and save
+power. Additionally, if CPUs can be idled in larger groups (all CPUs on a
+socket, for example), less power is used. If an idle CPU in
+a low-power state is selected to run a waking task, an increased cost
+is incurred as the CPU transitions to a higher state.</p>
+
+<p>The scheduler guesses which type of workload is running based on the
+wakeup pattern, and uses that to decide whether the tasks should be
+grouped closely together (for better cache utilization and power
+consumption), or spread widely across the system (for better CPU
+utilization).</p>
+
+<p>This is where <tt>wake_wide()</tt> comes into the picture.
+The <tt>wake_wide()</tt> function is one of the scheduler's more intricate
+heuristics. It determines whether a task that's being woken up should
+be pulled to a CPU near the task doing the waking, or allowed to run
+on a distant CPU, potentially on a different NUMA node. The tradeoff
+is that packing tasks improves cache locality but also increases the
+chances of overloading CPUs and causing scheduler run-queue latency.</p>
+
+<h4>History</h4>
+
+<p>The current <tt>wake_wide()</tt> functionality was <a
+href="https://marc.info/?l=linux-kernel&amp;m=143688840122477">introduced</a>
+by Mike Galbraith in 2015
+based on a <a href="https://marc.info/?l=linux-kernel&amp;m=143276177321620">problem
+statement</a> in a
+patch from Josef Bacik, who explained that Facebook has a
+latency-sensitive, heavily multithreaded application that follows the
+producer-consumer model, with one master task per NUMA node. The
+application's performance drops dramatically if tasks are placed onto
+busy CPUs when woken, which happens if the scheduler tries to pack
+tasks onto neighboring CPUs; cache locality isn't the most important
+concern for this application, finding an idle CPU is.</p>
+
+<p>So Galbraith created a switching heuristic that counts the number of
+wakeups between tasks (called "flips") to dynamically identify 
+master/slave relationships. This heuristic, <a
+href="http://elixir.free-electrons.com/linux/v4.12/source/kernel/sched/fair.c#L5355">implemented
+in <tt>wake_wide()</tt></a>, feeds 
+into <tt>select_task_rq_fair()</tt> and guides its understanding of the best
+CPU to put a waking task on.  This function is short enough to show
+directly:
+<p>
+<pre>
+    static int wake_wide(struct task_struct *p)
+    {
+	unsigned int master = current-&gt;wakee_flips;
+	unsigned int slave = p-&gt;wakee_flips;
+	int factor = this_cpu_read(sd_llc_size);
+
+	if (master &lt; slave)
+		swap(master, slave);
+	if (slave &lt; factor || master &lt; slave * factor)
+		return 0;
+	return 1;
+    }
+</pre>
+<p>
+
+If the number of slave tasks is less than
+the number of CPUs that share a last-level cache (LLC)
+<tt>wake_wide()</tt> will return zero to indicate that the task should not
+wake on a different LLC domain.
+In response,
+<a
+href="http://elixir.free-electrons.com/linux/v4.12/source/kernel/sched/fair.c#L5964"><tt>select_task_rq_fair()</tt></a>
+will pack the tasks, only looking 
+for an idle CPU within a single LLC domain.</p>
+
+<p>If there are more tasks than CPUs (or no master-slave relationship is
+detected), then tasks are allowed to spread out to other LLC domains
+and a more time-consuming system-wide search for an idle CPU is
+performed. When selecting an idle CPU in a different LLC domain, the
+current power state impacts the scheduler's choice. Since exiting
+low-power states takes time, the idle CPU in the highest power state
+is picked to minimize wakeup latency..</p>
+
+<h4>A new direction?</h4>
+
+<p>Recently, Joel Fernandes <a href="https://marc.info/?l=linux-kernel&amp;m=149878198008808">raised some
+questions</a> about
+the <tt>wake_wide()</tt> design, saying: "<q>I didn't follow why we multiply
+the slave's flips with llc_size</q>".
+Bacik <a
+href="https://marc.info/?l=linux-kernel&amp;m=149878376809128">responded</a>,
+saying that the 
+current code may try too hard to pack tasks, especially when those tasks
+don't benefit from the shared LLC: "<q>I'm skeptical of the slave &lt;
+factor test, I think it's too high of a bar in the case where cache
+locality doesn't really matter</q>". He also suggested that removing the
+expression altogether might fix the aggressive packing problem.</p>
+
+<p>I <a
+href="https://marc.info/?l=linux-kernel&amp;m=149882829819900">provided
+some data</a> to show that dropping the
+<tt>slave&nbsp;&lt;&nbsp;factor</tt> test can improve the performance of <a
+href="http://people.redhat.com/mingo/cfs-scheduler/tools/hackbench.c">hackbench</a>
+by reducing the maximum duration over multiple runs. The reason is
+related to the example that Bacik described where tasks are packed too
+aggressively. The tasks in hackbench are not paired in a single
+reader/writer relationship; instead, all tasks communicate among themselves.
+If hackbench forks more tasks than can fit in a single LLC domain, the
+tasks will likely be evenly distributed across multiple LLC domains
+when the benchmark starts. 
+Subsequent packing by the scheduler causes them to be ping-ponged back and
+forth across the LLC domains, resulting in extremely poor cache usage,
+and correspondingly poor performance.</p>
+
+<p>Galbraith was quick to warn against making rash changes to
+<tt>wake_wide()</tt>: "<q>If you have ideas to improve or replace that heuristic,
+by all means go for it, just make damn sure it's dirt cheap.
+Heuristics all suck one way or another, problem is that nasty old
+‘perfect is the enemy of good' adage</q>".
+
+But Bacik continued to push for fully utilizing the entire system's
+CPUs and tweaking the scheduler to be less eager to pack tasks to a
+single LLC domain. He suspects that the latencies he sees with
+Facebook's workload would be reduced if a system-wide search was
+performed in addition to the single LLC domain search when no idle CPU
+was found.</p>
+
+<p>One point of view missing from the discussions was the developers who are
+concerned with power first and performance second. Changing the
+<tt>wake_wide()</tt> heuristic to pack tasks less aggressively has the
+potential to cause power consumption regressions.</p>
+
+<h4>Back to the drawing board</h4>
+
+<p>In the end, no proposal was the clear winner. "<q>I think messing with
+<tt>wake_wide()</tt> itself is too big of a hammer, we probably need a middle
+ground</q>", Bacik said. More testing and analysis will need to be done,
+but even then, a solution might never appear. The multitude of
+<a href="/Articles/725238/">available scheduler benchmarks</a> and
+tracing tools make analyzing the current behavior the easy part;
+inventing a solution that improves all workloads at the same time is
+the real challenge.</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Scheduler">Scheduler</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Fleming_Matt">Fleming, Matt</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/728942/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor729100"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reconsidering the scheduler's wake_wide() heuristic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 28, 2017 11:19 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/729100/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree that one must be very careful not to come up with an algorithm that benefits an MPI-like loads-of-communicating-processes model if it penalizes the much more common "two tasks chattering frequently" model. There are a *lot* of those: everything from compilers through anything at all that uses an X server on the same machine. Even on headless and server-class machines they are probably a more common workload than the MPI model is.<br>
+<p>
+Equally, one should probably factor the CPU cache size in *somewhere*, though with modern topologies it's hard to figure out how: probably all levels of cache should influence the computation somehow (preferring to move things more locally unless the cache might be overloaded or a widescale search for a different NUMA node is called for), but since the number of levels and their relation with cores is all rather arch-dependent it's hard to even think of a heuristic that doesn't rapidly degrade into a muddy mess.<br>
+<p>
+I'm wondering... I know scheduler knobs are strongly deprecated, but if you're running a huge MPI workload you probably *know* you are. This seems like a perfect place for a knob that MPI itself flips to say "we expect to use all nodes in a constantly-chattering pattern, ignore cache locality concerns". There aren't all that many libraries that would need adjusting, either... users not running huge MPI workloads (and libraries other than things like MPI) would not need to know about this knob.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729100/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor729103"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reconsidering the scheduler's wake_wide() heuristic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 28, 2017 12:59 UTC (Fri)
+                               by <b>mjthayer</b> (guest, #39183)
+                              [<a href="/Articles/729103/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My naivety will probably show here, but if you are running a custom MPI workload that is important enough to submit a patch to the kernel scheduler to support, what speaks against the MPI controlling CPU affinity directly from user space?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729103/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor729108"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reconsidering the scheduler's wake_wide() heuristic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 28, 2017 14:23 UTC (Fri)
+                               by <b>ejr</b> (subscriber, #51652)
+                              [<a href="/Articles/729108/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Most do, IIRC, although that becomes interesting with mixed MPI+OpenMP+GPU codes. You do end up treating NUMA systems as a cluster on a fast interconnect.<br>
+<p>
+This patch does not look inspired by MPI codes. But there are some odd phrases in the article's introduction that probably triggered the original post's worries. Many large-scale parallel codes very much work in lock step in critical areas.  Consider the all-to-all reduction for computing a residual (error term stand-in) and determining convergence. That is the opposite of the article's statement that parallel programs respond randomly...<br>
+<p>
+I also have plenty of confusing data on packing v. spreading for irregular data analysis (e.g. graph algorithms).  The cache locality already is kinda meh, and you often get better performance from engaging more memory controllers simultaneously and having the larger aggregate L3 across all CPUs.  But not always, and there is no clear indicator that I can see from my codes.  I also haven't had the time / student to dig into the choices.  No heuristic will be right for everyone.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729108/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor729196"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reconsidering the scheduler's wake_wide() heuristic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 29, 2017 9:31 UTC (Sat)
+                               by <b>garloff</b> (subscriber, #319)
+                              [<a href="/Articles/729196/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So, it indeed seems that an application should tell the kernel how hard it should try to place communicating processes close to each other. Probably should not be binary, but allow for different steps. <br>
+Question is whether this can be done efficiently at process group scope or whether it needs to be system-wide. Maybe Cgroup-wide?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729196/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor729274"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reconsidering the scheduler's wake_wide() heuristic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2017 22:51 UTC (Sun)
+                               by <b>glenn</b> (subscriber, #102223)
+                              [<a href="/Articles/729274/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree: the CPU cache size should be considered, but the amount of data shared between producers and consumers is important as well.<br>
+<p>
+I researched (<a href="https://tinyurl.com/y7lxzcy4">https://tinyurl.com/y7lxzcy4</a>) enhancing a deadline-based scheduler with cache-topology-aware CPU selection, and I studied the potential benefits for workloads where producer/consumer processes can be described as a directed graph (you see workloads like this in video and computer vision pipelines).  I hesitate to generalize too much from my scheduler/experiments, but I think some of the broader findings can be applied to Linux’s general scheduler.<br>
+<p>
+To my surprise, I discovered something obvious that I should have realized earlier in my research: (1) For producers/consumers that share little data, cache-locality is not very important—the overhead due to cache affinity loss is negligible; and (2) for producers/consumers that share a LOT of data, cache-locality is not very important—most of the shared data are self-evicted (or evicted by unrelated work executing concurrently) from the cache anyhow.  In cases (1) and (2), getting scheduled on an available CPU is more important.  Cache-aware scheduling is useful only for producers/consumers that share a moderate amount of data (“goldilocks workloads”).  Moreover, you must strive to schedule a consumer soon after its producer(s) produce, or the shared data may be evicted from the cache by concurrently scheduled unrelated workload.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729274/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor729735"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reconsidering the scheduler's wake_wide() heuristic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2017 12:40 UTC (Thu)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/729735/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I agree that one must be very careful not to come up with an algorithm that benefits an MPI-like loads-of-communicating-processes model if it penalizes the much more common "two tasks chattering frequently" model.</font><br>
+<p>
+Maybe we could slim that heuristic down to “anything added to the scheduler should not further widen MuQSS's advantage”? :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729735/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor729280"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reconsidering the scheduler's wake_wide() heuristic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2017 5:55 UTC (Mon)
+                               by <b>josefbacik</b> (subscriber, #90083)
+                              [<a href="/Articles/729280/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sorry for some reason I missed the follow up conversations, I'll go back and read through them shortly and respond on list.<br>
+<p>
+However I did come up with a different solution while looking at a CPU imbalance problem (<a href="https://josefbacik.github.io/kernel/scheduler/cgroup/2017/07/24/scheduler-imbalance.html">https://josefbacik.github.io/kernel/scheduler/cgroup/2017...</a>).  Mike is right, any messing with the heuristic here is likely to end in tears.  A problem with wake_wide is overloading the waker CPU when it decides we need affinity, even on heavily loaded systems.  Instead of messing with wake_wide and trying to make it smarter I just addressed the problem it sometimes creates, ping-ponging.  One of my patches provides a way to detect when we are trying to wake affine something that has been recently load balanced and skip the wake affine.  This gets us the same behavior as if wake_wide returned 1 and side steps the problem of trying to do a one size fits most heuristic in wake_wide.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729280/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor729993"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reconsidering the scheduler's wake_wide() heuristic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2017 3:18 UTC (Sun)
+                               by <b>walkerlala</b> (guest, #104060)
+                              [<a href="/Articles/729993/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am wondering whether it is possible to provide heuristics for the scheduler from userspace. That would be a lot easier to tackle those task, I guess.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729993/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2017, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,315 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Beginning the software-interrupt lock pushdown [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/939973/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/940291/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/939973/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Beginning the software-interrupt lock pushdown</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 4, 2023</br>
+           </div>
+The big kernel lock (BKL) is a distant memory now but, for years, it was
+one of the more intractable problems faced by the kernel development
+community.  The end of the BKL does not mean that the kernel is without
+problematic locks, however.  In recent times, some attention has been paid
+to the software-interrupt (or "bottom half") lock, which can create latency
+problems, especially on realtime systems.  Frederic Weisbecker is taking a
+new tack in his campaign to cut this lock down to size, with an approach
+based on how the BKL was eventually removed.
+<p>
+The Linux kernel was initially developed on a uniprocessor system —
+understandably, since that was all any of us had back then — and the code
+was, as a result, heavily based on the assumption that it was running on
+<i>the</i> CPU and no others existed.  The BKL was eventually introduced to
+enable Linux to run on those multiprocessor machines that, industry
+analysts assured us, would eventually be all the rage.  It ensured that
+only one CPU was ever running kernel code at any given time, making all
+kinds of concurrency problems go away, but at a substantial performance
+cost, especially as the number of CPUs increased.  It did not take long for
+the realization to sink in that the BKL had to go.
+<p>
+The approach that was taken in many subsystems (described more in depth in
+<a href="/Articles/283066/">this article</a>) was to push the BKL down into
+lower levels of the system.  Rather than call every driver's
+<tt>open()</tt> function with the BKL held, every driver was modified to
+acquire the BKL itself.  Then, the <tt>open()</tt> functions could be
+safely called without the BKL, and each driver could be independently
+audited and fixed if needed, after which its use of the BKL could be
+removed.  This pushdown broke up a big problem into a large number of
+smaller, much more tractable problems.  It took years, but the BKL was
+finally <a href="/Articles/424677/">removed</a> in 2011.
+<p>
+Software interrupts are a deferred-execution method for work that is
+urgent, but which cannot be done directly in the context of a hardware
+interrupt.  When there is this kind of work to do, a subsystem will raise
+the software interrupt by setting a flag; that will cause its handler to be
+called at the next opportune moment, usually immediately after the
+completion of hardware-interrupt processing or before returning to user
+space from a system call.  Processing can also be pushed out to a
+separate <tt>ksoftirqd</tt> thread if it starts to take too much time.  See
+<a href="/Articles/779738/">this article</a> for a more thorough discussion
+of this mechanism — and of one of Weisbecker's other attempts to improve it.
+<p>
+There are many users of software interrupts, including tasklets,
+networking, the block subsystem, read-copy-update, and kernel timers.  On
+some workloads, software-interrupt processing can be a significant part of
+the overall load on the CPUs; it can run for long enough to create
+latency problems for software running in user space.  Kernel code that
+disables software-interrupt processing (to avoid race conditions with the
+handlers) becomes non-preemptible and can also cause unwanted latencies.
+In general, like the BKL, software interrupts reflect a design that might
+have been suitable decades ago, but which is problematic now.
+<p>
+One aspect of that design is that software-interrupt handlers exclude each
+other; only one can be executing on a given CPU at any time.  As a result,
+if the block software-interrupt handler runs for a long time, the handlers
+for networking and timers may be indefinitely delayed.  This is the case
+even though it is rare for software-interrupt handlers of different types
+to race with each other.  There is no way to know for sure that running two
+handlers concurrently is safe, so that is not done.
+<p>
+Weisbecker's <a
+href="/ml/linux-kernel/20230801132441.559222-1-frederic@kernel.org/">patch
+set</a> is meant to chip away at this problem using a BKL-style pushdown in
+the timer subsystem.  Timer functions are queued from all over the kernel;
+they tend to be independent and to lack concurrency problems with other
+software-interrupt handlers.  Almost all of them could be run entirely
+concurrently with other software-interrupt processing — but the "almost"
+part is the catch.  Making timer processing entirely independent of
+software-interrupt processing without being sure of the safety of every
+timer function would be a way to introduce hard-to-debug problems.
+<p>
+Weisbecker, instead, takes a two-step approach to introducing more
+concurrency to timer processing.  The first is to allow individual
+software-interrupt vectors to be disabled without disabling
+software-interrupt processing entirely.  The purpose of the patch set is to
+allow timer functions to run concurrently with other software interrupts,
+but they still should not run concurrently with each other.  By disabling
+the processing of timer events (on the local CPU), the timer handler can
+safely re-enable software-interrupt processing without the risk of being
+called again.
+<p>
+The second step is to allow individual timer functions to inform the timer
+subsystem that they can be run concurrently with other software-interrupt
+handling.  Any timer function that will not race with software-interrupt
+handlers, or which performs its own software-interrupt disabling where
+needed, can be marked by adding the <tt>TIMER_SOFTINTERRUPTIBLE</tt> flag
+when setting up its timer event.  When the timer subsystem sees this flag,
+it will re-enable software-interrupt processing while that timer function
+runs.  As a result, the timer function can be preempted if some
+more-important work comes along.
+<p>
+In the patch set, only one timer function, <a
+href="/ml/linux-kernel/20230801132441.559222-7-frederic@kernel.org/"><tt>process_timeout()</tt></a>
+is marked in this way.  Weisbecker looks forward to a day, though,
+"<q>after a few years</q>", when all of the kernel's timer functions have
+been audited and made safe to run concurrently with software-interrupt
+handlers; at that point, it will be possible to remove timer processing
+from the software-interrupt mechanism entirely.  That, in turn, will be a
+small step toward the eventual removal of software interrupts in general.
+<p>
+Clearly, there is a fair amount of work needed to get to that point.  Even
+this patch set needs "<q>more tweaks</q>" to enable interruptible timer
+functions to preempt other software-interrupt handlers, which is an
+important part of the problem.  But this work could represent a step in
+that direction, should it find its way into the mainline.  Weisbecker has
+made a few attempts to address software interrupts by now without a lot of
+success.  Eventually, though, as with the BKL, the right approach will be
+found and a longstanding problem will, finally, be resolved.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Interrupts-Software">Interrupts/Software</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/939973/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor940497"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Beginning the software-interrupt lock pushdown</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2023 15:47 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/940497/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Some of this article confuses me, for example<br>
+<p>
+<span class="QuotedText">&gt; The purpose of the patch set is to allow timer functions to run concurrently with other software interrupts, but they still should not run concurrently with each other.</span><br>
+<p>
+Softirqs (AFAIK!) run concurrently with each other; they are a per-cpu concept and always have been. Any given CPU can only be running one thing at a time. What I think is meant is that this patch set allows softirqs to be interrupted by other softirqs. So the network softirq can interrupt a long-running timer softirq (for example).<br>
+<p>
+Do I understand correctly?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940497/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor940500"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Beginning the software-interrupt lock pushdown</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2023 16:13 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/940500/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Much of this is per-CPU, yes, sorry if that wasn't entirely clear.  I believe you understand correctly, yes.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940500/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor940515"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Beginning the software-interrupt lock pushdown</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2023 20:30 UTC (Fri)
+                               by <b>tglx</b> (subscriber, #31301)
+                              [<a href="/Articles/940515/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, softirq execution is strict per CPU. The point is that local_bh_disable() or one of the lock_bh() variants have more or less the same problem as the BKL back then. They protect world, but it's absolutely unclear what needs to be serialized against what. That has become an real issue and we need to get this down to fine grained sensible locking. <br>
+<p>
+Once that happens then we can also move parts of that softirq execution context, which is problematic on its own, into other execution contexts which can be properly controlled. Why?<br>
+<p>
+Softirq processing is context stealing and prevents the scheduler to control it. The amount of heuristics people have added to "control" this is disgusting and often enough it had to be undone because its fine for workload A but completely sucks for workload B.<br>
+<p>
+Sadly enough a lot of people knew that problem for many years (it's one of the issues RT made more prominent), but unfortunately papering over it with duct tape and heuristics "worked" by some definition of "works". The sad news is that the amount of accumulated technical debt is now at least an order or magnitude larger than it was ten years ago.<br>
+<p>
+A recurring scheme caused by the features first and correctness later approach, which is even the documented dogma of some kernel subsystems.<br>
+<p>
+Vented enough. Going back to mop up technical debt...<br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940515/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

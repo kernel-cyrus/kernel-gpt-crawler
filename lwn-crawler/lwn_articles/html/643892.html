@@ -1,0 +1,3512 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Trading off safety and performance in the kernel [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/643892/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/643555/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/643892/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Trading off safety and performance in the kernel</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 12, 2015</br>
+           </div>
+The kernel community ordinarily tries to avoid letting users get into a
+position where the integrity of their data might be compromised.  There are
+exceptions, though; consider, for example, the ability to explicitly flush
+important data to disk (or more importantly, to avoid flushing at any given
+time).  Buffering I/O in this manner can significantly improve disk write
+I/O throughput, but if application developers are careless, the result can
+be data loss should the system go down at an inopportune time.  Recently
+there have been a couple of proposed performance-oriented changes that have
+tested the community's willingness to let users put themselves into danger.
+<p>
+<h4>O_NOMTIME</h4>
+<p>
+A file's "mtime" tracks the last modification time of the file's contents;
+it is typically updated when the file is written to.  Zach Brown recently
+posted <a href="/Articles/643730/">a patch</a> creating a new <tt>open()</tt>
+flag called <tt>O_NOMTIME</tt>; if that flag is present, the filesystem
+will not update mtime when the file is changed.  This change is wanted by
+the developers of the <a href="/Articles/258516/">Ceph filesystem</a>,
+which has no use for mtime updates:
+<p>
+<div class="BigQuote">
+	The ceph servers don't use mtime at all.  They're using the local
+	file system as a backing store and any backups would be driven by
+	their upper level ceph metadata.  For ceph, slow IO from mtime
+	updates in the file system is as daft as if we had block devices
+	slowing down IO for per-block write timestamps that file systems
+	never use.
+</div>
+<p>
+Disabling mtime updates, Zach said, can reduce total I/O associated with a
+write operation by a factor of two or more.
+<p>
+There are, of course, a couple of problems with turning off mtime updates.
+Trond Myklebust <a href="/Articles/643920/">noted</a> that it would break
+NFS "<q>pretty catastrophically</q>" to not maintain that
+information; NFS clients would lose the ability to detect when they have
+stale cached data, leading to potential data corruption.  The biggest
+concern, though, appears to be the effect on 
+filesystem backups; if a file's mtime is not updated when the file is
+modified,  that file will not 
+be picked up in an incremental backup (assuming the backup scheme uses
+mtime, which most do).  A system's administrator might
+decide to run that risk, but there is the possibility that users may run it
+for them.  As Dave Chinner <a href="/Articles/643921/">put it</a>:
+<p>
+<div class="BigQuote">
+	The last thing an admin wants when doing disaster recovery is to
+	find out that the app started using O_NOMTIME as a result of the
+	upgrade they did 6 months ago. Hence the last 6 months of
+	production data isn't in the backups despite the backup procedure
+	having been extensively tested and verified when it was first put
+	in place.
+</div>
+<p>
+Another way of putting it is that the mtime value is often not there for
+the benefit of the creator of the file; it is often used by others as part
+of the
+management of the system.  Allowing the creator to disable mtime updates
+may have implications for those others, who would then have cause to wish
+that they had been part of that decision before it was made.
+<p>
+Despite the concerns, most developers appear to recognize that there is a
+real use case for being able to turn off mtime updates.  So the discussion
+shifted quickly to how this capability could be provided without creating
+unpleasant surprises for system administrators.  There appear to be two
+approaches toward achieving that goal.
+<p>
+The first of those is to not allow applications to disable mtime updates
+unless the system administrator has agreed to it.  That agreement is most
+likely to take the form of a special mount option; unless a specific
+filesystem has been mounted with the "<tt>allow_nomtime</tt>" option,
+attempts to 
+disable mtime updates on that filesystem will be denied.  The second aspect
+is to hide the option in 
+a place where it does not look like part of the generic POSIX API.  In
+practice, that means that, rather than being a flag for the <tt>open()</tt>
+system call, <tt>O_NOMTIME</tt> will probably become a mode that is enabled
+with an <tt>ioctl()</tt> call.
+<p>
+<h4>Syncing and suspending</h4>
+<p>
+Putting a system into the suspended state is a complicated task with a
+number of steps; in current kernels, one of those steps is to call
+<tt>sys_sync()</tt> to flush all dirty file pages back out to persistent
+storage.  It might seem intuitively obvious that saving the contents of
+files before suspending is a good thing to do, but that has not stopped Len
+Brown from posting <a href="/Articles/643926/">a patch</a> to remove the
+<tt>sys_sync()</tt> call from the suspend path.
+<p>
+Len's contention is that flushing disks can be an expensive operation (it
+can take multiple seconds) and that this cost should not necessarily be
+paid every time the system is suspended.  Doing the sync unconditionally in
+the kernel, in other words, is a policy decision that may not match what
+all users want.  Anybody who wants file data to be flushed is free to run
+<tt>sync</tt> before suspending the system, so removing the call just
+increases the flexibility of the system.
+<p>
+This change concerns some; Alan Cox was quick to <a
+href="/Articles/643928/">point out</a> some reasons why it makes sense to
+flush out file data, including the facts that resume doesn't always work
+and that users will sometimes disconnect drives from a suspended system.
+It has also been pointed out that, sometimes, a suspended system will never
+resume due to running out of battery or the kernel being upgraded.  For
+cases like this, it was argued, removing the <tt>sys_sync()</tt> call is
+just asking for data to be lost.
+<p>
+Nobody, of course, is trying to make the kernel more likely to lose data.
+The driving force here is something different: the meaning of "suspending"
+a system is changing.  A user who suspends a laptop by closing the lid
+prior to tossing it into a backpack almost certainly wants all data written
+to disk first.  But when a system is using suspend as a power-management
+mechanism, the case is not quite so clear.  If a system is able to suspend
+itself between every keystroke — as some systems are — it may not make
+sense to do a bunch of disk 
+I/O every time.  That may be doubly true on small mobile devices where the
+power requirements are strict and the I/O devices are slow.  On such
+systems, it may well make sense to suspend the system without flushing I/O
+to persistent storage first.
+<p>
+The end result is that most (<a href="/Articles/643931/">but not all</a>)
+developers seem to agree that there is value in being able to suspend the
+system without syncing the disks first.  There is rather less consensus,
+though, on whether that should be the kernel's default behavior.  If this
+change goes in, it is likely to be controlled by a sysctl knob, and the
+default value of that knob will probably be to continue to sync files as is
+done in current kernels.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems">Filesystems</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#O_NOMTIME">O_NOMTIME</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/643892/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor644082"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2015 20:28 UTC (Tue)
+                               by <b>pj</b> (subscriber, #4506)
+                              [<a href="/Articles/644082/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+wrt Suspend-without-sync - I suspect whether or not to sync is going to want to be determined on a per-call basis, so it would seem to me that another parameter/flag to the suspend call would be a better solution than a sysctl knob.  Otherwise there might be a weird (though I guess not really harmful?) race condition on devices that normally suspend-without-sync but want to sometimes suspend-with-sync: that device that suspends between keystrokes might want to suspend-with-sync on lid-close, for instance.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644082/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644084"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2015 20:36 UTC (Tue)
+                               by <b>zuki</b> (subscriber, #41808)
+                              [<a href="/Articles/644084/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's no suspend() call. You just write stuff to /sys/power/disk and /sys/power/state. It's already racy.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644084/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644103"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2015 22:01 UTC (Tue)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/644103/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  It's already racy.</font><br>
+<p>
+Racy in what sense?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644103/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644139"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 2:52 UTC (Wed)
+                               by <b>krakensden</b> (subscriber, #72039)
+                              [<a href="/Articles/644139/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If suspend means "execute this script":<br>
+    <br>
+    #!/bin/sh<br>
+    sync<br>
+    echo -n mem &gt; /sys/power/state<br>
+<p>
+then there's a window between writing to disk and suspending the system where the in-memory filesystem cache can get dirtied.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644139/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644142"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 3:03 UTC (Wed)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/644142/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Thanks for being specific.
+<p>
+In the enter_state() function in kernel/power/suspend.c we have:
+<pre>
+	trace_suspend_resume(TPS("sync_filesystems"), 0, true);
+	printk(KERN_INFO "PM: Syncing filesystems ... ");
+	sys_sync();
+	printk("done.\n");
+	trace_suspend_resume(TPS("sync_filesystems"), 0, false);
+
+	pr_debug("PM: Preparing system for %s sleep\n", pm_states[state]);
+	error = suspend_prepare(state);
+</pre>
+
+and in suspend_prepare():
+
+<pre>
+	pm_prepare_console();
+
+	error = pm_notifier_call_chain(PM_SUSPEND_PREPARE);
+	if (error)
+		goto Finish;
+
+	trace_suspend_resume(TPS("freeze_processes"), 0, true);
+	error = suspend_freeze_processes();
+	trace_suspend_resume(TPS("freeze_processes"), 0, false);
+</pre>
+
+So the freezing of user-space processes happens *after* the sys_sync call.  So that race is already present.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644142/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644146"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 3:41 UTC (Wed)
+                               by <b>chloe_zen</b> (guest, #8258)
+                              [<a href="/Articles/644146/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Given fuse, it rather has to be sync-then-suspend, doesn't it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644146/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor644311"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 19:12 UTC (Wed)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/644311/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A tangentially related aside: "echo -n" no longer works that way in recent versions of dash, which is the default /bin/sh on some distros. You'd need to use printf(1) instead.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644311/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644375"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 22:41 UTC (Wed)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/644375/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; A tangentially related aside: "echo -n" no longer works that way in recent versions of dash,</font><br>
+<p>
+I wonder where this habit of using "-n" came from.  Just<br>
+<p>
+echo mem &gt; /sys/power/state<br>
+<p>
+If any file in /sys requires "echo -n" then that is kernel bug.  Please report it.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644375/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor644382"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 0:42 UTC (Thu)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/644382/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+-n on echo was never portable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644382/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644672"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2015 17:27 UTC (Fri)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/644672/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm aware of that, but there's a huge amount of software in the wild convinced that it is: <a href="https://bugs.gentoo.org/show_bug.cgi?id=nonbash">https://bugs.gentoo.org/show_bug.cgi?id=nonbash</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644672/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor644180"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 12:48 UTC (Wed)
+                               by <b>zuki</b> (subscriber, #41808)
+                              [<a href="/Articles/644180/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;&gt; It's already racy.</font><br>
+<font class="QuotedText">&gt; Racy in what sense?</font><br>
+<p>
+I should have said "non-atomic". OP was wondering if a syscall option can be added to do configuration+execution in one step. I was just pointing out that the configuration step is already separate (e.g. for hibernation). <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644180/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor644094"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2015 21:23 UTC (Tue)
+                               by <b>caitlinbestler</b> (guest, #32532)
+                              [<a href="/Articles/644094/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is dancing around the edges. The real usage of O_NOMTIME is for "files" that really aren't files, they are chunks of objects that have their own metadata.<br>
+<p>
+An O_THIS_IS_JUST_A_CHUNK option would have been clearer.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644094/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645586"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 22, 2015 5:50 UTC (Fri)
+                               by <b>scientes</b> (guest, #83068)
+                              [<a href="/Articles/645586/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The backup program example still applies to chunks however. How about having mtime still update every 24-hours  if the file is modified (like how noatime currently works)?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645586/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor644095"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2015 21:36 UTC (Tue)
+                               by <b>pr1268</b> (subscriber, #24648)
+                              [<a href="/Articles/644095/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><font class="QuotedText">Allowing the creator to disable mtime updates may have implications for those others,</font></blockquote>
+
+<p>Am I to understand that opening a file with <tt>O_NOMTIME</tt> that creates the file means that the mtime can <i>never</i> be updated for that file, even if it's opened sometime later for read/write?</p>
+
+<blockquote><font class="QuotedText">attempts to disable mtime updates on that filesystem will be denied</font></blockquote>
+
+<p>Would <tt>open(2)</tt> silently ignore the <tt>O_NOMTIME</tt> flag in such a situation, or return <tt>-1</tt> instead of a valid file descriptor?</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644095/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor644092"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2015 22:29 UTC (Tue)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/644092/">Link</a>] (82 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; A user who suspends a laptop by closing the lid prior to tossing it into a backpack almost certainly wants all data written to disk first. </font><br>
+<p>
+No, I really do not, *especially* in that specific case.  Delaying the suspend for a synchronous operation with unbounded running time increases the likelihood that the disk is still spinning and the CPU is still dissipating a crapton of heat when the laptop lands in the backpack.  Excess heat and decreased resistance to shock will lose far more data than any of the other things might.<br>
+<p>
+Sync on suspend made sense in the 1990's, when the best firmware was terrible, journalled filesystems were new and scary experimental things, and applications didn't have toolkits like sqlite for local data persistence.  There was a high probability that the system wouldn't come back from suspend, there would be a lengthy fsck on the inevitable reboot, and various other downstream problems from the crash would have to be fixed by hand.<br>
+<p>
+The 1990's were almost two decades ago.  Now we have filesystems with not just journalling but also CoW, many laptops have properly working firmware(*), and applications use fsync() to ensure that there is never data in RAM to lose.  The probability of a suspend/resume cycle failure is now on par with--or even lower than--the probability of catastrophic hard disk failure, battery failure, or ordinary crashing kernel bugs (i.e. those crashes that occur at times other than suspend or resume).<br>
+<p>
+Today, sync on suspend is an anachronism.  Worse than that, it introduces entirely unnecessary failure modes for users of network filesystem clients and systems with big RAM and slow disks (especially the common case of SD/MMC devices where a sync might exceed the 20-second suspend failure timeout).<br>
+<p>
+(*) Yes, there is still crappy firmware; however, such firmware tends to make itself obvious after a handful of suspend/resume cycles, and can be treated as a special case requiring kernel workarounds like sync-on-suspend.  Normal firmware can do hundreds of suspend/resume cycles without dropping a single bit.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644092/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644115"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2015 23:37 UTC (Tue)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/644115/">Link</a>] (32 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Speaking of anachronisms, how common are spinning disks in laptops these days?<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644115/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644129"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 1:46 UTC (Wed)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/644129/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Speaking of anachronisms, how common are spinning disks in laptops these days?</font><br>
+<p>
+Most laptop drives spin by default, and they'll likely continue to do so as long as SSDs insist on pricing over $70/TB.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644129/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644326"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 20:25 UTC (Wed)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/644326/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This price per gigabyte making SSDs too expensive idea just keeps moving the goalposts.<br>
+<p>
+I remember when people were claiming $1 per GB was the magic price point. Then it was $0.50 per GB. <br>
+<p>
+As long as spinning hard drives are cheaper per GB there will always be people claiming SSD is too expensive. But at some point it gets to be like claiming your laptop needs a tape drive or a floppy.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644326/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644358"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 21:27 UTC (Wed)
+                               by <b>reubenhwk</b> (guest, #75803)
+                              [<a href="/Articles/644358/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Please still using tape drives should be recycled along with their crappy electronics.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644358/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644359"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 21:28 UTC (Wed)
+                               by <b>reubenhwk</b> (guest, #75803)
+                              [<a href="/Articles/644359/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Please -&gt; *People*<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644359/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644362"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 21:43 UTC (Wed)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/644362/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+tape drives still have a better cost profile when dealing with very large data volumes<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644362/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644368"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 22:01 UTC (Wed)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/644368/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And yet you still don't want one in your laptop, which is why I compared spinning hard disks to tape drives. A spinning disk is rapidly approaching a tape drive in speed and general usefulness.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644368/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor644372"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 22:26 UTC (Wed)
+                               by <b>drag</b> (guest, #31333)
+                              [<a href="/Articles/644372/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; tape drives still have a better cost profile when dealing with very large data volumes</font><br>
+<p>
+Sorta, sometimes, and not really.. depending on your use case.<br>
+<p>
+If you actually want to be able to access to your data in any sort of reasonable time frame then throwing the cheapest servers possible stuff full of 3.5 inch 7200rpm drives is far far better option. For money, time, and sanity. :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644372/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor644519"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SSHD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 16:22 UTC (Thu)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/644519/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; As long as spinning hard drives are cheaper per GB there will always be people claiming SSD is too expensive. But at some point it gets to be like claiming your laptop needs a tape drive or a floppy.</font><br>
+<p>
+As long as you can have more storage for the same price, why would you not? Pictures and movies don't need SSD performance at all.<br>
+<p>
+Asking whether SSDs will win over spinning drives is like asking whether L1 caches will win over L2 caches.<br>
+<p>
+Desktop users have solved this problem long ago: they get one small and cheap SSD for the system and applications + one big and cheap HD for pure storage. For laptops SSHDs look interesting. Two drives in a single enclosure.<br>
+<p>
+There is however something entirely different which is killing spinning drives much faster than SSD price points: the cloud. Making the idea of local storage itself obsolete. Laptops with a small and dirty cheap eMMC used mainly as a network cache.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644519/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor644185"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 13:22 UTC (Wed)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/644185/">Link</a>] (23 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+CPUs still produce a lot of heat if not idle though.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644185/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644328"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 20:28 UTC (Wed)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/644328/">Link</a>] (22 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah. If designers were thinking of the full consumer experience they'd put a "force CPU to slowest clock" as the first thing in the suspend path. Then it could take as long as it needed to flush buffes and hibernate, or whatever.<br>
+<p>
+Even waking up inside a laptop bag to check email or alert for calendar events is not too bad when the CPU is locked to 800 MHz.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644328/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644446"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 12:18 UTC (Thu)
+                               by <b>hmh</b> (subscriber, #3838)
+                              [<a href="/Articles/644446/">Link</a>] (21 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Race to idle at top clock speeds very often generates less heat than staying active for a longer period due to a slower clock.<br>
+<p>
+The CPU should be idle most of the time during a sync: it is the kind of operation that is supposed to be IO-bound...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644446/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644510"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 15:21 UTC (Thu)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/644510/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The CPU should be idle most of the time during a sync: it is the kind of operation that is supposed to be IO-bound...</font><br>
+<p>
+Not if you're using dm-crypt without AESNI.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644510/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor644533"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 18:01 UTC (Thu)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/644533/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Race to idle while in a bag with no heat dissipation could work, but only if the device includes temperature in its speed calculations. Most laptops don't. Not until the CPU has reached an excessively high temp, which also starts to cook its surrounding components like the battery and GPU.<br>
+<p>
+The simplest way to ensure that overheat doesn't happen is to use the slowest possible CPU speed. But the best way to implement it would be with temperature sensors so that after running 10 seconds at 3 GHz it realizes there's no airflow and slows down.<br>
+<p>
+Sadly, with how ignored and haphazard sensor support is in Linux, I don't think that will work.<br>
+<p>
+If Linux users really cared about sensors, sensor data would show up in desktop tools like Gnome System Monitor, with watts used and CPU temperature shown alongside CPU usage and clock speed. Common hardware would be recognized and their sensors properly labeled instead of "temp1" and "fan2." <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644533/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644543"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 18:48 UTC (Thu)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/644543/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Common hardware would be recognized and their sensors properly labeled instead of "temp1" and "fan2." </font><br>
+<p>
+Aside from on-die CPU sensors, there is no such thing as "common hardware" when it comes to sensors.<br>
+<p>
+All Linux can do is provide the raw data and any exposed hooks to control the system.  Which it already does.  The rest is purely policy, and that's ultimately up to the user, with initial policy configured by the system builder/integrator.<br>
+<p>
+As for displaying sensor data, I've had that data displayed on my desktop for fifteen years or so.  And that's all that can be done without customizing the policy for each and every special snowflake of a system.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644543/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644566"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 21:29 UTC (Thu)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/644566/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  Aside from on-die CPU sensors, there is no such thing as "common hardware" when it comes to sensors.</font><br>
+<p>
+Somebody should -- I know that means that I should do it but no time and not enough interest -- should build a CDDB type system for Linux hardware so that for each machine type it is enough for ONE person to label everything in the system. Sensors, audio ports, etc.<br>
+<p>
+Then on system setup the distro could look up all of that stuff.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644566/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644584"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 23:34 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/644584/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+good luck. How are you going to reliably identify what system you are running on? With some vendors even the exact model number isn't enough because they change the internals without changing the model number<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644584/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644604"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2015 4:33 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/644604/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+CDDB is not 100% reliable but it's useful and popular anyway.<br>
+<p>
+At the start it was very incomplete yet it became popular very quickly. Same as many other crowd-sourced services.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644604/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor644541"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 18:30 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/644541/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+race to idle assumes that it's cpu processing that determines when you can get to idle.<br>
+<p>
+If you are saving the contents of RAM to disk, then you aren't going to finish any sooner at 5GHz clock than at 500MHz, the limiting factor is going to be your disk I/O performance. So if you can do this at 500MHz rather than 5GHz, you generate significantly less heat.<br>
+<p>
+Also, even in a backpack, there is some heat dissipation going on, so you may not overheat if you are running slowly enough.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644541/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644549"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 19:29 UTC (Thu)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/644549/">Link</a>] (13 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; So if you can do this at 500MHz rather than 5GHz, you generate significantly less heat.</font><br>
+<p>
+Really? Doing it at 500MHz means <br>
+<p>
+(a) that the CPU is going to spend more time in C0, and that's going to limit your ability to get into the deeper C states.<br>
+(b) that your memory bus is probably going to be clocked lower, which is going to have a pretty significant impact on the length of time the CPU is going to spend awake<br>
+<p>
+I'm not saying that it's impossible, but it's certainly not obvious.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644549/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644553"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 19:42 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/644553/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you are writing memory to disk, clocking the memory slower isn't going to slow down how quickly the disk can write data.<br>
+<p>
+As for the CPU spending more time in C0, do you really think that it is going into various sleep states while it is writing data to disk as fast as it can?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644553/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644556"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 19:48 UTC (Thu)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/644556/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  If you are writing memory to disk, clocking the memory slower isn't going to slow down how quickly the disk can write data.</font><br>
+<p>
+It's going to increase the amount of time the package has to stay awake to have the memory controller powered.<br>
+<p>
+<font class="QuotedText">&gt; do you really think that it is going into various sleep states while it is writing data to disk as fast as it can?</font><br>
+<p>
+Your argument is that you're not CPU bound. If you're not CPU bound, the CPU is spending time idle. If the CPU is idle, it enters C states.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644556/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644558"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 20:01 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/644558/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It's going to increase the amount of time the package has to stay awake to have the memory controller powered.</font><br>
+<p>
+the memory doesn't get powered off between accesses. It can only be powered off once the data has been written to disk. If the limiting factor is the time it takes to write it to disk, slowing down the memory clock is not going to require that it remain powered on longer.<br>
+<p>
+<font class="QuotedText">&gt;  Your argument is that you're not CPU bound. If you're not CPU bound, the CPU is spending time idle. If the CPU is idle, it enters C states.</font><br>
+<p>
+Ok, but how deep a C state is it going to be able to go into if it's in the middle of writing to disk as quickly as it can? and do the shallow C states really save that much power over a lower clock speed? race-to-idle really assumes that you can stop powering everything when you hit idle. If the vast majority of the system (and even CPU) is still having to run to be able to respond to interrupts and manage I/O, you aren't really idle yet.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644558/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644560"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 20:06 UTC (Thu)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/644560/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; the memory doesn't get powered off between accesses</font><br>
+<p>
+I didn't say it did. I said that the memory controller gets powered down between accesses, and the memory goes into self refresh.<br>
+<p>
+<font class="QuotedText">&gt; how deep a C state is it going to be able to go into if it's in the middle of writing to disk as quickly as it can?</font><br>
+<p>
+That's going to depend on a bunch of factors, including I/O latency. There's no single answer.<br>
+<p>
+<font class="QuotedText">&gt; and do the shallow C states really save that much power over a lower clock speed?</font><br>
+<p>
+Yes. Even the most shallow C state will unclock the core, and running at 0MHz is somewhat cheaper than running at 500MHz.<br>
+<p>
+<font class="QuotedText">&gt; race-to-idle really assumes that you can stop powering everything when you hit idle.</font><br>
+<p>
+No it doesn't.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644560/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644585"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 23:42 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/644585/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;&gt; and do the shallow C states really save that much power over a lower clock speed?</font><br>
+<p>
+<font class="QuotedText">&gt; Yes. Even the most shallow C state will unclock the core, and running at 0MHz is somewhat cheaper than running at 500MHz.</font><br>
+<p>
+remember that switching C states isn't free (in either energy or time), so it may not be a win if you don't stay there very long.<br>
+<p>
+We obviously have very different expectations in how the hardware is going to behave at the different states. But keep in mind that I'm not saying that reducing the clock speed is always the right thing to do, I am just unconvinced that it's never the right thing to do the way that you seem to be.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644585/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644587"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 23:56 UTC (Thu)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/644587/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Shallow C states are basically free on modern CPUs. Deeper ones will drop cache, but that's basically irrelevant in the case we're discussing. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644587/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor644606"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2015 4:46 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/644606/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; But keep in mind that I'm not saying that [X] is always the right thing to do, I am just unconvinced that it's never the right thing to do the way that you seem to be.</font><br>
+<p>
+I had to waste 5 minutes reading the entire thread again to make sure I did not dream and that the exact opposite happened.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644606/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644691"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2015 19:55 UTC (Fri)
+                               by <b>bronson</b> (subscriber, #4806)
+                              [<a href="/Articles/644691/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Me too.  That was surreal.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644691/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor644608"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2015 4:51 UTC (Fri)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/644608/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oh, right. Yes.<br>
+<p>
+<font class="QuotedText">&gt; But keep in mind that I'm not saying that reducing the clock speed is always the right thing to do, I am just unconvinced that it's never the right thing to do the way that you seem to be.</font><br>
+<p>
+From <a href="https://lwn.net/Articles/644541/">https://lwn.net/Articles/644541/</a> (written by you)<br>
+<p>
+<font class="QuotedText">&gt; If you are saving the contents of RAM to disk, then you aren't going to finish any sooner at 5GHz clock than at 500MHz, the limiting factor is going to be your disk I/O performance. So if you can do this at 500MHz rather than 5GHz, you generate significantly less heat.</font><br>
+<p>
+From <a href="https://lwn.net/Articles/644549/">https://lwn.net/Articles/644549/</a> (written by me)<br>
+<p>
+<font class="QuotedText">&gt;  I'm not saying that it's impossible, but it's certainly not obvious.</font><br>
+<p>
+…<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644608/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor644567"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 21:34 UTC (Thu)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/644567/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have actual, although anecdotal, data that a laptop allowed to clock to 2.5 GHz will overheat in a bag while a laptop locked to the lowest speed, 800 MHz in my case, will not overheat. It can sit in that bag until the battery runs down, happily processing things.<br>
+<p>
+So, while in theory race to idle might be the way to go in practice a laptop that is running user-space while waiting to sync to disk is going to burn itself up at 2.5 GHz.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644567/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644572"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 21:42 UTC (Thu)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/644572/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the system is in any kind of state where it has an effectively unbounded amount of work to perform then the situation changes pretty significantly. There are various cases where apps behave badly when they lose network connectivity and spin trying to reconnect, for instance.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644572/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644586"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 23:47 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/644586/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's not the issue. The example given is that a machine running at max speed for 10 min will overheat while one running for several hours at the low speed will not.<br>
+<p>
+for this example, race to idle fails if it takes too long because the system will overheat, while running at a lower speed, even if it takes a lot more time and power will succeed and not damage things.<br>
+<p>
+race-to-idle requires a very specific combination of power/performance at the different states (full speed, partial speed, and idle). That combination has not always been the case and there's no reason to believe that it is going to continue to always be the case. Idle does not always mean that it requires zero power (even for the component that's idled, let alone for the entire system)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644586/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644610"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2015 5:04 UTC (Fri)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/644610/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The example given is that a machine running at max speed for 10 min will overheat while one running for several hours at the low speed will not.</font><br>
+<p>
+Uh? I'm possibly missing something here, but I don't see any references to that example.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644610/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor644116"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2015 23:39 UTC (Tue)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/644116/">Link</a>] (34 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+that still doesn't address the problem of the battery running out while it's in the backpack.<br>
+<p>
+Far better to generate some extra heat for a little bit than loosing hours of data because it didn't get flushed out.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644116/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644126"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 1:32 UTC (Wed)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/644126/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; that still doesn't address the problem of the battery running out while it's in the backpack.</font><br>
+<p>
+...because it's *not* a problem.<br>
+<p>
+Really, it's not.  It's been years since I had a healthy laptop run out of battery.  They last for hours at full load and days on suspend.<br>
+<p>
+<font class="QuotedText">&gt; Far better to generate some extra heat for a little bit than loosing hours of data because it didn't get flushed out.</font><br>
+<p>
+No, it's not better.<br>
+<p>
+If the sync takes longer than 20 seconds, the suspend fails completely and the laptop stays on (unless you've set up your ACPI scripts to forcibly kill the power at that point).<br>
+<p>
+While the laptop is on, it's damaging its battery, reducing the charge it can hold *forever*.  This also conveniently breaks the battery charge estimation function, so you get to be surprised when your battery abruptly shuts down at "40% charge" in the future.<br>
+<p>
+There's no "hours of uncommitted data" either.  There's one filesystem commit interval at most.  If you're sane that's not more than 30 seconds or so.  If you're not sane, you can configure laptop-mode-tools to run sync() from userspace.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644126/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644135"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 2:01 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/644135/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  Really, it's not. It's been years since I had a healthy laptop run out of battery. They last for hours at full load and days on suspend.</font><br>
+Oh, what a BS.<br>
+<p>
+I've had resume problems with ALL laptops that I had. Including MacBook Pro with OS X. Linux and Windows laptops tend to be even crashier.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644135/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor644140"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 3:02 UTC (Wed)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/644140/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Really, it's not. It's been years since I had a healthy laptop run out of battery. They last for hours at full load and days on suspend.</font><br>
+<p>
+Until you leave it in your backpack for *four* days instead of three, thanks to a long weekend.<br>
+<p>
+Or the battery gets jostled. Or the battery isn't so healthy any more (do you get a nice email when it crosses that threshold?) Or you suspend it when the battery is relatively low.  Or it doesn't resume properly because something plugged in was unplugged.  Or one of many, many, many failure modes.<br>
+<p>
+Or when the "low battery" threshold wakes the system up and the thing dies hard when trying to write the buffers back out.<br>
+<p>
+Every single one of these situations has happened to me.  (Funnily enough, in my experience, Linux suspend/resume is actually *more* reliable than Windows on the last couple of Tier-1 laptops I've owned.<br>
+<p>
+I absolutely *want* any dirty buffers to be flushed to disk and the filesystems synced into a safe state before a system suspends.  More than want; that is a hard requirement.  Data loss is never acceptible, but when it's so damn easily preventable there is simply no excuse.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644140/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644153"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 6:14 UTC (Wed)
+                               by <b>tpo</b> (subscriber, #25713)
+                              [<a href="/Articles/644153/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My experience is similar to pizza's.<br>
+<p>
+The single most frequent case "loss of data" occurring here is, when I work without the laptop being attached to power for some reason, then notice, that the end of battery power is near and close the lid.<br>
+<p>
+At some point my laptop will wake up by itself and try to suspend to disk, which doesn't and hasn't ever worked here and will then run out of power hanging in that state.<br>
+<p>
+I had managed to disable this behavior somehow in the past but some well meaning part of the system switched that on again and I am currently unwilling to spend my time to find out how to disable it again.<br>
+<p>
+And the loss for me isn't usually the "data" but it is the state and context of the desktop: what shells did I have open with what content? Which files was I editing? Which applications were running? This can be more than annoying when I had my laptop prepared with all stuff needed open and at the right place to do a presentation only to find out when opening the laptop in front of people that its dead.<br>
+<p>
+Of course syncing file buffers out to disk or not will not change anything wrt to the problem described in the last paragraph.<br>
+<p>
+And it doesn't help that XFce's power indicator is too badly designed for me to be able to notice that the battery is running too low.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644153/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644187"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 13:40 UTC (Wed)
+                               by <b>jospoortvliet</b> (guest, #33164)
+                              [<a href="/Articles/644187/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+at least syncing buffers to disks means you don't have to lose any data you wrote or worked on... ideally. For me, that's a huge deal and I certainly wouldn't like to lose stuff.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644187/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor644250"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 16:03 UTC (Wed)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/644250/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I had managed to disable this behavior somehow in the past but some well meaning part of the system switched that on again and I am currently unwilling to spend my time to find out how to disable it again.</font><br>
+<p>
+I fired my distro's ACPI event-handling code.  Several years ago it started being not merely useless, but an active source of failure.  After several rounds of patches that consisted only of deletions, I gave up and replaced the entire thing with:<br>
+<p>
+    #!/bin/sh<br>
+    echo mem &gt; /sys/power/state<br>
+<p>
+I have "find out where the acpi-support package is hiding today and kill it" on my to-do list for every dist-upgrade because the machine can be physically damaged if I don't.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644250/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor644157"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 19:56 UTC (Wed)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/644157/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; If the sync takes longer than 20 seconds, the suspend fails completely and the laptop stays on (unless you've set up your ACPI scripts to forcibly kill the power at that point).</font><br>
+<p>
+Aah, so that's what happens. So what I need is a script that does: if suspend fails and laptop lid is closed, start playing an alarm at maximum volume. And cuts power if no response within a few minutes.<br>
+<p>
+Much better than hearing a loud whirring noise a few hours later and then pulling an overcooked laptop out of your bag.<br>
+<p>
+<font class="QuotedText">&gt; There's no "hours of uncommitted data" either. There's one filesystem commit interval at most. </font><br>
+<p>
+Well, not everything is saved on disk. If you have a document open that isn't saved then sync won't help anyway. It'd be great if there was a way to announce to running programs that the system is being suspended and to dump state, but that doesn't exist or isn't widely supported. Currently suspend (for me) is primarily a way to avoid the startup time. It's not reliable enough to rely on.<br>
+<p>
+Mind you, I just found a basic-pm-debugging.txt in the kernel documentation which describs steps that can be used to debug issues. My current problem is that ext4 is trying to read a directory inode on resume while the the disk is not ready, and it remounts the rootfs readonly. The machine is then essentially unrecoverable (neither su nor sudo work with a readonly fs).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644157/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor648052"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 12, 2015 17:32 UTC (Fri)
+                               by <b>bluefoxicy</b> (guest, #25366)
+                              [<a href="/Articles/648052/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; If the sync takes longer than 20 seconds, the suspend fails completely and the laptop stays on</font><br>
+<p>
+SATA 3 6Gb/s:  15 gigabytes of recently-written dirty data to write<br>
+<p>
+SATA 1 1.5Gb/s:  3.75 gigabytes<br>
+<p>
+ATA100 100Mbit/s:  250 megabytes<br>
+<p>
+I'm pretty sure this is a non-issue for any hardware made since 2003.  /proc/meminfo shows 624kb of dirty pages on a big ass database server, 2712 on a busy Web server in a cluster.  It's rare to have several gigabytes of unflushed disk just hanging around in memory; I've never seen more than a few megabytes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/648052/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor648053"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 12, 2015 17:50 UTC (Fri)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/648053/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's just the link speed between the storage device and the main system and has little bearing on how fast you can actually write data to disk, especially if the disk is spinning rust.  If the disk has to seek between writes then you aren't going to see more than around 100 writes per second which can be just a handful of megabytes, regardless of what the link speed is.<br>
+<p>
+Your examples include a read heavy, write little web server and a db server which is probably explicitly flushing every IO to disk so that there is little data to write back in either case, neither of which is representative of how a laptop is used.  It's easy to create a bunch of buffered writes, by copying a DVD image or compiling software or copying memory to disk for suspend, and on a laptop you may delay writes longer than normal to keep the disk subsystem in a low power state for as long as possible, leading to a storm of activity.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/648053/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor644138"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 2:40 UTC (Wed)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/644138/">Link</a>] (24 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Far better to generate some extra heat for a little bit than loosing hours of data because it didn't get flushed out.</font><br>
+<p>
+What "hours of data" are you talking about?<br>
+<p>
+Dirty pages get flushed after about 30 seconds, so if you don't 'sync' before suspend, then the most you could lose if resume fails is data that was written by an app in the 30 seconds before suspend.<br>
+<p>
+I really don't think that is any significant data.  Any apps that cares about data will 'fsync' at an appropriate time. Data that isn't fsynced, doesn't really matter ..e.g. logs.<br>
+<p>
+Is there really *any* important data that becomes at-risk because of this change?<br>
+<p>
+I think the greatest risk of data loss when resume fails is data in some application that hasn't been written to the filesystem yet, like the file you are in the middle of editing.  That data isn't helped by sys_sync at alll.  It requires pre-suspend notifications to apps so they can auto-save.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644138/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644156"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 6:59 UTC (Wed)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/644156/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; so if you don't 'sync' before suspend, then the most you could lose if resume fails is data that was written by an app in the 30 seconds before suspend.</font><br>
+<p>
+How long can it take to sync that little?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644156/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644159"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 7:21 UTC (Wed)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/644159/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; How long can it take to sync that little?</font><br>
+<p>
+My "Open Phoenux" phone (www.gta04.org) runs a fairly ordinary Debian distro and sometimes has lots of kernel logging enabled.<br>
+<p>
+When the logging is enable there is a very obvious lag on the way to suspend, such that trying to wake the phone again takes an annoyingly<br>
+ long time (though probably less than 2 seconds).<br>
+<p>
+I realise that might not be a common circumstance, but I'm also sure I'm not the only one who has a flash of insight the moment that I suspend the phone (or close the laptop lid, or submit the comment or seal the envelop).<br>
+<p>
+But the point isn't really how long it takes.  The point is that the 'sync' call really doesn't belong there.  The benefit it provides is much more superstitious than scientific.  If wanted, a sync-before-suspend is trivially performed in user-space, and if not wanted it currently requires a code edit to disable.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644159/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644513"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 15:53 UTC (Thu)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/644513/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; But the point isn't really how long it takes.</font><br>
+<p>
+Yes it is, otherwise this entire discussion would not even exist.<br>
+<p>
+No matter how you look at it, if syncing takes more than a few seconds on a system that regularly syncs every 30 seconds anyway, then there is something seriously weird or at the least very unusual about it.<br>
+<p>
+<font class="QuotedText">&gt; The benefit it provides is much more superstitious than scientific. </font><br>
+<p>
+Except the suspend experience sometimes feels as safe as crossing the Atlantic in the 19th century. There are genuine reasons why so many people carry their Windows or Linux laptop open around the office despite safety rules (not Macs interestingly enough).<br>
+<p>
+Power management has always been complex and does not look like it's getting simpler any time soon.<br>
+<p>
+<font class="QuotedText">&gt; If wanted, a sync-before-suspend is trivially performed in user-space,</font><br>
+<p>
+Why not if this solves a problem for 1% of users or 1% of the time.<br>
+<p>
+Why bother the change and disruption if it's only for 0.001%.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644513/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644575"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 22:27 UTC (Thu)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/644575/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Yes it is, otherwise this entire discussion would not even exist.</font><br>
+<p>
+I'll be more precise.  The point isn't the amount of time it takes, it is the fact that it takes any time at all.<br>
+<p>
+You seem to be saying that it can't take enough time to bother you, and I suspect you are correct.  Len Brown, by submitting the patch, is saying that it *does* take enough time to bother him.  Are you saying he is wrong?<br>
+<p>
+<font class="QuotedText">&gt; Power management has always been complex and does not look like it's getting simpler any time soon.</font><br>
+<p>
+Undoubtedly true.  This has no effect on whether placing a 'sys_sync' at that point in the code actually provides any benefit.  At all.<br>
+<p>
+<font class="QuotedText">&gt; Why bother the change and disruption if it's only for 0.001%.</font><br>
+<p>
+Laying  aside for the moment that 1% of 1% is 0.01%, these numbers are meaningless.<br>
+<p>
+The vast majority of users get sync called (at least)  twice on suspend - once by some user-space tooling and once by the kernel.  Most (possibly all) distros already do this.<br>
+So removing the the sys_sync call from suspend in the kernel is already only going to affect few of the users that your are probably thinking of as the 99.99%.<br>
+<p>
+But one of the drivers for this change is, apparently, android.  I think the user-base there is a little more than 0.001%.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644575/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644609"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2015 5:19 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/644609/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; You seem to be saying that it can't take enough time to bother you, and I suspect you are correct. Len Brown, by submitting the patch, is saying that it *does* take enough time to bother him.</font><br>
+<p>
+Whatever two particular individuals experience does not matter much, can we please go back to statistics?<br>
+<p>
+<font class="QuotedText">&gt; Are you saying he is wrong? </font><br>
+<p>
+I really wonder where does that come from... are you related maybe? :-)<br>
+<p>
+<font class="QuotedText">&gt; Undoubtedly true. This has no effect on whether placing a 'sys_sync' at that point in the code actually provides any benefit. At all.</font><br>
+<p>
+The connection is: reliability is inversely related to complexity and users simply want their data saved before their computer susp...crashes. See various horror stories in the other comments.<br>
+<p>
+<font class="QuotedText">&gt; Laying aside for the moment that 1% of 1% is 0.01%,</font><br>
+<p>
+Agreed! Let's also lay aside that 0.1% of 1% is 0.001%. And a few others?!<br>
+<p>
+<font class="QuotedText">&gt; these numbers are meaningless.</font><br>
+<p>
+They're semi-random examples, but not completely meaningless. The very simple point I was trying to drive (and hoping not to have to detail) is just: the kernel is never going to please every single use case for every single user. Proof: there are practically no hardware device shipping with an totally unpatched mainline kernel. The mainline only has code that has a significant number of actual users. So I think we all agree it's all about how [un]common is this or that use case. Statistics and trade-offs.<br>
+<p>
+<font class="QuotedText">&gt; So removing the the sys_sync call from suspend in the kernel is already only going to affect few of the users that your are probably thinking of as the 99.99%.</font><br>
+<font class="QuotedText">&gt; But one of the drivers for this change is, apparently, android.</font><br>
+<p>
+Thanks for the info and also the reminder; I got distracted by the laptop stories filling almost the entire comments space.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644609/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor644683"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2015 18:23 UTC (Fri)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/644683/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; There are genuine reasons why so many people carry their Windows or Linux laptop open around the office despite safety rules (not Macs interestingly enough).</font><br>
+<p>
+In my case it's company policy that VPN sessions don't survive a suspend. When you open the laptop back up, even after 30 seconds, the VPN client reminds you of the policy and prompts you to start over. You need to find your RSA dongle, go through the authentication again, reconnect, you'll get a new IP address and so of course all existing connections are dropped.<br>
+<p>
+My company is a complete disaster for IT policy, but then, so are thousands of other large employers around the world. So this is a real scenario, even though it's an unnecessary and obnoxious one.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644683/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644698"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2015 20:35 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/644698/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; In my case it's company policy that VPN sessions don't survive a suspend. </font><br>
+<p>
+Well I feel sorry for you but that's not our case; suspend issues are why they do it here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644698/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor644908"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 18, 2015 19:32 UTC (Mon)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/644908/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; There are genuine reasons why so many people carry their Windows or Linux laptop open around the office despite safety rules (not Macs interestingly enough).</font><br>
+<p>
+Am I the only person who disables suspend-on-lid-close? For all OS variants. Never did like that behavior…<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644908/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor644761"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2015 15:52 UTC (Sat)
+                               by <b>ghane</b> (guest, #1805)
+                              [<a href="/Articles/644761/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+neilbrown wrote:<br>
+<font class="QuotedText">&gt;  But the point isn't really how long it takes. The point is that the 'sync' call really doesn't belong there. The benefit it provides is much more superstitious than scientific.</font><br>
+<p>
+Back on the late 80s, I was taught to type:<br>
+sync ; sync ; sync <br>
+<p>
+before a shutdown or reboot.  I assume this was so that the SVR5 kernel would know I really wanted to sync.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644761/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644770"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2015 20:14 UTC (Sat)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/644770/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From what I understand, the issue was that a single sync could return to the command line before the data was actually on disk, but a second one couldn't start until the first finished.<br>
+<p>
+that still doesn't justify three invocations, but would justify two.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644770/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644772"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2015 20:42 UTC (Sat)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/644772/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, the "sync" semantics are "wait for any pending writeout to complete, then start writeout on any dirty data", so 2 is sensible and  3 is superstitious.<br>
+<p>
+<a href="http://pubs.opengroup.org/onlinepubs/7908799/xsh/sync.html">http://pubs.opengroup.org/onlinepubs/7908799/xsh/sync.html</a><br>
+<p>
+This is part of why calling sys_sync() once in the suspend path is wrong (twice has been suggested), though I'm not certain if the Linux implementation exactly matches the specification.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644772/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644780"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 17, 2015 4:21 UTC (Sun)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/644780/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; Yes, the "sync" semantics are "wait for any pending writeout to complete, then start writeout on any dirty data",</font>
+<p>
+Actually, I'll have to backtrack on this.
+I can find no evidence in historical Unix, all the way up to 4.3BSD, to suggest that the 'sync' system call would wait.  It just initiated IO.  So maybe calling it 3 times makes sense.
+<p>
+Linux (roughly) followed that approach until Linux 1.3.20.  That version introduced the change:
+<pre>
+--- a/fs/buffer.c
++++ b/fs/buffer.c
+@@ -228,7 +228,7 @@ int fsync_dev(dev_t dev)
+ 
+ asmlinkage int sys_sync(void)
+ {
+-       sync_dev(0);
++       fsync_dev(0);
+        return 0;
+ }
+ 
+</pre>
+
+To give the fuller context:
+
+<pre>
+void sync_dev(dev_t dev)
+{
+        sync_buffers(dev, 0);
+        sync_supers(dev);
+        sync_inodes(dev);
+        sync_buffers(dev, 0);
+}
+
+int fsync_dev(dev_t dev)
+{
+        sync_buffers(dev, 0);
+        sync_supers(dev);
+        sync_inodes(dev);
+        return sync_buffers(dev, 1);
+}
+
+asmlinkage int sys_sync(void)
+{
+        fsync_dev(0);
+        return 0;
+}
+</pre>
+
+The second arg to sync_buffers() says whether it should  'wait'.  So fsync_dev() waits, sync_dev() doesn't.
+<p>
+Exactly what is waited for when is hard to track.  I'd need to read a lot more code to see what things sys_sync waits for today.  But it does wait for something, but before 1.3.20, and all through "Unix", it certainly didn't wait for everything.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644780/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor644247"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 15:35 UTC (Wed)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/644247/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; How long can it take to sync that little?</font><br>
+<p>
+A class 4 SD/MMC card inside a laptop that has 16GB of RAM:  one hour, four minutes.<br>
+<p>
+A network filesystem that is broken because the network interface is down due to the suspend event:  forever.<br>
+<p>
+The latter case is the reason why I've not had that SYS_sync() line in my kernels for almost 10 years.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644247/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644276"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 16:53 UTC (Wed)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/644276/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; A class 4 SD/MMC card inside a laptop that has 16GB of RAM: one hour, four minutes.</font><br>
+<p>
+Come now, this use case is rather facetious.<br>
+<p>
+Or are you seriously saying that someone who will configure a system with 16GB of RAM (presumably for performance) will be so cheap as to use a class 4 SD card for backing storage?  (a 16GB UHS-1 card can be easily found for $11!)<br>
+<p>
+<font class="QuotedText">&gt; A network filesystem that is broken because the network interface is down due to the suspend event: forever.</font><br>
+<p>
+Heh.  Given that I literally haven't had this happen in literally over a decade, this makes me wonder what broken-ass distro you're using that included such screwed up suspend scripts.  (And for the record, I do this multiple times a day with both CIFS and NFS mounts)<br>
+<p>
+Then again, you did say that you replaced your distro's suspend/resume scripts with your own stuff, so I suppose you only have yourself to blame.<br>
+<p>
+<font class="QuotedText">&gt; The latter case is the reason why I've not had that SYS_sync() line in my kernels for almost 10 years.</font><br>
+<p>
+Good for you; you worked around your own mistakes...Do you want a cookie or something?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644276/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644309"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 19:29 UTC (Wed)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/644309/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Or are you seriously saying that someone who will configure a system with 16GB of RAM (presumably for performance) will be so cheap as to use a class 4 SD card for backing storage? </font><br>
+<p>
+I'm saying that someone on a client site will use whatever horrible SD card they are given to transfer a crapton of data, then unexpectedly have to complete a suspend/resume cycle because they need to pack up the laptop so they can move to another building for a meeting with someone important who is only available now--not in an hour, when it's finally possible to remove the SD card without data loss.<br>
+<p>
+This is a common case for me.  I've modified both kernel and userspace to mitigate the problem, but anyone using default Linux distro and kernel behavior is screwed.<br>
+<p>
+<font class="QuotedText">&gt; Heh. Given that I literally haven't had this happen in literally over a decade, this makes me wonder what broken-ass distro you're using that included such screwed up suspend scripts. (And for the record, I do this multiple times a day with both CIFS and NFS mounts)</font><br>
+<p>
+Debian gave a choice of two bad behaviors:  fail to suspend, or forcibly umount filesystems to avoid suspend blocking on sync() (or read, or any other filesystem operation for that matter).<br>
+<p>
+What I want is for the filesystem to stay mounted.  If the suspend/resume is for a short walk to another building, there is no need to disrupt userspace with a umount.  Any reads or writes in progress can be completed after resume using the network filesystem client's existing code for dealing with ordinary network interruptions.  There should be no blocking code paths on suspend for such filesystems *at all*.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644309/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644515"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 16:06 UTC (Thu)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/644515/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; If the suspend/resume is for a short walk to another building, </font><br>
+<p>
+Is there a user interface to express the difference between short walks versus long commute home + change of network?<br>
+<p>
+Among the many things NFS was really not designed for, mobility must be very near the top of the list.<br>
+<p>
+All traditional network filesystems suck and are on their way to the dustbin of history since they ignored Fallacy of Distributed Computing number 1 (and a few others). NFS just sucks more.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644515/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor644312"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 19:17 UTC (Wed)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/644312/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  What "hours of data" are you talking about?</font><br>
+&gt;<br>
+<font class="QuotedText">&gt; Dirty pages get flushed after about 30 seconds, so if you don't 'sync' before suspend, then the most you could lose if resume fails is data that was written by an app in the 30 seconds before suspend.</font><br>
+<p>
+so you save the document you've worked for hours on, and close the lid.<br>
+<p>
+the data was only written by the app a few seconds before suspending, but it represents hours of data for the user.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644312/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644373"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 22:30 UTC (Wed)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/644373/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; the data was only written by the app a few seconds before suspending, but it represents hours of data for the user.</font><br>
+<p>
+Any app worthy of the name will have called 'fsync' before giving you a visual indication that the save has completed.  emacs certainly does.<br>
+<p>
+If you close the lid before getting that visual notification, then you only have yourself to blame.  In that case a sys_sync in the suspend path may not help anyway as the app may not have finished writing.<br>
+<p>
+And of course, any real app would have auto-saved every few minutes so even in a disaster you wouldn't lose more than a few minutes work.<br>
+<p>
+There is definitely a place to call fsync (rarely sys_sync) to make sure data is safe.  The suspend path is not that place.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644373/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644524"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 17:13 UTC (Thu)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/644524/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Any app worthy of the name will have called 'fsync' before giving you a visual indication that the save has completed. emacs certainly does. [...]</font><br>
+<font class="QuotedText">&gt; And of course, any real app would have auto-saved every few minutes so even in a disaster you wouldn't lose more than a few minutes work.</font><br>
+<p>
+"Don't break userspace" - even userspace bugs.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644524/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644576"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 22:31 UTC (Thu)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/644576/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; "Don't break userspace" - even userspace bugs.</font><br>
+<p>
+If userspace needs the kernel to call sync before crashing then the user-space is already broken.  Systems can crash without entering suspend first.<br>
+<p>
+But that is a big "if".  Are there actually any non-trivial apps which don't save their data properly?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644576/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645538"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 21, 2015 21:58 UTC (Thu)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/645538/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  Are there actually any non-trivial apps which don't save their data properly?</font><br>
+<p>
+Okay, it's not linux, but ... MS Word ?<br>
+<p>
+(maybe it's changed, but I OFTEN lose data if I'm working on a document and it crashes - often it's the attempted auto-save that causes the crash :-(<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645538/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor645718"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 23, 2015 16:20 UTC (Sat)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/645718/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+If userspace needs the kernel to call sync before crashing then the user-space is already broken.
+</blockquote>
+
+No, the file system is broken.
+
+<blockquote>
+Are there actually any non-trivial apps which don't save their data properly?
+</blockquote>
+
+No, there are just file systems (e.g., ext4) which do not provide decent guarantees and use this kind of rethoric to justify their poor behaviour.  I expect that pretty much all non-trivial applications do not jump all the time through all the hoops that some developers of file systems expect of them; that's because  they have no good way to test that they meet the expectations of these file system developers, and most application developers probably have many more urgent things to care about.
+
+<p>Anyway, one example of a broken file system losing data of a popular application (including the autosave files that the application produces regularly) is <a rel="nofollow" href="http://www.complang.tuwien.ac.at/anton/sync-metadata-updates.html">here</a>.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645718/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645779"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 6:52 UTC (Mon)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/645779/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; No, the file system is broken. </font><br>
+<p>
+That makes no sense.<br>
+<p>
+I agree that "If a filesystem needs the kernel to call sync before crashing then the filesystem in already broken" with the understanding that "needs" means "needs in order to protect the data that it is responsible for."<br>
+Data that has not yet been written to the filesystem is certainly not the filesystem's reponsibility.<br>
+Data that has been written but hasn't been the subject of 'fsync' is also not completely the filesystem's responsibility (unless you mount with '-o sync').<br>
+<p>
+<font class="QuotedText">&gt; one example of a broken file system losing data of a popular application</font><br>
+<p>
+That is a filesystems from decades ago.  Yes it was broken, no question.  Linux filesystems aren't like that.  All non-trivial Linux filesystems do journalling of metadata, which is much safer than synchronous metadata updates.  I cannot promise they are all 100% bug free in every release, but I am certain that calling 'sync' in the suspend path isn't going to usefully fix any bug that they might have.<br>
+<p>
+It also sounds like that "popular application", which was emacs, wasn't calling 'fsync' as it should and as it certainly now does.<br>
+Yes - bugs should be fixed. But let's not scatter "sys_sync" calls around and pretend that fixes them.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645779/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645783"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 9:00 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/645783/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  That is a filesystems from decades ago. Yes it was broken, no question. Linux filesystems aren't like that. All non-trivial Linux filesystems do journalling of metadata, which is much safer than synchronous metadata updates. I cannot promise they are all 100% bug free in every release, but I am certain that calling 'sync' in the suspend path isn't going to usefully fix any bug that they might have.</font><br>
+As if on cue, today my laptop corrupted my filesystem during suspend/resume. I started synchronization of several large (~200G) directories with lots of small files from our local network and then totally forgot about it. Then I closed the laptop's lid and went home. <br>
+<p>
+Resume failed (yet again) and after reboot my BTRFS filesystem refused to mount.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645783/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor644148"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 4:00 UTC (Wed)
+                               by <b>imunsie</b> (guest, #68550)
+                              [<a href="/Articles/644148/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The probability of a suspend/resume cycle failure is now on par with--or even lower than--the probability of catastrophic hard disk failure, battery failure, or ordinary crashing kernel bugs (i.e. those crashes that occur at times other than suspend or resume).</font><br>
+<p>
+Wow, at the rate at which my laptop fails to suspend and/or resume, you must be going through at least one hard disk *AND* battery every single week!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644148/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644262"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 19:30 UTC (Wed)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/644262/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Wow, at the rate at which my laptop fails to suspend and/or resume you must be going through at least one hard disk *AND* battery every single week!</font><br>
+<p>
+We go through hard disks and batteries (and even displays) 2-3 times faster than suspend/resume failures.  I recommend you look into what your distro is doing wrong, or try another laptop--*any* other laptop.<br>
+<p>
+The last 7 laptops in my care have had one resume failure in 8 years.  That's close to 4300 successful suspend-to-RAM+resume cycles in the field.  Contrast with ~170 crashes at other times on those same laptops, most of which occurred while the laptop was sitting on an office desk in front of a user with stable AC power.  Also in that reporting interval there were 3 hard disk failures requiring drive replacement and over a dozen UNC sector data loss events (i.e. incidents when restore from backups was required because the disk had spontaneously lost some previously stable data, but remained otherwise healthy).  3 batteries had to be replaced as well, contributing several at-full-power crashes each to the total when the power failed without warning.<br>
+<p>
+By my count, on a given day when data is lost, it is more than twelve times more likely that the cause will be something that is not suspend/resume failure.  The probability of suspend/resume failure is so tiny, and its  impact relative to other common failure modes so small, that it's not worth the time and risk to prepare for it.  The cure is worse than the disease.<br>
+<p>
+Speaking of disease:  six of those hundreds of crashes were due to consequences of failing to enter the suspend state (i.e. remaining on full power until the battery was exhausted or shutdown was forced by the thermal protection circuitry).  Another dozen or more potential crashes were avoided because the user noticed the suspend failure and corrected the proximate cause manually (e.g. by unmounting network filesystems or disconnecting slow removable media devices).  The negative impact of sync-before-suspend could have been significantly worse without those modifications and user attention, and there would be many more such incidents had I not disabled the problematic kernel behaviors early on.  The relatively high frequency of this mode of failure was the trigger that drove me to modify code to fix the problem--and also to set up years of data logging to prove it had made things quantitatively better.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644262/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644324"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 20:20 UTC (Wed)
+                               by <b>scottwood</b> (guest, #74349)
+                              [<a href="/Articles/644324/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"We go through hard disks and batteries (and even displays) 2-3 times faster than suspend/resume failures" sounds a bit odd juxtaposed with, "I fired my distro's ACPI event-handling code. Several years ago it started being not merely useless, but an active source of failure."<br>
+<p>
+Keep in mind that most users have no idea how to "fire their distro's ACPI event-handling code".  FWIW my laptop (which was sold specifically as being meant for running Linux!) is pretty terrible at suspend/resume, often exhibiting similar behavior to what tpo described -- short term suspend is usually OK, but leave it for hours and I'll be presented with a cold boot.<br>
+<p>
+As for the sync issue, I think part of the problem is that sync is too blunt of an instrument.  A reasonable compromise might be to flush out whatever can be done in 2-3 seconds, focusing on devices that look like normal local high-speed storage.  Plus, a write delay of 30 seconds seems pretty high.  Maybe it makes sense on servers with UPSes and software that is careful about when data actually hits the disk, but on a laptop running apps of varying quality?  Where is the point of diminishing returns on delaying writes, especially with SSDs?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644324/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644365"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 22:36 UTC (Wed)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/644365/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; "We go through hard disks and batteries (and even displays) 2-3 times faster than suspend/resume failures" sounds a bit odd juxtaposed with, "I fired my distro's ACPI event-handling code. Several years ago it started being not merely useless, but an active source of failure."</font><br>
+<p>
+Several years ago...well, about 8 years ago, come to think of it, right before I started collecting reliability data.  ;)<br>
+<p>
+I also don't count the first few hundred suspend/resume cycles on a new laptop on the bench, since those are used to test and debug the acpi-support scripts before the laptop does any important work.  On the other hand, the result of that testing is usually the end of the acpi-support scripts.  On the last three laptops I've just skipped the testing phase and not installed the acpi-support scripts in the first place.<br>
+<p>
+<font class="QuotedText">&gt; Keep in mind that most users have no idea how to "fire their distro's ACPI event-handling code".</font><br>
+<p>
+I do keep that in mind, but I have no better practical advice to offer.  ACPI lid-event-handling userspace code in most distros is a byzantine nightmare of overlapping and mutually exclusive workarounds that are no longer necessary because the kernel (and X.org) has long been capable of easily and reliably handling the suspend process itself.  There's nothing left to do but hold down the delete key until all the broken code goes away.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644365/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor644378"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 23:37 UTC (Wed)
+                               by <b>imunsie</b> (guest, #68550)
+                              [<a href="/Articles/644378/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think you probably missed my (admittedly subtle) point - while suspend/result may work reliably for you, it still is a complete mess for other people, so removing the sync seems like a terrible idea (a tunable would be ok, so long as it still does a sync by default).<br>
+<p>
+As a side note, suspend/resume was actually working very reliably on my laptop until about three or four months ago when *something* (Kernel? Debian? systemd?) updated and completely broke it after the laptop had been in the dock (I really CBF tracking down yet another regression because I have better things to do with my time). But that's beside the point - if it doesn't work for me, it stands to reason that it doesn't work for a lot of other people, so it's not reliable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644378/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644379"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 0:07 UTC (Thu)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/644379/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The best outcome is going to be a tunable.  Good or bad, the changing the default sync behavior will take years to be fully accepted, and even after all the major userspaces catch up, there will probably always be a few people who are stuck with buggy legacy userspace and firmware at the same time.<br>
+<p>
+A tunable lets individual users choose when they make the transition.  Look how long it took for atime to stop being the default to get an idea how long such a change can take.<br>
+<p>
+There are always kernel regressions and crashes that lose some uncommitted data.  We don't run filesystems in sync mode all the time because the performance (and wear and tear on disks, rotating or otherwise) is a price too high for the negligible benefit of less data lost on a crash.  At some point that sync on suspend *must* go away.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644379/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor644746"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2015 11:54 UTC (Sat)
+                               by <b>faramir</b> (subscriber, #2327)
+                              [<a href="/Articles/644746/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My Dell Lattitude D530 fails to resume about 1/3 of the time.   I suspect a software bug as I think it worked back in the days of Ubuntu 10.04.   I keep hoping some random software update will fix the problem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644746/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor644353"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 21:31 UTC (Wed)
+                               by <b>javispedro</b> (guest, #83660)
+                              [<a href="/Articles/644353/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I would say that yes, the 1990's were almost two decades ago, and so is the entirely artificial construction of having to "suspend". In fact, almost all of the devices sold these days (and a huge amount of all 2015 laptops) do not even have the ability to enter S3 state or anything that would remotely resemble that. <br>
+<p>
+Thus, many current users of suspend are actually using it in order to "freeze user space, make some drivers do a bunch of other unrelated stuff" aspect of it. And it is because you're (ab)using suspend like this that you find yourself making a fuss because of a few seconds delay during suspend. <br>
+<p>
+If you want to freeze user space, use the proper kernel functionality for that. If cgroups is too complicated, fix it. If your drivers do weird stuff during suspend, fix the drivers so that they also work with dynpm.<br>
+<p>
+Suspend these days is 99% policy, 1% hw/firmware stuff. Therefore: move as many decisions as possible to userspace. At some point, it will be clear the entire concept is just a relic required to support a glitchy hardware feature that happened to be very useful during the 90s and 00s.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644353/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645734"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2015 6:50 UTC (Sun)
+                               by <b>simoncion</b> (guest, #41674)
+                              [<a href="/Articles/645734/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; In fact, almost all of the devices sold these days (and a huge amount of all 2015 laptops) do not even have the ability to enter S3 state or anything that would remotely resemble that.</font><br>
+<p>
+Citation *seriously* needed. S3 is Suspend To Ram. Page 12 of this 2014 Intel datasheet [0] indicates that a large number of mobile i3, i5, and i7 processors support S0, S3, S4, and S5 mode. (Check page 10 for the list of processors.)<br>
+<p>
+[0] <a rel="nofollow" href="http://www.intel.com/content/dam/www/public/us/en/documents/datasheets/4th-gen-core-family-mobile-u-y-processor-lines-vol-1-datasheet.pdf">http://www.intel.com/content/dam/www/public/us/en/documen...</a> <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645734/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor646696"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2015 14:43 UTC (Sat)
+                               by <b>javispedro</b> (guest, #83660)
+                              [<a href="/Articles/646696/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This very website: <a href="http://lwn.net/Articles/580451/">http://lwn.net/Articles/580451/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646696/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor646702"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2015 16:08 UTC (Sat)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/646702/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; This very website: <a href="http://lwn.net/Articles/580451/">http://lwn.net/Articles/580451/</a></font><br>
+<p>
+From that link: "They expect this mode to be used, as can be seen by the fact that machines that do not support the ACPI "S3" sleep state (a.k.a. suspend) at all will start shipping soon."<br>
+<p>
+IMHO "machines [...] will start shipping soon" != "almost all of the devices sold these days (and a huge amount of all 2015 laptops)". So yeah, citation still needed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646702/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor646703"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2015 16:34 UTC (Sat)
+                               by <b>javispedro</b> (guest, #83660)
+                              [<a href="/Articles/646703/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Let's integrate by parts: "almost all of the devices sold these days" do not support S3, since currently the only non-negliglible architecture where S3 is supported is x86, and x86 is clearly a minority of "all devices sold these days", which includes ARM smartphones and tables, µC and other embedded devices.<br>
+<p>
+The other part, "a huge amount of all 2015 laptops" do not support S3, is what should be apparent from the link I sent. The Microsoft logo requirements for Windows 8 laptops/tablets/hybrids recommend Connected Standby support. When Connected Standby support is present, the firmware _must disable_ S3 support; this is a Microsoft logo _requirement_ (  e.g. <a href="http://www.anandtech.com/show/8038/windows-81-x64-connected-standby-support">http://www.anandtech.com/show/8038/windows-81-x64-connect...</a> ) and therefore every system out there which supports Connected Standby and Windows 8 _does not support S3_.<br>
+<p>
+In 2014 the first systems with that started to ship (hybrids -- including the Surface Pro, the Dell Venue Pros, last Sony Vaios, the new Helix, etc.). _All_ hybrids and tablets from 2014 already shipped with Connected Standby, but only a few laptops. If you know of any hybrid/tablet that shipped in late 2014 without CS/AOAC please let me know.<br>
+<p>
+Now it's 2015, and, even within laptops, it's hard to find a system not shipping with connected standby. The Dell XPS, the new Yoga and LaVie ThinkPads, the Asus Zenbooks all ship with Connected Standby. <br>
+<p>
+However, it is a fact that there are some laptops left without Connected Standby, which (supposedly) still support S3. Which is why I said "a huge amount of all 2015 laptops", and not "all of 2015 laptops". Two examples: the Thinkpad X250 and the HP Spectre x360 do not support CS, to be best of my knowledge.<br>
+<p>
+Hope this explains it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646703/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor657095"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2015 6:18 UTC (Fri)
+                               by <b>mcortese</b> (guest, #52099)
+                              [<a href="/Articles/657095/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>Now it's 2015, and, even within laptops, it's hard to find a system not shipping with connected standby</blockquote>
+<p/>Funny. I see that most laptops still come with spinning disk: they shouldn't support Connected Standby as SSD is listed as a requirement. What am I missing?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/657095/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor661492"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 20, 2015 22:35 UTC (Tue)
+                               by <b>javispedro</b> (guest, #83660)
+                              [<a href="/Articles/661492/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I see that most laptops still come with spinning disk</font><br>
+<p>
+At least in the country where I live, only 2 out of the 20 most sold laptops in Amazon contain a spinning disk. Those 2 peculiarly enough ship with Windows 7.<br>
+<p>
+In fact, there are more laptops sold with eMMCs than spinning drives. I always learn something...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/661492/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor644137"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The missing option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 2:18 UTC (Wed)
+                               by <b>bojan</b> (subscriber, #14302)
+                              [<a href="/Articles/644137/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="http://en.wikipedia.org/wiki/Abort,_Retry,_Fail%3F">http://en.wikipedia.org/wiki/Abort,_Retry,_Fail%3F</a><br>
+<p>
+Now, that would be a real improvement if we really want to lose data. ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644137/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor644192"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No battery [was: Trading off safety and performance in the kernel]</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 14:50 UTC (Wed)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/644192/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It has also been pointed out that, sometimes, a suspended system will never resume due to running out of battery or the kernel being upgraded.</font><br>
+<p>
+Not all systems being suspended have a battery. For instance, at home we have a desktop which is often suspended while not in use. Whenever the power fails while it's suspended, it has to cold boot instead of resuming.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644192/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644287"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No battery [was: Trading off safety and performance in the kernel]</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 17:33 UTC (Wed)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/644287/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wasn't there a wishlist from GNOME or somewhere which had "hybrid suspend" (to disk and RAM so if power goes out, it comes back from hibernation) on it linked a while ago? Anyone know of its status?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644287/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644351"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No battery [was: Trading off safety and performance in the kernel]</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 21:17 UTC (Wed)
+                               by <b>bojan</b> (subscriber, #14302)
+                              [<a href="/Articles/644351/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, suspend to both has been available in the kernel for a while now. You just put suspend into /sys/power/disk before you hibernate.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644351/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644590"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No battery [was: Trading off safety and performance in the kernel]</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2015 0:07 UTC (Fri)
+                               by <b>bnorris</b> (subscriber, #92090)
+                              [<a href="/Articles/644590/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the tip. BTW, the "suspend" option is not documented in Documentation/ABI/testing/sysfs-power.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644590/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644593"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No battery [was: Trading off safety and performance in the kernel]</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2015 0:48 UTC (Fri)
+                               by <b>bojan</b> (subscriber, #14302)
+                              [<a href="/Articles/644593/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="https://www.kernel.org/doc/Documentation/power/swsusp.txt">https://www.kernel.org/doc/Documentation/power/swsusp.txt</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644593/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644617"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No battery [was: Trading off safety and performance in the kernel]</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 15, 2015 6:12 UTC (Fri)
+                               by <b>bnorris</b> (subscriber, #92090)
+                              [<a href="/Articles/644617/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I saw that, but it should also be at least mentioned in Documentation/ABI/testing/sysfs-power alongside all the other /sys/power/disk options. Maybe I'll send a patch, if you don't.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644617/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor644286"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2015 17:28 UTC (Wed)
+                               by <b>riteshsarraf</b> (subscriber, #11138)
+                              [<a href="/Articles/644286/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is interesting to see various views from users here.<br>
+<p>
+All use cases mentioned have a legit need. What the kernel needs is (which it mostly does) to keep being flexible.<br>
+<p>
+The point about removing the sys_sync() call is fair, given the performance benefits it may provide.<br>
+<p>
+How to guard safety of the data should be delegated to the user.<br>
+And the default behaviors should be the responsibility of userspaces.<br>
+<p>
+I'm surprised nobody has talked about uswsusp. I use laptop-mode-tools with 600 commit interval, when on battery. But at the same time, my suspend task is: `sync &amp;&amp; s2both`.<br>
+<p>
+It allows the safety of my data, the faster resumption when returning, and possibility to resume the hibernated state, in case the battery ran out.<br>
+<p>
+Having the functionalities flexible, and liberating the userspace helps keep all happy and sane.<br>
+<p>
+<p>
+This is quite similar to what happened when ext4 introduced delayed allocation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644286/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor644447"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2015 12:31 UTC (Thu)
+                               by <b>hmh</b> (subscriber, #3838)
+                              [<a href="/Articles/644447/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Calling sys_sync() on something that userspace has already sync()'d should be fast enough to not bother removing it at all.<br>
+<p>
+Therefore, either something is strange (sys_sync() being slow on almost-fully-sync'd/fully-sync'd filesystems), or the goal of userspace is to not sync at all before suspend-to-ram, and anything else is just a Red Herring.<br>
+<p>
+And "not sync at all" cannot be the kernel default behavior for "system-wide deep suspend": using opt-out for this would be irresponsible.  If someone wants to opt-in at runtime to no-sync-before-suspend, it is a different matter.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/644447/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor645850"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2015 7:31 UTC (Tue)
+                               by <b>toyotabedzrock</b> (guest, #88005)
+                              [<a href="/Articles/645850/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is a simple solution to this that Microsoft uses. A file attribute that gets set when the file is modified. When a backup occurs that bit is reset. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645850/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor646189"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Trading off safety and performance in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 27, 2015 22:31 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/646189/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This works great as long as you only have one generation of backups. More than that and bad things happen.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646189/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

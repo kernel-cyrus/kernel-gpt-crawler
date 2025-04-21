@@ -1,0 +1,588 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>In pursuit of faster futexes [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/685769/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/685372/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/685769/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>In pursuit of faster futexes</h1>
+</div>
+<div class="ArticleText">
+<div class="GAByline">
+           <p>May 4, 2016</p>
+           <p>This article was contributed by Neil&nbsp;Brown</p>
+           </div>
+<p><a href="https://en.wikipedia.org/wiki/Futex">Futexes</a>, the
+primitives provided by Linux for fast user-space <a
+href="https://en.wikipedia.org/wiki/Mutual_exclusion">mutex</a> support,
+have been 
+explored many times in these pages.  They have gained various improvements
+over the years such as <a href="https://lwn.net/Articles/178253/">priority
+inheritance</a> and <a
+href="https://lwn.net/Articles/172149/">robustness</a> in the face of
+processes dying.  But it appears that there is still at least one thing
+they lack: a recent <a href="https://lwn.net/Articles/682277/">patch
+set</a> from Thomas Gleixner, along with a <a
+href="https://lwn.net/Articles/685425/">revised version</a>, aims to
+correct the unfortunate fact that they just aren't fast enough.</p>
+
+<p>The claim that futexes are fast (as advertised by the "f" in
+the name) is primarily based on their
+behavior when there is no contention on any specific futex.  Claiming a futex
+that no other task holds, or releasing a futex that no other task
+wants, is extremely quick; the entire operation happens
+in user space with no involvement from the kernel.  The claims that
+futexes are not fast <i>enough</i>, instead, focus on the contended case:
+waiting for a busy lock, or sending a wakeup while releasing a lock that
+others are waiting for.  These operations must involve calls into the
+kernel as sleep/wakeup events and communication between different tasks are
+involved.  It is 
+expected that this case won't be as fast as the uncontended case, but hoped
+that it can be faster than it is, and particularly that the
+delays caused can be more predictable.  The source of the delays has
+to do with shared state managed by the kernel.</p>
+
+<h4>Futex state: not everything is a file (descriptor)</h4>
+
+<p>Traditionally in Unix, most of the state owned by a process is
+represented by file descriptors, with memory mappings being the main
+exception.  Uniformly using file descriptors provides a number of
+benefits: the  kernel can find the state using a simple <a href="https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/tree/include/linux/fdtable.h?id=b562e44f507e863c6792946e4e1b1449fbbac85d#n76">array lookup</a>,
+the file descriptor limit stops processes from inappropriately
+overusing memory, state can easily be released with a simple
+<tt>close()</tt>, and everything can be cleaned up nicely when the process
+exits.</p>
+
+<p>Futexes do not make use of file descriptors (for general state
+management) so none of these benefits apply.  They use such a tiny
+amount of kernel space, and then only transiently, that it could be
+argued that the lack of file descriptors is not a problem.  Or at least it
+could until the discussion around
+Gleixner's first patch set, where exactly 
+this set of benefits was found to be wanting.
+While this first attempt has since been
+discarded in favor of a much simpler approach, exploring it further
+serves to highlight the key issues and shows what a complete solution
+might look like.</p>
+
+<p>If we leave priority inheritance out of the picture for simplicity,
+there are two data structures that the kernel uses to support
+futexes. <tt>struct futex_q</tt> is used to represent a task that is
+waiting on a futex.  There is at most one of these for each task and
+it is only needed while the task is waiting in the
+<tt>futex(FUTEX_WAIT)</tt> system call, so it is easily allocated on the
+stack.  This piece of kernel state doesn't require any extra
+management.</p>
+
+<p>The second data structure is a fixed sized hash table comprising an
+array of <tt>struct futex_hash_bucket</tt>; it looks something like this:</p>
+
+
+<p>
+<blockquote>
+<img src="https://static.lwn.net/images/2016/futex-current.png" alt="Futex data structures"
+    width="364" height=439>
+</blockquote>
+
+<p>Each bucket has a linked list of <tt>futex_q</tt> structures representing
+waiting tasks together with a spinlock and some accounting to manage
+that list.  When a <tt>FUTEX_WAIT</tt> or <tt>FUTEX_WAKE</tt> request
+is made, the
+address of the futex in question is hashed and the resulting number is used to
+choose a bucket in the hash table, either to attach the waiting task
+or to find tasks to wake up.</p>
+
+<p>The performance issues arise when accessing this hash table, and they
+are issues that would not affect access in a file-descriptor model.
+First, the &quot;address&quot; of a futex can, in the general case, be either an
+offset in memory or an offset in a file and, to ensure that the correct
+calculation is made, the fairly busy <tt>mmap_sem</tt> semaphore
+must be claimed.  A more significant motivation for the current patches is
+that a single
+bucket can be shared by multiple futexes.  This makes the process of
+walking the linked list of <tt>futex_q</tt> structures to find tasks to wake
+up non-deterministic since the length could vary depending on the
+extent of sharing.  For realtime workloads determinism is important;
+those loads would benefit from the hash buckets not being shared.</p>
+
+<p>The single hash table causes a different sort of performance problem
+that affects NUMA machines.  Due to their non-uniform memory
+architecture, some memory is much faster to access than other memory.
+Linux normally allocates memory resources needed by a task from the
+memory that is closest to the CPU that the task is running on, so as
+to make use of the faster access.  Since the hash table is all at one
+location, the memory will probably be slow for most tasks.</p>
+
+<p>Gleixner, the realtime tree maintainer, reported that these problems
+can be measured and that in real world applications the hash
+collisions "<q>cause performance or determinism issues</q>".
+This is not a particularly new observation: Darren Hart <a href="https://lwn.net/Articles/360699/">reported</a> in
+a summary of the state of futexes in 2009 that "<q>the futex hash
+table is shared across all processes and is protected by spinlocks
+which can lead to real overhead, especially on large systems.</q>"
+What does seem to be new is that Gleixner has a proposal to fix the
+problems.</p>
+
+<h4>Buckets get allocated instead of shared</h4>
+
+<p>The core of Gleixner's initial proposal was to replace use of the
+global table of buckets, shared by all futexes, with dynamically
+allocated buckets — one for each futex.  This was an opt-in change: a
+task needed to explicitly request an attached futex to get one that
+has its own private bucket in which waiting tasks are queued.</p>
+
+<p>If we return to the file descriptor model mentioned earlier, kernel
+state is usually attached via some system call like <tt>open()</tt>,
+<tt>socket()</tt>, or <tt>pipe()</tt>.  These calls create a data structure — a
+<tt>struct file</tt> — and return a file descriptor, private to the
+process, that 
+can be used to access it.  Often there will be a common namespace so
+that two processes can access the same thing: a shared inode might
+be found by name and referenced by two private files each accessed
+through file descriptors.</p>
+
+<p>Each of these ideas are present in Gleixner's implementation, though
+with different names.  In place of a file descriptor there is the
+task-local address of the <tt>futex</tt> that is purely a memory address,
+never a file offset. It is hashed for use as a key to a new per-task hash
+table — the <tt>futex_cache</tt>.  In place of the <tt>struct file</tt>,
+the hash table has a <tt>futex_cache_slot</tt> that contains information
+about the futex.  Unlike most hash tables in the kernel, this one
+doesn't allow chaining: if a potential collision is ever detected the
+size of the hash table is doubled.</p>
+
+<p>In place of the shared inode, attached futexes have a shared
+<tt>futex_state</tt> structure that contains the global bucket for that
+futex.  Finally, to serve as a namespace, the existing global hash table
+is used.  Each <tt>futex_state</tt> contains a <tt>futex_q</tt> that can be linked
+into that table.</p>
+
+<p>
+<blockquote>
+  <img src="https://static.lwn.net/images/2016/futex-attached.png" alt="New Futex data
+  structures" width=437 height=538/>
+</blockquote>
+
+
+<p>With this infrastructure in place, a task that wants to work with an
+attached futex must first attach it:</p>
+<pre>
+    sys_futex(FUTEX_ATTACH | FUTEX_ATTACHED, uaddr, ....);
+</pre>
+<p>and can later detach it:</p>
+<pre>
+    sys_futex(FUTEX_DETACH | FUTEX_ATTACHED, uaddr, ....);
+</pre>
+
+<p>All operations on the attached futex would include the
+<tt>FUTEX_ATTACHED</tt> flag to make it clear they expect an attached futex,
+rather than a normal on-demand futex.</p>
+
+<p>The <tt>FUTEX_ATTACH</tt> behaves a little like
+<tt>open()</tt> and finds or creates a
+<tt>futex_state</tt> by performing a lookup in the global hash
+table, and then attaches it to the task-local
+<tt>futex_cache</tt>.  All future accesses to that futex will
+find the <tt>futex_state</tt> with a lookup in the
+<tt>futex_cache</tt> which will be a constant-time lockless
+access to memory that is probably on the same NUMA node as the task.  There
+is every reason to expect that this would be faster and Gleixner has some
+numbers to prove it, though he admitted they were a synthetic benchmark
+rather than a real-world load.</p>
+
+<h4>It's always about the interface</h4>
+
+<p>The main criticisms that Gleixner's approach received were not that he
+was re-inventing the file-descriptor model, but that he was changing
+the interface at all.</p>
+
+<p>Having these faster futexes was not contentious.  Requiring, or even
+allowing, the application programmer to choose between the old and the
+new behavior is where the problem lies.  Linus Torvalds in particular
+<a href="/Articles/682771/">didn't think</a> that programmers would make
+the right choice, primarily 
+because they wouldn't have the required perspective or the necessary
+information to make an informed choice.  The tradeoffs are really
+at the system level rather than the application level: large memory systems,
+particularly NUMA systems, and those designed to support realtime loads
+would be 
+expected to benefit.  Smaller systems or those with no realtime
+demands are unlikely to notice and could suffer from the extra memory
+allocations.  So while a system-wide configuration might be suitable,
+a per-futex configuration would not.  This seems to mean that futexes
+would need to automatically attach without requiring an explicit
+request from the task.</p>
+
+<p>Torvald Riegel <a href="http://mid.gmane.org/1459842272.1991.34.camel@localhost.localdomain">supported</a> this conclusion from the different
+perspective provided by glibc.  When using futexes to implement, for
+example, C11 mutexes, "<q>there's no good place to add the
+attach/detach calls</q>" and no way to deduce whether it is worth
+attaching at all.</p>
+
+<p>It is worth noting that the new <tt>FUTEX_ATTACH</tt> interface makes the
+<a href="https://lwn.net/Articles/412131/">mistake of conflating</a> two different elements of functionality.  A
+task that issues this request is both asking for the faster implementation
+and agreeing to be involved in resource management, implicitly stating
+that it will call <tt>FUTEX_DETACH</tt> when the futex is no longer needed.
+Torvalds rejected the first of these as inappropriate and Riegel
+challenged the second as being hard to work with in practice.  This
+effectively rang the death knell for explicit attachment.</p>
+
+<h4>Automatic attachment</h4>
+
+<p>Gleixner had already considered automatic attachment but had rejected it
+because of problems with, to use his list:</p>
+<div class="BigQuote">
+<pre>
+     - Memory consumption
+     - Life time issues
+     - Performance issues due to the necessary allocations
+</pre>
+</div>
+
+<p>Starting with the lifetime issues, it is fairly clear that the lifetime
+of the <tt>futex_state</tt> and <tt>futex_cache_slot</tt> structures would 
+start when a thread needed to wake or wait on a futex.  When the lifetime
+ends is the interesting question and, while it wasn't discussed, 
+there seem to be two credible options.  The easy option is for these
+structures to remain until the thread(s) using them exits, or at least
+until the memory containing the futex is unmapped.  This could be long
+after the futex is no longer of interest, and so is wasteful.</p>
+
+<p>The more conservative option would be to keep the structures on some
+sort of LRU (least-recently used) list and discard the state for old
+futexes when the total allocated seems too high.  As this would
+introduce a new source of non-determinism in access speed, the
+approach is likely a non-starter, so wastefulness is the only option.</p>
+
+<p>This brings us to memory consumption.  Transitioning from the
+current implementation to attached futexes changes the kernel memory
+used per idle futex from zero to something non-zero.  This may not be
+a small change.  It is easy to imagine an application embedding a
+futex in every instance of some object that is allocated and
+de-allocated in large numbers.  Every time such a futex suffers
+contention, an extra in-kernel data structure would be created.  The
+number of such would probably not grow quickly, but it could just keep
+on growing.  This would particularly put pressure on the <tt>futex_cache</tt>
+which could easily become too large to manage.</p>
+
+<p>The performance issues due to extra allocations are not a problem with
+explicit attachment for, as Gleixner later <a href="http://mid.gmane.org/alpine.DEB.2.11.1604031158110.3978@nanos">clarified</a>:
+"<q>Attach/detach is not really critical.</q>" With implicit
+attachment they would happen at first contention which would introduce
+new non-determinism.  A realtime task working with automatically
+attached futexes would probably avoid this by issuing some no-op
+operation on a futex just to trigger the attachment at a predictable
+time.</p>
+
+<p>All of these problems effectively rule out implicit attachment,
+meaning that, despite the fact that they remove nearly all the overhead
+for futex accesses, attached futexes really don't have a future.</p>
+
+<h4>Version two: no more attachment</h4>
+
+<p>Gleixner did indeed determine that attachment has no future and came
+up with an alternate scheme.  The last time that futex performance was
+a problem, the <a
+href="https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=a52b89ebb6d4499be38780db8d176c5d3a6fbc17">response</a>
+was to increase the size of the global hash 
+table and enforce an alignment of buckets to cache lines to improve
+SMP behavior.  Gleixner's latest patch set follows the same idea with a
+bit more sophistication.  Rather than increase the single global hash
+table a <a href="https://en.wikipedia.org/wiki/Shard_%28database_architecture%29">&quot;sharding&quot;</a> approach is taken, creating multiple distinct
+hash tables for multiple distinct sets of futexes.</p>
+
+<p>Futexes can be declared as <a
+href="https://lwn.net/Articles/229668/">private</a>,  in which
+case they avoid the 
+<tt>mmap_sem</tt> semaphore and can be only be used by threads in a single
+process.  The set of private futexes for a given process form the basis
+for sharding and can, with the new patches, have exclusive access to a
+per-process hash table of futex buckets.  All shared futexes still use
+the single global hash table.  This approach addresses the NUMA issue
+by having the hash table on the same NUMA node as the process, and
+addresses the collision issue by dedicating more hash-table space per
+process.  It only helps with private futexes, but these seem to be
+the style most likely to be used by applications needing predictable
+performance.</p>
+
+<p>The choice of whether to allocate a per-process hash table is left as
+a system-wide configuration which is where the tradeoffs can best be
+assessed.  The application is allowed a small role in the choice of
+when that table is allocated: a new futex command can request
+immediate allocation and suggest a preferred size.  This avoids the
+non-determinism that would result from the default policy of allocation
+on first conflict.</p>
+<p>It seems likely that this is the end of the story for now.  There has
+been no distaste shown for the latest patch set and Gleixner is
+confident that it solves his particular problem.  There would be no
+point aiming for a greater level of perfection until another
+demonstrated concrete need comes along.</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Futex">Futex</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Brown_Neil">Brown, Neil</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/685769/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor686468"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">In pursuit of faster futexes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2016 15:50 UTC (Thu)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/686468/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Unlike most hash tables in the kernel, this one doesn't allow chaining: if a potential collision is ever detected the size of the hash table is doubled.</font><br>
+<p>
+Doesn't that mean the number of hash buckets will scale as roughly the *square* of the number of futexes? Per the birthday paradox, if you have 4096 buckets, I think you'd only need to create 76 futexes to get a &gt;50% chance of collision between at least one pair. The patch set TASK_MAX_CACHE_SIZE = 4096, so it wouldn't expand the hash any further and would just return an error. Even with 4096 buckets and only 10 futexes, there's still a &gt;1% chance of a collision, i.e. your application will fail with an out-of-resources error on a random 1% of occasions, which sounds non-ideal (if I understood it correctly).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/686468/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor686583"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">In pursuit of faster futexes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2016 16:36 UTC (Fri)
+                               by <b>alonz</b> (subscriber, #815)
+                              [<a href="/Articles/686583/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I wonder if a more modern open-addressing hash table (such as Cuckoo hashing, or Hopscotch, or Robin Hood) could be suitable for the kernel. All of those have the advantage that they achieve O(1) lookup performance, even with very high load factors.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/686583/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor687232"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">In pursuit of faster futexes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2016 16:33 UTC (Thu)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/687232/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+While it doesn't SOLVE the chaining (and hence determinism) problem, using dynamic/linear hashing would enable the hash table to expand without much overhead. And the overhead of the expansion is also almost deterministic. At the end of the day, however, any hash scheme is susceptible to a pathological hash that dumps most of the entries into one bucket.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/687232/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor687233"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">In pursuit of faster futexes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2016 16:35 UTC (Thu)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/687233/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Unlike most hash tables in the kernel, this one doesn't allow chaining: if a potential collision is ever detected the size of the hash table is doubled.</font><br>
+<p>
+Doesn't that also introduce another non-determinism? The cost of expanding the hash table is dependent on both the current size and the number of items in it?<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/687233/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor687303"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">In pursuit of faster futexes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2016 22:04 UTC (Thu)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/687303/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Doesn't that also introduce another non-determinism?</font><br>
+<p>
+Yes, but the non-determinism affects the attachment of the futex, not the use.<br>
+i.e. it is all done and out of the way before the realtime task starts its realtime work.<br>
+So this non-determinism wouldn't matter.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/687303/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor693696"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">In pursuit of faster futexes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2016 9:43 UTC (Thu)
+                               by <b>Marc5</b> (subscriber, #67700)
+                              [<a href="/Articles/693696/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It is easy to imagine an application embedding a futex in every instance of some object that is allocated and de-allocated in large numbers.</font><br>
+<p>
+For example, Larry Hastings mentioned adding a futex to every (c-)mutable python object as a precursor for removing the GIL in his "gilectomy" talk [1]. That would be rather a lot.<br>
+<p>
+<p>
+[1] <a href="https://codek.tv/detail/larry-hastings-removing-python-s-gil-the-gilectomy-pycon-2016">https://codek.tv/detail/larry-hastings-removing-python-s-...</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693696/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

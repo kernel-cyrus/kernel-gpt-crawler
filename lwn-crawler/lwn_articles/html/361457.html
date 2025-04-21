@@ -1,0 +1,850 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Supporting transactions in btrfs [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/361457/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/360599/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/361457/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Supporting transactions in btrfs</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Benefits for LWN subscribers</b>
+<p>
+The primary benefit from <a href="/Promo/nst-nag5/subscribe">subscribing to LWN</a>
+       is helping to keep us publishing, but, beyond that, subscribers get
+       immediate access to all site content and access to a number of extra
+       site features.  Please sign up today!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 11, 2009</br>
+           </div>
+Much of the fuss involving <tt>fsync()</tt> and crash robustness over the
+last year was really about how applications can get transactional semantics
+out of filesystem operations.  An application developer often wants to see
+a set of operations either succeed or fail as a unit, without the
+possibility of partially-completed operations.  Providing ways for
+applications to get that behavior can be a challenge, though.
+<p>
+Btrfs has tried to make this capability available to user space by way of
+the <tt>BTRFS_IOC_TRANS_START</tt> and <tt>BTRFS_IOC_TRANS_END</tt>
+<tt>ioctl()</tt> calls.  There are some real problems with this approach,
+though.  They operate as a pair of system calls, with any operations
+between the two being treated as a transaction within the filesystem.  But
+if something fails, or if the application never quite gets around to ending
+the transaction, things will eventually come to a halt.  That is why the
+btrfs code includes this comment:
+<p>
+<div class="BigQuote">
+	There are many ways the trans_start and trans_end ioctls can lead
+	to deadlocks.  They should only be used by applications that
+	basically own the machine, and have a very in depth understanding
+	of all the possible deadlocks and enospc problems.
+</div>
+<p>
+It is, in other words, a dangerous capability which cannot be made
+generally available.
+<p>
+Sage Weil has posted <a href="http://lwn.net/Articles/361439/">a patch</a>
+taking a rather different approach to the problem.  The key idea is to
+avoid the problem of never-completed transactions by encapsulating the
+entire thing within a single system call.  The result is a new
+<tt>BTRFS_IOC_USERTRANS</tt> command for <tt>ioctl()</tt>; chances are it
+will require a bit of work yet, but it could be the base for user-space
+transactions in the future.
+<p>
+This command takes a structure which looks something like the following:
+<p>
+<pre>
+    struct btrfs_ioctl_usertrans {
+	__u64 num_ops;
+	struct btrfs_ioctl_usertrans_op *ops_ptr;
+	__u64 num_fds;
+	__u64 data_bytes, metadata_ops;
+	__u64 flags;
+	__u64 ops_completed;
+    };
+</pre>
+<p>
+The <tt>ops_ptr</tt> argument points to an array of <tt>num_ops</tt>
+individual operations to complete:
+<p>
+<pre>
+    struct btrfs_ioctl_usertrans_op {
+	__u64 op;
+	__s64 args[5];
+	__s64 rval;
+	__u64 flags;
+    };
+</pre>
+<p>
+Here, <tt>op</tt> describes an individual operation.  It can be 
+<tt>BTRFS_IOC_UT_OP_OPEN</tt> (open a file),
+<tt>BTRFS_IOC_UT_OP_CLOSE</tt> (close a file),
+<tt>BTRFS_IOC_UT_OP_PWRITE</tt> (write to a file),
+<tt>BTRFS_IOC_UT_OP_UNLINK</tt> (unlink a file),
+<tt>BTRFS_IOC_UT_OP_LINK</tt> (make a link to a file),
+<tt>BTRFS_IOC_UT_OP_MKDIR</tt> (create a directory),
+<tt>BTRFS_IOC_UT_OP_RMDIR</tt> (remove a directory),
+<tt>BTRFS_IOC_UT_OP_TRUNCATE</tt> (truncate a file),
+<tt>BTRFS_IOC_UT_OP_SETXATTR</tt> (set an extended attribute),
+<tt>BTRFS_IOC_UT_OP_REMOVEXATTR</tt> (remove an extended attribute), or
+<tt>BTRFS_IOC_UT_OP_CLONERANGE</tt> (copy a range of data from one file to
+another).
+For each operation, the <tt>args</tt> field contains a set of arguments
+similar to what one would see for the corresponding system call.  One
+interesting difference is that there are no hard-coded file descriptor numbers;
+instead, the transaction gets a new file descriptor table and all
+operations work with indexes into that table.  Essentially, transactions
+work within a file descriptor space separated from that used by the calling
+process. 
+<p>
+The <tt>flags</tt> field describes how the return value from each operation
+should be interpreted.  It can be contain any of:
+<tt>BTRFS_IOC_UT_OP_FLAG_FAIL_ON_NE</tt>,
+<tt>BTRFS_IOC_UT_OP_FLAG_FAIL_ON_EQ</tt>,
+<tt>BTRFS_IOC_UT_OP_FLAG_FAIL_ON_LT</tt>,
+<tt>BTRFS_IOC_UT_OP_FLAG_FAIL_ON_GT</tt>,
+<tt>BTRFS_IOC_UT_OP_FLAG_FAIL_ON_LTE</tt>, and
+<tt>BTRFS_IOC_UT_OP_FLAG_FAIL_ON_GTE</tt>.  In each case, the flag causes
+the return value to be compared against the passed-in <tt>rval</tt> field;
+if the comparison is successful, the transaction will fail.
+<p>
+
+What happens if the transaction fails?  The partially-completed transaction
+will not be rolled back; btrfs, not being a database, is not really set up
+to do that.  Instead, the number of successfully-completed operations will
+be passed back to user space.  Optionally, the application can provide the
+<tt>BTRFS_IOC_UT_FLAG_WEDGEONFAIL</tt> flag, causing btrfs to leave the
+transaction open, locking up the filesystem until the system is rebooted.
+This may seem like a rather antisocial approach to transaction atomicity,
+but, if failure is both highly unlikely and highly problematic, that might
+be the right thing to do.
+<p>
+
+A patch like this raises a lot of questions.  The first obstacle may be the
+fact that it requires exporting a number of system call implementations to
+modules, a change which has been resisted in the past.  Kernel code need
+not normally call functions like <tt>sys_mkdir()</tt>, but this patch does
+exactly that.  Calling system call implementations directly can be a bit
+tricky on some architectures, and there are good reasons for not making
+these functions available to modules in general.
+
+<p>
+
+Another problem is that the filesystem has
+no real way of determining whether a transaction will succeed before
+jumping into it; the best it can do is reserve some metadata space in
+accordance with an estimate provided by the application.  If transactions
+are allowed to complete partially, they are no longer transactions.  But
+the alternative of locking up the system can only leave people wondering if
+there isn't a better way.
+<p>
+Then, there is a question which was raised on the list: btrfs provides
+cheap snapshots, why not use them to implement transactions?  Using a
+snapshot would take advantage of existing functionality and should make
+proper rollback possible.  The problem would appear to be performance:
+btrfs snapshots are not quite <i>that</i> cheap, especially when one
+considers the need to exclude other activity on the filesystem while the
+transaction is active.  So Chris Mason has <a
+href="/Articles/361472/">suggested</a> that the old standby - write-ahead
+logging - would be preferable because it will perform much better.  But, he
+thinks, the multi-operation <tt>ioctl()</tt> could maybe perform better
+yet.
+<p>
+Finally, there would appear to be some real similarities between this API
+and the rather more general <a
+href="http://lwn.net/Articles/236206/">syslets</a> mechanism.  Syslets have
+been on the back burner for some time now, but they could come back forward
+if they seemed like a good way to solve this problem.
+
+<p>
+Clearly, like much of btrfs, this new <tt>ioctl()</tt> is a work in
+progress.  If it gets into the mainline, it will be likely to have changed
+quite a bit on the way.  But the problem this patch is trying to solve is
+real; it's clearly an issue which is worth thinking about.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Btrfs">Btrfs</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Btrfs">Filesystems/Btrfs</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/361457/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor361629"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting transactions in btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2009 11:01 UTC (Thu)
+                               by <b>etienne_lorrain@yahoo.fr</b> (guest, #38022)
+                              [<a href="/Articles/361629/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ About the fsync() problem, I wonder if tagging every write operation with a sequence number (one sequence number per device) would be a good solution:<br>
+ The device driver can re-order any write with the same sequence number.<br>
+ Each time a fsync() is done, it increment the sequence number of that device by 1.<br>
+ Maybe a function call wait_until_current_sequence_number_reached(device);<br>
+Wouldn't that be a good and simple compromise?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361629/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor361703"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting transactions in btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2009 16:30 UTC (Thu)
+                               by <b>dtlin</b> (subscriber, #36537)
+                              [<a href="/Articles/361703/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Say you have a text editor which only wants to fsync one file and a <br>
+background task which is continuously writing lots of files.<br>
+<p>
+How do you propose to implement fsync such that when your text editor's <br>
+requests it, only that one file and not too much else is flushed?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361703/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor361780"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting transactions in btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2009 23:27 UTC (Thu)
+                               by <b>masoncl</b> (subscriber, #47138)
+                              [<a href="/Articles/361780/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Btrfs actually already does this.  When you fsync a file the metadata is written to a dedicated logging tree, and that file's data blocks go to disk along with the metadata for the dedicated tree.<br>
+<p>
+The end result is that we only write data and metadata for the one file we're sending to fsync.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361780/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor361639"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Transactions, yes please!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2009 12:25 UTC (Thu)
+                               by <b>walles</b> (guest, #954)
+                              [<a href="/Articles/361639/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And rollbacks, yes please!<br>
+<p>
+If the machine just lost power, trying to return a number telling the user how far the "transaction" got doesn't help that much...<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361639/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor361641"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting transactions in btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2009 12:27 UTC (Thu)
+                               by <b>mpee</b> (subscriber, #37530)
+                              [<a href="/Articles/361641/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wow, that's one pretty gross ioctl parameter.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361641/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor361656"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Color me puzzled</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2009 13:58 UTC (Thu)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/361656/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Aren't transactions with rollbacks just.<br>
+<p>
+- Snapshot the fs.<br>
+<p>
+Perform operations.<br>
+<p>
+- Snapshot the fs (aka commit), or rollback to the previous snapshot.<br>
+<p>
+Then the code that needs to have a consistent view of what is<br>
+correct looks at the snapshot.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361656/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor361931"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Color me puzzled</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 14, 2009 1:30 UTC (Sat)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/361931/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+Aren't transactions with rollbacks just.
+
+- Snapshot the fs.
+
+Perform operations.
+
+- Snapshot the fs (aka commit), or rollback to the previous snapshot.
+</blockquote>
+If there's only one transaction at a time going on.  But if there are other filesystem updates happening while the transaction runs, you don't want to roll those back because the one transaction failed.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361931/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor361713"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heavyweight transactions!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2009 17:08 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/361713/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It would be nice to have heavyweight transactions. <br>
+<p>
+I.e. I start "apt-get dist-upgrade", it makes a snapshot of the hard drive, stops all IO operations from other processes, and does upgrade. If it fails, then it will just roll back to the previous snapshot.<br>
+<p>
+It would be nice to avoid locking other processes, but braindeadness of Unix filesystems seems to require it :(<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361713/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor361745"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heavyweight transactions!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2009 20:00 UTC (Thu)
+                               by <b>doogie</b> (guest, #2445)
+                              [<a href="/Articles/361745/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Won't work; let's say you stop that background postgres daemon, so it is no longer doing any IO.  But the upgrade then needs to stop the daemon, upgrade it's files, then start it again.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361745/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor361761"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heavyweight transactions!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2009 21:38 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/361761/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not a problem:<br>
+1) You can stop postfix before upgrade starts.<br>
+2) You can stop postfix _inside_ the transaction. It might lead to lost data, though.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361761/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor361753"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting transactions in btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2009 20:53 UTC (Thu)
+                               by <b>jimparis</b> (guest, #38647)
+                              [<a href="/Articles/361753/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Gross!<br>
+<p>
+If the problem is that the application might die without BTRFS_IOC_TRANS_END, can't we just come up with an alternate mechanism that doesn't rely on doing things in pairs?<br>
+<p>
+For example, open a special file called "/btrfs-transaction".<br>
+As long as it's open by your process, subsequent operations from that process are part of a transaction.  Those operations can still fail and return errors.  But even if your app dies rudely, the file descriptor will get closed, and the transaction ends.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361753/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor361945"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting transactions in btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 14, 2009 12:46 UTC (Sat)
+                               by <b>magnus</b> (subscriber, #34778)
+                              [<a href="/Articles/361945/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm trying to make some sense out of all this. <br>
+<p>
+Basically for a "transaction" we have five system phases/states:<br>
+<p>
+1. Before the user commands the transaction<br>
+2. While the commanding user "thinks" the transaction is in progress<br>
+3. For the commanding user, the transaction has finished, but the data has not been written to disk.<br>
+4. The transaction is being written to disk<br>
+5. Transaction finished and committed to disk.<br>
+<p>
+For ACID databases, state 3 and 4 are guaranteed by the DBMS never to occur. Other users see the old version in state 1-2 and the new version in state 5. In case of a system crash in state 1-2, the old version will remain.<br>
+<p>
+For UNIX in general, the only guarantee we have is that in states 3-5, no user on the system will see the old version of the file. The state after a crash in state 2-4 is undefined. <br>
+<p>
+The guarantees we would like to add is:<br>
+- In case of a system crash during state 2/3, the old version will be on disk.<br>
+- In case of a system crash during state 4, the old or new version will be on disk. <br>
+- If the application crashes/segfaults/gets killed etc during state 2, the old version will be on disk.<br>
+<p>
+The things that are left open to allow for optimization are:<br>
+- What other users see during state 2<br>
+- Which version (old or new) is left on disk after a crash in state 4.<br>
+<p>
+Please correct me if I'm wrong. <br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361945/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor361952"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting transactions in btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 14, 2009 12:59 UTC (Sat)
+                               by <b>magnus</b> (subscriber, #34778)
+                              [<a href="/Articles/361952/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oops, forgot the concurrency aspect of it. <br>
+<p>
+What should happen if two transactions are started on the same data simultaneously. Is this a case that this API wants to cover? <br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361952/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor363525"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting transactions in btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 24, 2009 7:11 UTC (Tue)
+                               by <b>gadnio</b> (guest, #30187)
+                              [<a href="/Articles/363525/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Usually modern DBs have solved this issue with per-record locking mechanism.<br>
+<p>
+Consider the following situation:<br>
+* We have files f1, and f2 somewhere in the system.<br>
+<p>
+A) <br>
+1. Transaction T1 opens f1 for writing, locking it.<br>
+2. Transaction T2 opens f1 for writing. Since it's already locked, T2 waits for T1 to finish and then tries again (mutex). <br>
+<p>
+In case this scenario is not welcome, an explicit lock mechanism exists (SQL SELECT FOR UPDATE), which can be told to throw errors when the locking fails. The same situation, replayed, will look like this:<br>
+1. Transaction T1 opens f1 for writing, locking it.<br>
+2. Transaction T2 tries to lock f1. The lock fails. T2 handles the error gracefully.<br>
+<p>
+<p>
+B)<br>
+This is more dangerous:<br>
+1. Transaction T1 opens f1 for writing.<br>
+2. Transaction T2 opens f2 for writing.<br>
+3. Transaction T2 opens f1 for writing.<br>
+4. Transaction T1 opens f2 for writing.<br>
+<p>
+This leads to deadlock since each transaction's holding the lock of the other's data, preventing both itself and the other transaction to finish. To solve this, a transaction arbiter's needed, which fires a 'deadlock' error in both transactions, rolling them both back.<br>
+<p>
+For a file system to implement just that, well... we'll have to maintain a huge subset of the ACID database support -- the rollback segments, etc... which, to be done properly, for a filesystem holding tons of files of different sizes, will be a very huge pain. Just consider the case when both f1 and f2 are of sizes like 300Gb, which is not uncommon these days. And what about fsck?<br>
+<p>
+Moreover, I think the concept of an in-kernel ACID database to be something ill-minded -- whenever one wants ACID, one does store one's data in ACID database and that's all. For all of us suffering the downsizes of it, I think it's not worth it.<br>
+<p>
+BR,<br>
+Hristo<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/363525/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor361954"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting transactions in btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 14, 2009 14:49 UTC (Sat)
+                               by <b>intgr</b> (subscriber, #39733)
+                              [<a href="/Articles/361954/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why, instead of trying to work with other file systems to come up with a universal API, are btrfs developers insisting on reinventing their own wheels for everything? Filesystem-level RAID, snapshot API, and now transaction API.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/361954/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor363069"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting transactions in btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2009 9:23 UTC (Fri)
+                               by <b>forthy</b> (guest, #1525)
+                              [<a href="/Articles/363069/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>The interface reminds me on one of the proposed syslet asynchronous IO
+API, where you send a list of syscalls to the kernel (to be processed
+asynchronously in the background).  I thought this was a cool idea (not
+new, active message passing is decades old, but not well understood by
+most developers ;-), and it was a pity that it didn't make it (due to
+being not well understood).  For transactions, I don't think it's the
+right way.</p>
+
+<p>Chris Mason works at Oracle.  He should ask some peers how to implement
+transactions properly.  Locking is not a proper way to implement
+transactions.  What you do is: you fork the file system (i.e. create a
+writable snapshot and bind the calling process to that snapshot), an when
+you are done, you try to merge it.  If the merge is successful, continue,
+if not, abort (and tell the caller, which can try again).  If the system
+crashes during the transaction, file system repair will purge that
+snapshot.  Unlike a git merge, a transaction should abort when a file that
+was written to during the transaction had other writers outside.  The
+atomic part here is only the merge window, and this merge has complete
+information available, and especially only has to update metadata.</p>
+
+<p>This doesn't need a special syslet-like ioctrl, the only thing you need
+to add is the btrfs_merge() call - creating writable snapshots is already
+there.  I'd still like to have syslets - but please with the complete set
+of kernel calls and for asynchronous IO and such.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/363069/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor362022"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting transactions in btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2009 17:41 UTC (Sun)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/362022/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Maybe I missed it, but I have not seen a statement of crash
+consistency guarantees for Btrfs.  I would like to see that before
+transactions, and with good guarantees, because nearly all
+applications and users will benefit from that, not just a few.
+
+<p>For those who missed what I consider good crash consistency
+guarantees, here it is: The after-crash state represents one of the logical
+states of the file system before the crash; not necessarily the
+latest, but preferably only a few seconds old (configurable).  Concerning
+fsync(), I would like at least the option to have that guarantee even
+in the presence of fsync() (yes, enabling this option will make
+fsync() slow in some cases, but it protects against applications that
+use fsync() in the wrong order).
+
+<p>Transactions would be cool if they can be done easily.  But it
+looks like they cannot be done easily on the file system level, so
+maybe this should be left to specialized applications.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/362022/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor363098"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Supporting transactions in btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 20, 2009 13:07 UTC (Fri)
+                               by <b>basdebakker</b> (guest, #60977)
+                              [<a href="/Articles/363098/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For the much discussed case of rewriting configuration files, we don't need full transactions. All we need is a barrier call to make sure the file contents are written before the rename.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/363098/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2009, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

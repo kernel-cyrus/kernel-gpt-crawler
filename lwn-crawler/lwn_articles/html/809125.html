@@ -1,0 +1,821 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>configfd() and shifting bind mounts [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/809125/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/809098/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/809125/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>configfd() and shifting bind mounts</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 10, 2020</br>
+           </div>
+The 5.2 kernel saw the addition of an extensive new API for the mounting
+(and remounting) of filesystems; <a href="/Articles/759499/">this
+article</a> covered an early version of that API.  Since then, work in this
+area has mostly focused on enabling filesystems to support this API fully.
+James Bottomley has taken a look at this API as part of the job of
+redesigning his <a href="/Articles/718639/">shiftfs filesystem</a> and
+found it to be incomplete.  What has followed is a significant set of
+changes that promise to simplify the mount API — though it turns out that
+"simple" is often in the eye of the beholder.
+<p>
+The mount API work replaces the existing, complex <tt><a
+href="http://man7.org/linux/man-pages/man2/mount.2.html">mount()</a></tt>
+system call with a half-dozen or so new system calls.  An application would call
+<tt>fsopen()</tt> to open a filesystem stored somewhere or
+<tt>fspick()</tt> to open an already mounted filesystem.  Calls to
+<tt>fsconfig()</tt> set various parameters related to the mount;
+<tt>fsmount()</tt> is then called to mount a filesystem within the kernel
+and <tt>move_mount()</tt> to attach the result to the filesystem hierarchy
+somewhere.  There are a couple more calls to fill in other parts of the
+interface as well.  The intent is for this set of system calls to be able to
+replace <tt>mount()</tt> entirely with something that is more flexible,
+capable, and maintainable.
+<p>
+Back in November, Bottomley <a
+href="/ml/linux-fsdevel/1574295100.17153.25.camel@HansenPartnership.com/">discovered</a>
+one significant gap with the new API: it is not possible to use it to set
+up a read-only bind mount.  The problem is that bind mounts are 
+special; they do not represent a filesystem directly.  Instead, they can be
+thought of as a view of a filesystem that is mounted elsewhere.  There is
+no superblock associated with a bind mount, which turns out to be a problem
+where the new API is concerned, since <tt>fsconfig()</tt> is designed to
+operate on superblocks.  An attempt to call <tt>fsconfig()</tt> on a bind
+mount will end up modifying the original mount, which is almost certainly
+not what the caller had in mind.  So there is no way to set the read-only
+flag for a bind mount.
+<p>
+David Howells, the creator of the new mount API, <a
+href="/ml/linux-fsdevel/17268.1574323839@warthog.procyon.org.uk/">responded</a>
+that what is needed is yet another system call, <tt>mount_setattr()</tt>,
+which would change attributes of mounts.  That would work for the read-only
+case, Bottomley <a
+href="/ml/linux-fsdevel/1574348414.3277.6.camel@HansenPartnership.com/">said</a>,
+but it falls down when it comes to more complex situations, such as his
+proposed UID-shifting bind mount.  Instead, he <a
+href="/ml/linux-fsdevel/1574352920.3277.18.camel@HansenPartnership.com/">said</a>,
+the file-descriptor-based configuration mechanism provided by
+<tt>fsconfig()</tt> is well suited to this job, but it needs to be made
+more widely applicable.  He suggested that this
+interface be made more generic so that it could be used in both situations
+(and beyond).
+<p>
+He posted <a
+href="/ml/linux-fsdevel/1574886778.21593.7.camel@HansenPartnership.com/">an
+initial version</a> of this proposed interface in November, and has
+recently come back with <a
+href="/ml/linux-fsdevel/20200104201432.27320-1-James.Bottomley@HansenPartnership.com/">an
+updated version</a>.  It adds two new system calls:
+<p>
+<pre>
+    int configfd_open(const char *name, unsigned int flags, unsigned int op);
+    int configfd_action(int fd, unsigned int cmd, const char *key, void *value,
+    			int aux);
+</pre>
+<p>
+A call to <tt>configfd_open()</tt> would open a new file descriptor
+intended for the configuration of the subsystem identified by
+<tt>name</tt>; the usual <tt>open()</tt> flags would appear in
+<tt>flags</tt>, and <tt>op</tt> defines whether a new configuration
+instance is to be created or an existing one modified.
+<tt>configfd_action()</tt> would then be used to make changes to the
+returned file descriptor.  The <tt>fsconfig()</tt> system call (along with
+related parts like <tt>fsopen()</tt> and <tt>fspick()</tt>) is
+reimplemented using the new calls.  Bottomley provides an example for
+mounting a <tt>tmpfs</tt> filesystem:
+<p>
+<pre>
+    fd = configfd_open("tmpfs", O_CLOEXEC, CONFIGFD_CMD_CREATE);
+    configfd_action(fd, CONFIGFD_SET_INT, "mount_attrs", NULL,
+		    MOUNT_ATTR_NODEV|MOUNT_ATTR_NOEXEC);
+    configfd_action(fd, CONFIGFD_CMD_CREATE, NULL, NULL, 0);
+    configfd_action(fd, CONFIGFD_GET_FD, "mountfd", &amp;mfd, O_CLOEXEC);
+    move_mount("", mfd, AT_FDCWD, "/mountpoint", MOVE_MOUNT_F_EMPTY_PATH);
+</pre>
+<p>
+The <tt>configfd_open()</tt> call creates a new <tt>tmpfs</tt> instance;
+the first <tt>configfd_action()</tt> call is then used to set the
+<tt>nodev</tt> and <tt>noexec</tt> mount flags on that instance.  The
+filesystem mount is actually created with another
+<tt>configfd_action()</tt> call, and the third such call is used to obtain
+a file descriptor for the mount that can be used with <tt>move_mount()</tt>
+to make the filesystem visible.
+<p>
+With that infrastructure in place, Bottomley is able to <a
+href="/ml/linux-fsdevel/20200104203946.27914-1-James.Bottomley@HansenPartnership.com/">reimplement
+his shiftfs filesystem</a> as a type of bind mount.  A shifting bind mount
+will apply a constant offset to user and group IDs before forwarding
+operations to the underlying mount; this is useful to safely allow
+true-root access to an on-disk filesystem from within a user namespace.
+<p>
+Only one developer, Christian Brauner, has responded to this patch series
+so far; he <a
+href="/ml/linux-fsdevel/20200105162311.sufgft6kthetsz7q@wittgenstein/">doesn't
+like it</a>.  It is an excessive collection of abstraction layers, he said,
+and it creates another set of multiplexing system calls, a design approach
+that is out of favor these days:
+<p>
+<div class="BigQuote">
+	If they are ever going to be used outside of filesystem use-cases
+	(which is doubtful) they will quickly rival prctl(), seccomp(), and
+	ptrace(). That's not a great thing. Especially, since we recently
+	(a few months ago with Linus chiming in too) had long discussions
+	with the conclusion that multiplexing syscalls are discouraged,
+	from a security and api design perspective.
+</div>
+<p>
+Unsurprisingly, Bottomley <a
+href="/ml/linux-fsdevel/1578508929.3260.61.camel@HansenPartnership.com/">disagreed</a>.
+He argued that there is a common pattern that arises in kernel development:
+a subsystem that is complicated to configure, but then relatively simple to
+use.  Filesystem mounts are an example of this pattern; the setup is hard,
+but then they can all be accessed through the same virtual filesystem
+interfaces.  Cryptographic keys and storage devices were also mentioned.
+It would be better, he said, to figure out a common way of interfacing with
+these subsystems rather than inventing slightly different interfaces every
+time.  The configuration file descriptor approach may be a good solution
+for that common way, he said:
+<p>
+<div class="BigQuote">
+	I don't disagree that configuration multiplexors are a user space
+	annoyance, but we put up with them because we get a simple and very
+	generic API for the configured object.  Given that they're a
+	necessary evil and a widespread pattern, I think examining the
+	question of whether we could cover them all with a single API and
+	what properties it should have is a useful one.
+</div>
+<p>
+The conversation appears to have stalled out at this point.  It is hard to
+guess how this disagreement will be resolved, but one thing is fairly
+straightforward to point out: if the configfd approach is deemed
+unacceptable for the kernel, then somebody needs to come up with a better
+idea for how the problems addressed by configfd will be solved.  Thus far,
+that better idea has not yet shown up on the mailing lists.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Mounting">Filesystems/Mounting</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#System_calls">System calls</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/809125/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor809205"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2020 21:30 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/809205/">Link</a>] (20 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't like the special configfd_open system call. Why not just use a regular open with a special file?<br>
+<p>
+Instead of <br>
+<p>
+configfd_open("tmpfs", O_CLOEXEC, CONFIGFD_CMD_CREATE)<br>
+<p>
+write<br>
+<p>
+open("/dev/config/fs/tmpfs/create", O_CLOEXEC | O_RDWR)<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809205/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809207"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2020 21:53 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/809207/">Link</a>] (19 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because /dev or /dev/config/fs might not exist in your namespace.<br>
+<p>
+If you're binding a filesystem, though, I wonder why there isn't a way to change the fd you get from fsopen of the existing filesystem into a separate filesystem with separate options for "bind"?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809207/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809209"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2020 22:24 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/809209/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Because /dev or /dev/config/fs might not exist in your namespace.</font><br>
+<p>
+Not a problem for /proc<br>
+<p>
+And if it *is* a problem, the right approach isn't some random new twice on open(2), but a system call that retrieves a directory file descriptor for /dev/config or whatever, one that you could then use with openat --- <br>
+<p>
+open(get_configfs_fd(), "fs/tmpfs/create", O_CLOEXEC | O_RDWR)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809209/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809212"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2020 22:41 UTC (Fri)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/809212/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Adding more things to /proc isn't a great idea (it's already full of lots of other crap that arguably shouldn't be there), and there are lots of problems with safely resolving paths in /proc. Any new kernel interfaces (*especially* ones that will be implemented through magic-links) should have a non-procfs counterpart.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809212/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809215"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2020 23:35 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/809215/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not saying that we should add stuff to proc. I'm saying that putting a virtual filesystem in the rooted filesystem namespace works fine, whether that virtual filesystem is proc or something else.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809215/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor809214"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2020 23:26 UTC (Fri)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/809214/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I like that idea, but rather than a directory file descriptor, which might cause issues if the filesystem is not in fact mounted anywhere, it might be better to have new open() flags or AT_ values that select specific magic filesystems --- e.g. procfs.<br>
+<p>
+As a solution to the "what if procfs isn't mounted?" problem, that seems far more elegant than the alternative of creating new syscall APIs for every single feature in procfs that someone might need to use without procfs mounted. (Same goes for other magic filesystems.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809214/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809216"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2020 23:36 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/809216/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; which might cause issues if the filesystem is not in fact mounted anywhere,</font><br>
+<p>
+Why would it cause problems? The actual FD would refer to a magical internal non-rooted mount, e.g., like the one the kernel sets up for pipefs on boot.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809216/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809218"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2020 1:12 UTC (Sat)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/809218/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+OK, maybe it wouldn't. I have no experience with fds for paths in filesystems that aren't actually mounted anywhere.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809218/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor809217"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2020 23:37 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/809217/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; As a solution to the "what if procfs isn't mounted?" problem, that seems far more elegant than the alternative of creating new syscall APIs for every single feature in procfs that someone might need to use without procfs mounted</font><br>
+<p>
+Agreed. We don't need duplicate APIs. We just need some way to get a directory FD for /proc, /sys, whatever without going through the mount table.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809217/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809229"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2020 17:58 UTC (Sat)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/809229/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Some more special negative pseudo-file-descriptors for openat() and friends?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809229/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor809244"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 12, 2020 14:57 UTC (Sun)
+                               by <b>mirabilos</b> (subscriber, #84359)
+                              [<a href="/Articles/809244/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+it’s called sysctl…<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809244/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809263"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 13, 2020 3:34 UTC (Mon)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/809263/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+... which has been removed<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809263/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809357"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 13, 2020 21:40 UTC (Mon)
+                               by <b>mirabilos</b> (subscriber, #84359)
+                              [<a href="/Articles/809357/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, bad decision, that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809357/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809358"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 13, 2020 21:45 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/809358/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+sysctl() was broken, it had only casual connection with /proc.<br>
+<p>
+Perhaps it would be better to add a new syscall like 'open_special(fs_type)' to open '/proc', '/sys', '/sys/fs/...' directories without them being mounted.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809358/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809414"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 14, 2020 6:44 UTC (Tue)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/809414/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+New special FD arguments to "openat()" and friends should be sufficient, no need for a new syscall.<br>
+Alternately, the new "mount" syscalls can give you a handle to /proc or /sys without actually mounting them.<br>
+Alternately, just acknowledge that not mounting /dev, /proc and /sys is not supported and going to cause problems, and leave it at that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809414/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor809551"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 14, 2020 21:06 UTC (Tue)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/809551/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The new mount API (in particular fsopen(2)) could work for this.<br>
+<p>
+The problem is that there is a security issue with giving a program access to a /proc without any over-mounts if the /proc they already have access to has locked mounts on top of it (container runtimes use this technique to mask certain dangerous procfs files from containers). If we want to have a simple API that gives us a /proc handle, we'll need to make some kind of procfs2 (which has been suggested several times in the past) which removes all of the patently unsafe files so that untrusted programs can get access to all of it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809551/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809553"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 14, 2020 21:09 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/809553/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, security is a problem.<br>
+<p>
+Probably at this point creating something like procfs2 and then mandating it would be the best approach. But then there's a question of what exactly is an "unsafe file"...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809553/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor809243"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 12, 2020 14:56 UTC (Sun)
+                               by <b>mirabilos</b> (subscriber, #84359)
+                              [<a href="/Articles/809243/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+*so* a problem for /proc, which may not exist in your chroot<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809243/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor809211"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2020 22:38 UTC (Fri)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/809211/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; why there isn't a way to change the fd you get from fsopen of the existing filesystem into a separate filesystem with separate options for "bind"?</font><br>
+<p>
+Bind mounts can point to any file, even one that is not a mount point--or even one that isn't a directory.<br>
+<p>
+However, it does seem to me that passing an O_PATH file descriptor to fspick, plus a new flag for fspick that says "create a bind mount", would be a good API. The article hints that "fsconfig() is designed to work with superblocks" but it's not clear why.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809211/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809228"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2020 16:51 UTC (Sat)
+                               by <b>jejb</b> (subscriber, #6654)
+                              [<a href="/Articles/809228/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  However, it does seem to me that passing an O_PATH file descriptor to fspick, plus a new flag for fspick that says "create a bind mount", would be a good API. The article hints that "fsconfig() is designed to work with superblocks" but it's not clear why.</font><br>
+<p>
+I did explain that problem in the original email: all the hooks for fsconfig actions are in sb-&gt;fs_type-&gt;init_fs_context() which the fs_context allocation uses.  Now it is possible to special case this for bind mounts, but you also have to special case fsmount and fsconfig/reconfigure.  By the time you've done all that, you've effectively got two separate paths through the same code, which isn't really such a good idea, which is why I asked the question "what would the generalisation of fsconfig look like".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809228/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor809232"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">configfd() and shifting bind mounts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2020 20:09 UTC (Sat)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/809232/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks James, that makes sense.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/809232/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2020, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>
