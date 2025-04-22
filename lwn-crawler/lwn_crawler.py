@@ -83,6 +83,11 @@ def parse_articles():
         html_path = os.path.join(HTML_DIR, filename)
         markdown_path = os.path.join(MARKDOWN_DIR, f"{article_id}.md")
 
+        # 如果文件已存在，则跳过
+        if os.path.exists(markdown_path):
+            print(f"Skipping {markdown_path} (already parsed)")
+            continue
+
         print('Parsing %s... ' % html_path, end='')
 
         try:

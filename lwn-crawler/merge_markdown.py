@@ -1,6 +1,9 @@
 import os
 
-def merge_markdown_files(source_dir='lwn_articles/markdown', output_file='lwn_merged.md'):
+def merge_markdown_files(source_dir='lwn_articles/markdown', output_file='merged/lwn_merged.md'):
+
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    
     if not os.path.isdir(source_dir):
         print(f"Directory '{source_dir}' does not exist.")
         return
