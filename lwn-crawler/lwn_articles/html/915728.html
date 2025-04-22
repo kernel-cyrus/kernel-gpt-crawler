@@ -1,0 +1,829 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The intersection of shadow stacks and CRIU [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/915728/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/917891/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/915728/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The intersection of shadow stacks and CRIU</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Benefits for LWN subscribers</b>
+<p>
+The primary benefit from <a href="/Promo/nst-nag5/subscribe">subscribing to LWN</a>
+       is helping to keep us publishing, but, beyond that, subscribers get
+       immediate access to all site content and access to a number of extra
+       site features.  Please sign up today!
+</blockquote>
+<div class="GAByline">
+           <p>December 16, 2022</p>
+           <p>This article was contributed by  Mike Rapoport</p>
+           </div>
+<p>Shadow stacks are one of the methods employed to enforce <a
+href="https://en.wikipedia.org/wiki/Control-flow_integrity">control-flow
+integrity</a> and thwart attackers; they are a mechanism for fine-grained,
+backward-edge protection.  Most of the time, applications are not even
+aware that shadow stacks are in use.  As is so often the case, though, life
+gets more complicated when the <a
+href="https://criu.org/Main_Page">Checkpoint/Restore in Userspace</a>
+(CRIU) mechanism is in use.  Not breaking CRIU turns out to be one of the
+big challenges facing developers working to get user-space shadow-stack
+support into the kernel.  <p>
+
+The idea behind shadow stacks is simple: in addition to the normal program
+stack (which holds return addresses, local variables, and more) there is a
+special memory area, called the "shadow stack", that
+stores only return addresses. Whenever a <tt>CALL</tt> instruction is
+executed, the return address is pushed onto both the normal and the shadow
+stacks. When, later, a function ends with a <tt>RET</tt> instruction, the
+return address that's popped from the normal stack is compared to that on
+the shadow stack. If they match, the execution continues; if they don't,
+a violation of control-flow integrity has just been detected.
+
+<p>Recent x86 processor models implement shadow stacks in hardware, meaning
+that no instrumentation is required for a program to get the protection
+that shadow stacks provide and that the cost of using a shadow stack is
+negligible. Once the feature is enabled, the CPU takes care of pushing and
+popping the return address on the shadow stack and comparing the return
+addresses. If the return addresses do not match, the CPU generates a control
+protection exception.
+To support shadow stacks, the x86 architecture has been extended with a
+model-specific register (MSR) that controls the use of the shadow stack and
+its features.  There are also shadow-stack pointer MSRs (one for each
+possible privilege level) and a set of instructions for manipulating
+shadow-stack contents.
+
+<p>The discussion about how kernel should support <a
+href="https://lwn.net/Articles/758245/">shadow stacks for user space</a>
+started a long time ago, but it has still not concluded. One of the
+difficulties in enabling this feature is the possibility that some
+applications will be broken by shadow stacks because they use non-standard
+ways to change their control flow.  The list of problematic applications
+includes GDB, various JIT engines, and, of course, CRIU.
+
+<h4>CRIU and shadow stacks</h4>
+
+<p>CRIU is known for its intimate relations with the kernel and its use of
+obscure kernel interfaces. Among other things, CRIU has to intervene in the
+control flow of the tasks to be checkpointed in order to extract the
+information that
+cannot be obtained by other means (such as from the <tt>/proc</tt> file
+system).  When restoring a saved process, CRIU has to be able to
+recreate its state as it was at checkpoint time, so if the process had
+a shadow stack enabled, that shadow stack has to be restored exactly as it
+was before the checkpoint.
+
+<p>To checkpoint (or "dump" in CRIU jargon) a process, CRIU injects a blob
+with parasite code into the target to get parts of the process state that
+are not visible from the outside or which can only be obtained
+slowly and painfully. To inject the parasite, CRIU stops the task with <a
+href="https://man7.org/linux/man-pages/man2/ptrace.2.html"><tt>ptrace()</tt></a>,
+finds a free area in the task's memory layout, puts the parasite code
+there, and makes the task jump into that code. So far,
+there are no conflicts with shadow-stack enforcement because, after the
+parasite starts running, the <tt>CALL</tt> and <tt>RET</tt> instructions within
+the parasite are properly paired.
+
+<p> There is, however, a problem when the parasite's job is done and the
+normal process execution should be resumed. CRIU uses the <a
+href="https://man7.org/linux/man-pages/man2/sigreturn.2.html"><tt>sigreturn()</tt></a>
+system call, which is normally only invoked at the end of a signal handler,
+to "cure" the task of the parasite and resume its normal execution. This
+operation could be done with <tt>ptrace()</tt>, but <tt>sigreturn()</tt>
+reduces the synchronization complexity between CRIU and the parasite and,
+more importantly, allows the task to continue even if CRIU itself fails.
+
+<p>The implementation of <tt>sigreturn()</tt> in the kernel takes special
+measures to ensure that its usage does not violate shadow-stack
+integrity. Whenever the kernel needs to deliver a signal to a process,
+it sets up the return frame that will be used when signal
+handler is concluded; it also pushes some data to the shadow stack
+and then verifies the integrity of that data when <tt>sigreturn()</tt> is
+called. Since CRIU uses <tt>sigreturn()</tt> directly — without any signal
+being delivered to the process that is being dumped — it has to tweak the
+shadow-stack contents to match the state expected by the kernel.  The
+modification of the shadow-stack pointer is done using a couple of
+<tt>ptrace()</tt> calls are part of the <a
+href="/ml/linux-kernel/20221104223604.29615-1-rick.p.edgecombe@intel.com">latest
+API</a> proposed for shadow-stack enablement; the shadow-stack contents can
+already be adjusted using existing <tt>ptrace()</tt> calls. This
+shadow-stack modification is performed early during parasite
+injection in order to preserve the ability to resume normal task execution if
+anything goes wrong.
+
+<p>Once parasite injection and removal are handled, dumping a process with
+a shadow stack enabled is simple. The only difference from a "normal" dump
+is the need to save the shadow-stack enable/disable state and the
+shadow-stack pointer, both of which can be easily done with the
+<tt>ptrace()</tt> calls. The shadow-stack memory area is saved exactly as
+any other anonymous memory and does not require any special
+care.
+
+<h4>CRIU restore</h4>
+
+<p>Restoring a process with a shadow stack is slightly more involved than
+dumping. When CRIU restores a process tree, it creates all of the tasks and
+threads found in the checkpoint and then modifies them so that their state
+will be exactly as the state that was saved at dump time. After the state
+of each thread is restored, CRIU sets up a <tt>sigreturn()</tt> frame for
+each thread, cleans up leftovers of the original CRIU process, and calls
+<tt>sigreturn()</tt> to restart the execution of the restored tasks. In
+order to restore the shadow stack, CRIU needs to be able to map the
+shadow-stack memory at exactly at the same address as it was before the
+dump.  CRIU also needs a way to efficiently populate the contents of the
+shadow stack with the saved data and the ability to set the shadow-stack
+control bits and pointer.  Additionally, the kernel API lets the C library
+and program loader lock various shadow-stack features; CRIU must thus be
+able to ensure that these feature locks are kept after a restore.
+
+<p>Since shadow-stack memory is somewhat special, the virtual memory area
+for it should be created with proposed <tt>map_shadow_stack()</tt> system
+call (described in <a href="/Articles/885220/">this article</a>) rather
+than with <a
+href="https://man7.org/linux/man-pages/man2/mmap.2.html"><tt>mmap()</tt></a>. Shadow-stack
+memory is read-only and it cannot 
+be remapped. Based on the feedback from the CRIU developers, the latest
+version of the kernel patches that enable shadow stacks for user space
+allows passing a desired address to the <tt>map_shadow_stack()</tt> system
+call. This allows CRIU to map the shadow stack of the restored processes
+exactly where it was before the dump.
+
+<p>As a result of the way CRIU recreates the process's memory layout and restores
+its memory contents, mapping shadow-stack memory requires some additional
+care beyond having it at the correct address. To avoid conflicts between the
+memory layouts of CRIU and the restored process, CRIU reserves enough
+virtual memory to hold all of the restored process's memory areas, partially
+populates that memory, and then uses <a
+href="https://man7.org/linux/man-pages/man2/mremap.2.html"><tt>mremap()</tt></a>
+to map chunks of the reserved area to the
+appropriate addresses; it then finishes restoring the memory contents. The
+remapping happens late in the restore process and, since the shadow-stack
+memory cannot be remapped, it has to be created after the memory layout
+is nearly finalized; otherwise <tt>map_shadow_stack()</tt> could clobber an existing
+mapping.
+
+<p>Once the shadow stack has been put into the correct place, CRIU switches
+the shadow-stack pointer to it using the x86 <tt>RSTORSSP</tt> and
+<tt>SAVEPREVSSP</tt> instructions.  At this point, the shadow stack can be
+populated with the <tt>WRUSS</tt> instruction. After restoring the saved
+shadow-stack data, CRIU uses <tt>WRUSS</tt> again to set up a frame for
+<tt>sigreturn()</tt> that will later resume normal execution of the restored
+tasks.
+<p>
+
+Restoring the shadow-stack contents could also be done with
+<tt>ptrace()</tt>, but user-space stacks can grow quite deep; there may be
+a lot of threads, and so restoring shadow-stack contents that way would
+involve complex synchronization between the CRIU control process and the
+tasks being restored. Additionally, filling memory with <tt>ptrace()</tt>
+is terribly slow.  Although <tt>WRUSS</tt> is not as efficient as
+<tt>memcpy()</tt>, it is still much faster than
+<tt>ptrace()</tt>. Before using <tt>WRUSS</tt>, though, it should be
+enabled in the shadow-stack control register, where it is disabled by
+default. CRIU can enable <tt>WRUSS</tt> before restoring the shadow-stack
+memory with an <a
+href="https://man7.org/linux/man-pages/man2/arch_prctl.2.html"><tt>arch_prctl()</tt></a>
+call that allows manipulating bits in the shadow-stack control MSR, and
+switch it back off before letting the restored tasks run.
+
+<p>The last task that CRIU has to take care of is the locking of the
+shadow-stack features. The GNU C Library (glibc) will enable shadow stacks
+for a process if it finds certain bits in the ELF header of the running
+program, and disables the feature if these bits are absent. Once the
+shadow stack is enabled or disabled, glibc locks its state with an
+<tt>arch_prctl()</tt> call. The same call allows locking the state of
+<tt>WRUSS</tt> enablement but, at the moment, glibc does not use it. The
+feature locks are inherited across a <a
+href="https://man7.org/linux/man-pages/man2/clone.2.html"><tt>clone()</tt></a>
+call so, if CRIU runs with shadow stacks enabled, it cannot restore a
+process that has shadow stacks disabled and similarly, if CRIU starts
+without the shadow stack, it has no way to enable it after
+<tt>clone()</tt>ing the restored tasks.  To resolve this problem, the
+proposed kernel API introduces another <tt>arch_prctl()</tt> call that will
+unlock the shadow-stack features. This call is only available via
+<tt>ptrace()</tt>, so an attacker won't be able to disable shadow stack
+from within a process. With this <tt>arch_prctl()</tt> call, CRIU can
+control the shadow-stack feature locks for the <tt>clone()</tt>ed tasks and
+then reset them to the final, secure state after the shadow stack is
+restored.
+
+<h4>Conclusions</h4>
+
+<p>Shadow stacks on the x86 architecture provide efficient protection
+against <a
+href="https://en.wikipedia.org/wiki/Return-oriented_programming">return-oriented
+programming</a> (ROP) and similar attacks, but its use necessitates updates of
+certain applications. Hopefully, CRIU's experience with shadow stacks will be
+useful to other projects that need to address shadow-stack compatibility
+issues.
+
+Enabling shadow stack-support in CRIU revealed several gaps in the earlier
+versions of the proposed kernel APIs and the <a
+href="https://github.com/rppt/criu/tree/cet/v0.1">initial
+implementation</a> of shadow-stack support in CRIU relied on API extensions
+that were not included in the <a
+href="/ml/linux-kernel/20220130211838.8382-1-rick.p.edgecombe@intel.com/">original
+kernel patches</a>.  The latest version of those patches has incorporated
+feedback from the CRIU developers and has all the necessary knobs to
+support checkpoint and restore of applications with shadow stacks.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Checkpointing">Checkpointing</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Control-flow_integrity">Security/Control-flow integrity</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Rapoport_Mike">Rapoport, Mike</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/915728/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor918053"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2022 14:19 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/918053/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+This call is only available via ptrace(), so an attacker won't be able to disable shadow stack from within a process.
+</blockquote>
+Surely if you can call any syscall (say, if this was a new call) you can call ptrace() on yourself, and thus get access to this facility anyway? (Or, rather, the attacker can cause the process to call ptrace() on itself).
+<p>
+(But maybe, like many ptrace() operations, it can only be called on a seized process, in which case an attacker would have to provoke a new thread into seizing and unlocking all the others, and if an attacker can do *that* it's presumably already won.)
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918053/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor918054"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2022 14:35 UTC (Fri)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/918054/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It seems that self-ptracing is a fraught concept and needs to be done carefully. I think if you're forking threads in a process with this specific setup, you've already lost quite a lot.<br>
+<p>
+<a href="https://yarchive.net/comp/linux/ptrace_self_attach.html">https://yarchive.net/comp/linux/ptrace_self_attach.html</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918054/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor918128"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 18, 2022 12:50 UTC (Sun)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/918128/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, as the linked email describes, it's trivial to clone(CLONE_VFORK|CLONE_MM) into a new thread – which can use ptrace() on its parent at will.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918128/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor919095"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2023 12:32 UTC (Thu)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/919095/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      ptrace() on the parent or other non-children has been disabled by default on (at least) Ubuntu for a number of years, which has led to <a href="https://www.complang.tuwien.ac.at/forth/gforth/Known-problems.html">breakage</a>.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/919095/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor918062"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Injection bootstrapping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2022 15:44 UTC (Fri)
+                               by <b>izbyshev</b> (subscriber, #107996)
+                              [<a href="/Articles/918062/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; To inject the parasite, CRIU stops the task with ptrace(), finds a free area in the task's memory layout, puts the parasite code there, and makes the task jump into that code.</span><br>
+<p>
+Given that writable+executable mappings are unlikely to exist in the target process, how does this part actually work? Does CRIU bootstrap the injection by reusing the existing code, e.g. by finding the syscall instruction in executable memory and "calling" it (via ptrace()) with appropriate arguments, or something?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918062/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor918083"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Injection bootstrapping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2022 23:32 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/918083/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It creates a new mapping by injecting a call to mmap() first :) this is even documented! &lt;<a href="https://criu.org/Parasite_code">https://criu.org/Parasite_code</a>&gt;<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918083/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor918156"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Injection bootstrapping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 19, 2022 14:44 UTC (Mon)
+                               by <b>izbyshev</b> (subscriber, #107996)
+                              [<a href="/Articles/918156/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, no, it's not possible to answer the question "how does CRIU bootstrap code execution in the target" by "it executes mmap() first" :)<br>
+<p>
+I looked at the code, and it seems that code for the first syscall in the target is written to the location computed by get_exec_start() [1], which simply finds the first large enough executable (but not necessarily writable) mapping. And then I realized my mistake that lead to my original question: I assumed that PTRACE_POKEDATA uses the same page permissions that the normal user-space code does, which would make it impossible for CRIU to write code to a read-only mapping. But no, in fact, the kernel overrides the permissions [2], so code reuse "attack" is not needed for CRIU.<br>
+<p>
+[1] <a href="https://github.com/checkpoint-restore/criu/blob/008c2b9c7f86a5e27fc721a28e3669134ef98969/criu/parasite-syscall.c#L47">https://github.com/checkpoint-restore/criu/blob/008c2b9c7...</a><br>
+[2] <a href="https://elixir.bootlin.com/linux/v6.1/source/kernel/ptrace.c#L664">https://elixir.bootlin.com/linux/v6.1/source/kernel/ptrac...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918156/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor918122"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 18, 2022 11:33 UTC (Sun)
+                               by <b>jorgegv</b> (subscriber, #60484)
+                              [<a href="/Articles/918122/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have never quite understood why a functionality which mainly consists of dumping all kernel data and process state to a file, and later using that for restoring, is to be done from user space.<br>
+<p>
+Since the kernel is in a privileged position to dump all that data, why not do It from there?<br>
+<p>
+Instead of defining hundreds of interfaces and tricks for extracting that info from US, why not just dump everything from KS to e.g. a netlink socket?<br>
+<p>
+Surely a serialization format, protocol, etc. should be designed, but is seems to me this would be easier than implementing dozens of interfaces for extracting info to US.<br>
+<p>
+Also since the extracted info is so tied to the kernel, Keeping the CR functionality as an integral parte of the kernel source would seem like the logical thing to do...<br>
+<p>
+Of course, most probably the relevant people already thought about this and decided the current way was the best instead of what I propose...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918122/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor918130"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 18, 2022 13:17 UTC (Sun)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/918130/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As a gut check, this feels like way too easy to bake in some kernel structure layout/size/whatever into the userspace ABI by accident.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918130/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor918132"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 18, 2022 15:36 UTC (Sun)
+                               by <b>jorgegv</b> (subscriber, #60484)
+                              [<a href="/Articles/918132/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ahhh, this seems a good reason to me. Since the Linux policy is to never ever break US, you are right.<br>
+<p>
+The data output by the kernel with my schema should be considered an opaque blob, but It also should be examined to account for different versions, etc ... which introduces the risks you mention.<br>
+<p>
+I kind of get It. This seems a case where an ABI policy similar to the BSD's, where KS and US are maintained in lockstep, would make things much easier for CR features...<br>
+<p>
+Thanks for the point.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918132/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor918133"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 18, 2022 16:12 UTC (Sun)
+                               by <b>saladin</b> (subscriber, #161355)
+                              [<a href="/Articles/918133/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As an additional reason against having the kernel dump the data, depending on how the kernel serializes the data, it could result in leaking struct layouts if those are randomized. I'm sure the security folks wouldn't like that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918133/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor918242"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2022 10:46 UTC (Tue)
+                               by <b>adobriyan</b> (subscriber, #30858)
+                              [<a href="/Articles/918242/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Struct layout randomization is not an issue, many of the members are kernel pointers and will never be allowed to be serialised directly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918242/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor918134"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 18, 2022 16:18 UTC (Sun)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/918134/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I kind of get It. This seems a case where an ABI policy similar to the BSD's, where KS and US are maintained in lockstep, would make things much easier for CR features...</span><br>
+<p>
+Until the checkpoint/restore is to allow you to do an upgrade?<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918134/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor918147"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 18, 2022 20:55 UTC (Sun)
+                               by <b>jorgegv</b> (subscriber, #60484)
+                              [<a href="/Articles/918147/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's the reason for the serialization protocol I mentioned.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918147/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor918243"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2022 11:05 UTC (Tue)
+                               by <b>adobriyan</b> (subscriber, #30858)
+                              [<a href="/Articles/918243/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I have never quite understood why a functionality which mainly consists of dumping all kernel data</span><br>
+<p>
+You want to dump only userspace-observable data, otherwise you'll drown in complexity at restore time<br>
+not to mention restoring old programs on new kernel (which is major use case: long running program<br>
+should survive kernel upgrade and continue).<br>
+<p>
+But if only user observable stuff is in the image, then restoring can (in theory) be done with userspace<br>
+accessible interfaces only, some of which exist already (think umask(2)).<br>
+<p>
+<span class="QuotedText">&gt; and process state to a file, and later using that for restoring, is to be done from user space.</span><br>
+<p>
+<span class="QuotedText">&gt; Since the kernel is in a privileged position to dump all that data, why not do It from there?</span><br>
+<p>
+Some stuff is much easier from kernelspace, true.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/918243/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor919178"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2023 6:20 UTC (Fri)
+                               by <b>njs</b> (guest, #40338)
+                              [<a href="/Articles/919178/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IIRC the reason the project is called Checkpoint Restore *In Userspace* is to distinguish it from earlier attempts to do it all in the kernel, which failed. It's quite a bit ago now but if you look you can probably find the old discussions about why that approach was abandoned, by those who tried it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/919178/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor919191"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-based checkpointing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2023 14:06 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/919191/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      The <a href="/Kernel/Index/#Checkpointing">LWN kernel index</a> is your friend if you want to do this sort of digging; there's articles covering the development of checkpoint/restore going back to 2008.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/919191/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor919185"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The intersection of shadow stacks and CRIU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2023 9:01 UTC (Fri)
+                               by <b>rep_movsd</b> (guest, #100040)
+                              [<a href="/Articles/919185/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hopefully someday RAM becomes persistent (Memristors anyone?)<br>
+Then things like reboots, suspending, etc become no-ops <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/919185/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

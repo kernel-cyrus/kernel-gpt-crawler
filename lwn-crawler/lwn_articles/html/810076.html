@@ -1,0 +1,986 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>process_madvise(), pidfd capabilities, and the revenge of the PIDs [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/810076/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/809776/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/810076/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>process_madvise(), pidfd capabilities, and the revenge of the PIDs</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>We're bad at marketing</b>
+<p>
+We can admit it, marketing is not our strong suit. Our strength is
+writing the kind of articles that developers, administrators, and
+free-software supporters depend on to know what is going on in the
+Linux world. Please <a href="/Promo/nsn-bad/subscribe">subscribe today</a> to help us keep doing that, and so
+we don’t have to get good at marketing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 21, 2020</br>
+           </div>
+Once upon a time, there were few ways for one process to operate upon
+another after its creation; sending signals and <tt>ptrace()</tt> were
+about it.  In recent years, interest in
+providing ways for processes to control others has been on the increase,
+and the kernel's process-management API has been expanded accordingly.
+Along these lines, the <tt>process_madvise()</tt> system call has been <a
+href="/Articles/789153/">proposed</a> as a way for one process to influence
+how memory management is done in another.  There is a new
+<tt>process_madvise()</tt> series which is interesting in its own right,
+but this series has also raised a couple of questions about how process
+management should be improved in general.
+<p>
+The existing <a
+href="http://man7.org/linux/man-pages/man2/madvise.2.html"><tt>madvise()</tt></a>
+system call allows a process to make suggestions to the kernel about how
+its address space should be managed.  The 5.4 kernel saw a couple of new
+types of advice that could be provided with <tt>madvise()</tt>:
+<tt>MADV_COLD</tt> and <tt>MADV_PAGEOUT</tt>.  The former requests that the
+kernel place the indicated range of pages onto the inactive list,
+essentially saying that they have not been used in a long time.  Those
+pages will thus be among the first considered for reclaim if the kernel
+needs memory for other purposes.  <tt>MADV_PAGEOUT</tt>, instead, is a
+stronger statement that the indicated pages are no longer needed; it will
+cause them to be reclaimed immediately.
+<p>
+These new requests are useful for processes that know what their future
+access patterns will be.  But it seems that in certain environments —
+Android, in particular — processes lack that knowledge, but the management
+system does know when certain memory ranges are no longer needed.  The bulk
+of a process's address space could be marked as <tt>MADV_COLD</tt> when
+that process is moved out of the foreground, for example.  In such
+settings, letting one process call <tt>madvise()</tt> on behalf of another
+helps the system as a whole make the best use of its memory resources.
+That is the purpose behind the <tt>process_madvise()</tt> proposal.
+<p>
+When Minchan Kim <a
+href="/ml/linux-kernel/20200110213433.94739-3-minchan@kernel.org/">posted</a>
+a new <tt>process_madvise()</tt> series in early January, the API looked
+like this:
+<p>
+<pre>
+    int process_madvise(int pidfd, void *addr, size_t length, int advice,
+    			unsigned long flags);
+</pre>
+<p>
+The effect of this call would be the same as if the process identified by
+<tt>pidfd</tt> (which, as one might guess from the name, is a <a
+href="/Articles/794707/">pidfd</a> rather than a process ID)
+had called <tt>madvise()</tt> with the given <tt>addr</tt>,
+<tt>length</tt>, and <tt>advice</tt> arguments; the <tt>flags</tt> argument
+is not currently used.  Only a subset of <tt>madvise()</tt> comments
+(<tt>MADV_COLD</tt>, <tt>MADV_PAGEOUT</tt>, <tt>MADV_MERGEABLE</tt>, and
+<tt>MADV_UNMERGEABLE</tt>) is supported; others can be added as the use
+cases for them emerge.
+<p>
+It seemed like most of the discussion on <tt>process_madvise()</tt> had run
+its course by now, and that there were few obstacles to its path into the
+mainline kernel.  But, then, a couple of issues came up.
+<p>
+<h4>Pidfd capabilities</h4>
+<p>
+One of those doesn't directly affect <tt>process_madvise()</tt>, but does
+offer an interesting look into where the
+pidfd API is headed in general.  In the
+current patch sets, the question of whether one process is allowed to call
+<tt>process_madvise()</tt> on another is answered with the usual "would
+<tt>ptrace()</tt> be allowed?" test.  That comes down to either running
+under the same user ID or having the <tt>CAP_SYS_PTRACE</tt> capability.
+This test is standard practice and uncontroversial, but Christian Brauner,
+the developer behind most of the pidfd work, <a
+href="/ml/linux-kernel/20200113191046.2tidyvc544zvchek@wittgenstein/">has
+another idea</a> in mind:
+<p>
+<div class="BigQuote">
+	When you create a pidfd, e.g. with clone3() and you'd wanted to use
+	it for madvise you'd need to set a flag like pidfd_cap_madvise or
+	pidfd_feature_madvise when you create the pidfd. Only if the pidfd
+	was created with that flag set could you use it with madvise.
+</div>
+<p>
+In essence, under this scheme, a pidfd would include a capability mask of
+its own stating what could be done with it.  It is analogous to how
+ordinary file descriptors work: one can only write to a file descriptor if
+it was created with a flag that allows writing.  Brauner <a
+href="/ml/linux-kernel/20200113104256.5ujbplyec2sk4onn@wittgenstein/">requested</a>
+that <tt>process_madvise()</tt> not be merged until 5.7 so that it could
+use this (not yet implemented) capability mechanism from the beginning.
+<p>
+
+There is an interesting
+question about how pidfd capabilities would work, <a
+href="/ml/linux-kernel/CAKOZuev5k3EquMd-6VbvruahjjtxQzRhUVo2ttgVyk+yYz9aOA@mail.gmail.com/">brought
+up</a> by Daniel Colascione: would having a pidfd with a given
+capability flag be sufficient to carry out a specific action, or would the
+traditional tests apply too?  In other words, if a process holds a pidfd
+that was created with the ability to pass it to <tt>process_madvise()</tt>,
+would that process still need to pass the <tt>ptrace()</tt> test for the
+action to succeed?
+<p>
+Brauner <a
+href="/ml/linux-kernel/20200113204237.ew6nn4ohxu7auw3u@wittgenstein/">admitted</a>
+to "<q>going back and forth</q>" on that question; he said, though,
+that his inclination was to still require the privilege to execute the
+operation independently from the capability flag on the pidfd.  So those
+capabilities (or the lack thereof) would serve only to restrict operations
+that would otherwise be allowed.  Colascione <a
+href="/ml/linux-kernel/CAKOZueu=U4c2URaq8Pz-B00XV+TxaKwHRNXv3BUiDbQrLQpJ3A@mail.gmail.com/">argued</a>
+in favor of pidfd capabilities actually granting access, though, and
+Brauner <a
+href="/ml/linux-kernel/20200114192056.b6wi4adsps6xi4t4@wittgenstein/">agreed</a>
+to look into it.  Patches, he said, would be posted soon.
+<p>
+<h4>PIDs: not dead yet</h4>
+<p>
+One other characteristic of the proposed <tt>process_madvise()</tt> API is
+that the caller must possess a pidfd to use it — unlike other system calls
+like <a
+href="http://man7.org/linux/man-pages/man2/kill.2.html"><tt>kill()</tt></a>
+or <a
+href="http://man7.org/linux/man-pages/man2/setpriority.2.html"><tt>setpriority()</tt></a>,
+which take process IDs.  That is not uncommon for new, process-oriented
+system calls; pidfds are the cool new kid on the block and they appear to
+be generally preferred.  A pidfd unambiguously identifies a process; a
+process ID, instead, can vary from one namespace to the next and, should
+the target process exit, might be reused for an entirely unrelated process.
+For such reasons, pidfds have quickly become the favored way of identifying
+processes in new system calls; as Colascione <a
+href="/ml/linux-kernel/CAKOZuevwbQvrFWqy5GOm4RXuGszKLBvRs9i-KbAi3nPcHhwvSw@mail.gmail.com/">put
+it</a>: "<q>All new APIs should use pidfds: they're better than numeric
+PIDs in every way</q>".
+<p>
+It turns out, though, that not everybody agrees with that point of view.
+Process IDs are often already known, while a pidfd would have to be
+created; PIDs can also be specified by users on a command line, while
+pidfds cannot.  Kirill Tkhai <a
+href="/ml/linux-kernel/3eec2097-75a3-1e1d-06d9-44ee5eaf1312@virtuozzo.com/">was
+one of the dissenters</a>:
+<p>
+<div class="BigQuote">
+	Ordinary pid interfaces also should be available.  There are a lot
+	of cases, when they are more comfortable. Say, a calling of
+	process_madvise() from tracer, when a tracee is stopped. In this
+	moment the tracer knows everything about tracee state, and pidfd
+	brackets pidfd_open() and close() around actual action look just
+	stupid, and this is cpu time wasting.
+</div>
+<p>
+Thus, he <a
+href="/ml/linux-kernel/9d849087-3359-c4ab-fbec-859e8186c509@virtuozzo.com/">argued</a>,
+every new process API should be able to handle both PIDs and pidfds.  Kim
+took this request to heart, as can be seen in <a
+href="/ml/linux-kernel/20200116235953.163318-1-minchan@kernel.org/">a new
+version of the <tt>process_madvise()</tt> patch set</a> posted one week
+later.  The API for this proposed system call now is:
+<p>
+<pre>
+    int process_madvise(int which, pid_t pid, void *addr, size_t length,
+    			int advice, unsigned long flag);
+</pre>
+<p>
+The new <tt>which</tt> parameter would be either <tt>P_PID</tt> or
+<tt>P_PIDFD</tt> to tell the kernel how the <tt>pid</tt> argument should be
+interpreted.
+<p>
+This change highlights a question that needs to be answered by the wider
+community.  If there is a consensus that all new process-related system
+calls should support both ways of identifying processes, then this
+convention should really be applied universally and consistently to all new
+interfaces.  Otherwise it perhaps
+should not be used even for <tt>process_madvise()</tt>.  Creating a mix of
+APIs, some of which accept only one way while others support both,
+seems like the worst outcome.  The Linux system-call API is inconsistent
+enough as it is now; future developers will not be grateful if new system
+calls make that situation worse.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management">Memory management</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#pidfd">pidfd</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#System_calls">System calls</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/810076/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor810117"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 12:29 UTC (Tue)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/810117/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Why not take this to its logical extreme?
+
+<P><TT>execute_as_process(int pidfd, void (*func)());</TT>
+
+<P>I am of course not completely serious and realize the difficulty of implementing this as well as the security implications, but it seems we are approaching this asymptotically.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810117/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810119"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 13:26 UTC (Tue)
+                               by <b>rvolgers</b> (guest, #63218)
+                              [<a href="/Articles/810119/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Or, as windows calls it, CreateRemoteThreadEx.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810119/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810126"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 14:46 UTC (Tue)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/810126/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>Hah!  I have never programmed on Windows and know nothing about its API, and feel a little ashamed for having rediscovered that. :)
+<p>Thanks for the info.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810126/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor810196"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 21:17 UTC (Tue)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/810196/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Well... you *could* have something like this:
+<pre>
+long process_syscall(int pidfd, long number, ...)
+</pre>
+<p>It would behave as-if <tt>process</tt> had invoked <tt>syscall(2)</tt> with the remaining arguments. Maybe you also whitelist <tt>number</tt> to syscalls that actually make sense to invoke remotely, and are unlikely to cause massive reentrancy or threading issues.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810196/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810224"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2020 2:42 UTC (Wed)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/810224/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are many states that thread could be in that would be problematic. Most of the time the thread would be blocked in the kernel for some reason, in which case you'd want to queue the syscall for execution when it would next return to userspace, but that might never happen.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810224/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810410"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2020 19:03 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/810410/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>It was mostly a tongue-in-cheek suggestion, and I'm pretty sure actually doing this would be a Bad Idea. But if you really wanted to do it, you could probably use the signals API to deal with those issues. That is:
+<ol>
+<li>Create a new SIGFOO value, and make all of the sigaction() et al. functions accept it.
+<li>Whenever someone calls process_syscall(), the target process receives a SIGFOO.
+<li>The default behavior of the SIGFOO is to call syscall(...) as if from a signal handler.
+<li>If the signal is masked, handled, or ignored, it behaves as you would expect (syscall() is not invoked).
+<li>(Optional) Masking, handling, or ignoring the signal requires a capability and/or UID=0, so that containers cannot veto the actions of their supervisors. Alternatively, it can't be masked, handled, or ignored at all, so that it behaves like SIGSTOP and SIGKILL.
+</ol>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810410/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor810122"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 14:28 UTC (Tue)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/810122/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am very curious to see how this gets worked out, my instinct is that the desire for the switchable interface implemented in the calls is deeply silly.  Unless there are significant performance or other (security?) implications, this desire for an alternate interface should be solved with wrappers and/or macros, not have a switching argument baked in to the basic call.<br>
+<p>
+That is to say, there’s nothing silly about wanting both interfaces, but having a “what is this other argument” switch argument in the call, when not strictly necessary, seems... yuck?  Perhaps opinions differ :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810122/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810127"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 15:45 UTC (Tue)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/810127/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The counter-argument is waitid(2), which has basically the exact same interface.<br>
+<p>
+Additionally, doing the switching in user-space isn't all that fun. The syscall has to take pidfds, otherwise there's no point to permitting pidfds to be used with the interface (getting the pid of a pidfd is painful, but it also immediately becomes susceptible to pid recycling attacks -- the thing pidfds were meant to block). And that would annoy the people who are unhappy with requiring pidfds for new syscalls (they don't want to take up file handles, and it's likely that for their programs creating the pidfd is a meaningless gesture because they have no way of actually being sure the pid is correct).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810127/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810176"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 17:35 UTC (Tue)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/810176/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+waitid has a flag to avoid having to create a new version of the syscall. It already accepted flags, so adding a flag to accept a pidfd in place of the existing pid argument made some sense.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810176/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810234"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2020 6:46 UTC (Wed)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/810234/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sure, waitid(2) obviously wasn't written with pidfds in mind and adding them later was to avoid making a new syscall -- my point was that the resulting interface is identical to the one being proposed (even the proposed constants -- P_PID and P_PIDFD -- are the same):<br>
+<p>
+    int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options);<br>
+<p>
+vs<br>
+<p>
+    int process_madvise(int which, pid_t pid, void *addr, size_t length, int advice, unsigned long flag);<br>
+<p>
+Where @which is equivalent to @idtype. Thus, it is arguably only as ugly as the waitid(2) interface. Also, they didn't re-use a flag argument -- waitid(2) explicitly had "type switching" from the outset (though it was intended to be used to differentiate between process groups and PIDs).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810234/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor810205"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 22:49 UTC (Tue)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/810205/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That’s an interesting point about the PID uncertainty for those programs, thanks.  Though at the same time, the pidfd isn’t any *worse* than the questionable pid...  hmm.<br>
+<p>
+This might be a situation where the kernel commitment to backwards compatibility implicitly pushes a less elegant interface.  (I say implicitly because there is no explicit backwards compatibility issue here, but I think the philosophy arguably applies because not having both PIDs and pidfds implicitly pushes people to the new interface.)<br>
+<p>
+Hmm.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810205/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor810159"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 15:50 UTC (Tue)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/810159/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; In this moment the tracer knows everything about tracee state, and pidfd brackets pidfd_open() and close() around actual action look just stupid, and this is cpu time wasting. </font><br>
+<p>
+While I do understand wanting to maintain support for PIDs in newer syscalls (after all, in some cases you only get a PID from a user or other program), I don't think that a tracer program would be written in the way described. It's far more likely that the tracer would already have a pidfd open for each process it is tracing. But then again, since ptrace (and ptrace-related syscalls) doesn't use pidfds, it would also be fair to say that the interface mismatch would make the code ugly no matter what.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810159/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810190"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 19:32 UTC (Tue)
+                               by <b>rvolgers</b> (guest, #63218)
+                              [<a href="/Articles/810190/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If ever there was a good use case for pidfd's it's ptrace. That is one ugly interface, with all the signal magic and pseudo-reparenting.<br>
+<p>
+Of course, porting it would take quite a lot of effort probably, nevermind deprecating the old interface so all the cruft can be removed, but one can dream.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810190/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810192"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 19:52 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/810192/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe hack pidfds into ptrace and other syscalls by passing "-pidfd" as the pid?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810192/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor810193"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 19:58 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/810193/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think pidfds for ptrace() would be good, but I don't think they immediately solve the major issues with ptrace.<br>
+<p>
+I would really like the ability to hand-off ptrace control to other processes by passing them a pidfd, but that would require lots more work. Something like:<br>
+* Make sure pidfd_wait or whatever can read the special ptrace status events.<br>
+* When pidfds are used, break the "ptrace parent" relationship in the kernel so *any* process with a pidfd for the tracee can ptrace() it or get the ptrace status events. (I bet this is *really* hard.)<br>
+But it would make much-requested rr features, like the ability to start debugging an in-progress rr recording without interrupting it, much more tractable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810193/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810207"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 22:52 UTC (Tue)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/810207/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why do you think breaking the ptrace parent relationship would be so hard?<br>
+<p>
+I’m not really familiar with that part of ptrace, but I have had to look at the signal handling dance and it is a *mess*.  (Not incorrect in any way, just... messy)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810207/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810225"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2020 2:44 UTC (Wed)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/810225/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The current ptrace code is designed around that relationship, and I assume that any significant changes to ptrace code are going to be hard. I'd love to be wrong!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810225/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor810195"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">“which”?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2020 21:12 UTC (Tue)
+                               by <b>mirabilos</b> (subscriber, #84359)
+                              [<a href="/Articles/810195/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This breaks types, though.<br>
+<p>
+“which” is an int, sure, but the PID is of type pid_t, while pidfds as file descriptors are of type int.<br>
+<p>
+I’d rather have it…<br>
+<p>
+    int process_madvise(int pidfd, pid_t pid, …<br>
+<p>
+… and use “pid” iff pidfd == -1 (which is the usual closed/invalid fd number).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810195/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810243"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">“which”?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2020 12:37 UTC (Wed)
+                               by <b>NAR</b> (subscriber, #1313)
+                              [<a href="/Articles/810243/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That could be confusing - the pidfd variable would be used not only to store a pidfd, but to select which interface is called. Also, this interface would invite bugs where both the pidfd and pid would be set, maybe even to different processes. Documentation could make it explicit, however, programmers have the habit to not read the documentation and write code based on assumption created by reading the API.<br>
+<p>
+My idea was to use the flags argument to select between pid and pidfd - but I guess that flag should be the same as accepted by madvise. If only C had function overloading... But it doesn't so maybe bite the bullet and create two functions: madvise_by_pid and madvise_by_pidfd.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810243/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810250"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">“which”?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2020 15:20 UTC (Wed)
+                               by <b>mirabilos</b> (subscriber, #84359)
+                              [<a href="/Articles/810250/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; the pidfd variable</font><br>
+<p>
+No, there’s no extra variable, this is just a parameter.<br>
+<p>
+You’d either call it with…<br>
+<p>
+	process_madvise(pidfd, /* ignored */ 0, …)<br>
+<p>
+… or with…<br>
+<p>
+	process_madvise(-1, pid, …)<br>
+<p>
+… so this question never comes up.<br>
+<p>
+<p>
+<font class="QuotedText">&gt; bugs where both the pidfd and pid would be set</font><br>
+<p>
+This is a very common interface, and the answer is trivial, as I stated in the comment above: pid is used iff pidfd == -1 (meaning if it’s not -1, pid will be ignored). This is a basic standard technique.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810250/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810303"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">“which”?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2020 16:59 UTC (Wed)
+                               by <b>james</b> (subscriber, #1325)
+                              [<a href="/Articles/810303/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Perhaps the call should return an error if the pid is non-zero and pidfd isn't -1.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810303/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810305"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">“which”?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2020 17:19 UTC (Wed)
+                               by <b>mirabilos</b> (subscriber, #84359)
+                              [<a href="/Articles/810305/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, why?<br>
+<p>
+It’s really common practice to do things this way (maybe you don’t know this as you seem to be a C++ programmer, but in the C/UNIX world, we do).<br>
+<p>
+Take, for example, mmap, when called with MAP_ANONYMOUS in flags, ignores the fd argument instead of checking it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810305/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor810216"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2020 1:25 UTC (Wed)
+                               by <b>KaiRo</b> (subscriber, #1987)
+                              [<a href="/Articles/810216/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have no clue about kernel-level coding, but why not have a function like pidfd_from_pid(pid) that would create/take a pidfd for a given pid (with all the ambivalence a pid has) and which you then hand over to new calls that only support a pidfd? From the command line that should be fine and other code should see to convert to pidfd in the longer run anyhow.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810216/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor810233"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2020 6:41 UTC (Wed)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/810233/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That already exists with the pidfd_open(2) syscall, the concern is that it's needless overhead (and a meaningless gesture) for userspace to have to create a pidfd if they are just going to use it as though it were a PID (with all of the issues related to it). That's what Kirill Tkhai was referring to when they wrote:<br>
+<p>
+<font class="QuotedText">&gt; In this moment the tracer knows everything about tracee state, and pidfd brackets pidfd_open() and close() around actual action look just stupid, and this is cpu time wasting.</font><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/810233/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor811405"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">process_madvise(), pidfd capabilities, and the revenge of the PIDs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2020 20:56 UTC (Mon)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/811405/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is a very silly argument, though. You can easily wrap the pidfd_open/pidfd-operation/_close in a function, and as for CPU time wastage -- two transitions to kernel space will likely be utterly minor compared to the large number of transitions that almost all pidfd operations are likely to incur; and if they only incur one, then the tripling of CPU time is *still* utterly irrelevant unless they're being called on literally millions of processes -- in which case one must wonder what on earth they are doing, and whether they should be using some other mechanism based around pgids or cgroups or something so they don't have to do something so ridiculously inefficient as calling *any* one syscall millions of times on millions of foreign processes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/811405/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2020, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

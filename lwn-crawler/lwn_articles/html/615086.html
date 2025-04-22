@@ -1,0 +1,534 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Page faults in user space: MADV_USERFAULT, remap_anon_range(), and userfaultfd() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/615086/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/614514/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/615086/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Page faults in user space: MADV_USERFAULT, remap_anon_range(), and userfaultfd()</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 7, 2014</br>
+           </div>
+The quest for performance often seems to lead developers to want to move
+functionalities out of the kernel and back into user space, where a
+dedicated application can, in theory, make things happen more quickly.
+Networking functions are often handled in this way, for example.  A desire
+to move 
+memory-management functions into user space is somewhat less common, but,
+as can be seen from Andrea Arcangeli's <a
+href="/Articles/614881/">user-space page fault handling patch set</a>, it
+is not unheard of.
+<p>
+Page-fault handling usually requires fetching data from secondary storage
+and placing it in the correct place in the faulting process's address
+space.  Why would one want to do that in user space?  The primary use case
+here is 
+the live migration of virtual machines running under KVM.  Migration
+requires moving the virtual machine's memory, which can take a long time,
+but the owner of that machine would like to see as brief an outage as
+possible while the migration is happening.  Preferably, the migration would
+not be noticeable at all.  One way to approach that goal is to move the
+minimal amount of memory needed to represent the virtual machine on the new
+host. 
+Once the machine starts running in the new location, it will certainly try
+to access pages which have not 
+yet been moved.  If the (user-space) virtual machine manager can catch the
+resulting page faults, it can prioritize the transfer of the pages the
+running machine actually needs.  It is, in other words, a form of
+cross-host demand paging that makes migration happen with lower latency.
+<p>
+Other uses — shared memory distributed
+across the network, for example — are possible as well.
+<p>
+The patch set starts by adding a couple of new variants to the
+<tt>get_user_pages()</tt> function, which is charged with making user-space
+pages accessible to the kernel:
+<p>
+<pre>
+    long get_user_pages_locked(struct task_struct *tsk, struct mm_struct *mm,
+		               unsigned long start, unsigned long nr_pages,
+	    		       int write, int force, struct page **pages,
+			       int *locked);
+    long get_user_pages_unlocked(struct task_struct *tsk, struct mm_struct *mm,
+				 unsigned long start, unsigned long nr_pages,
+				 int write, int force, struct page **pages);
+</pre>
+<p>
+The former version is intended to be called with the <tt>mmap_sem</tt>
+semaphore held.  It may release that semaphore while running, in which case
+<tt>*locked</tt> will be set to zero.  The second form, instead, assumes
+that <tt>mmap_sem</tt> is <i>not</i> held.  Using these functions in the
+kernel improves performance by allowing <tt>mmap_sem</tt> to be dropped
+while page-fault handling is in progress.  That is useful even in current
+kernels, but, if handling of faults is going to be entrusted to user space,
+it will become necessary.  Holding <tt>mmap_sem</tt> while calling out to
+user space would not be a recipe for happy times.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+The next step is to add the <tt>MADV_USERFAULT</tt> flag to the
+<tt>madvise()</tt> system call.  If that flag is set on a region of memory,
+the kernel will no longer attempt to resolve page faults in that region.
+Instead, in the absence of other measures (described below), the faulting
+process will receive a <tt>SIGBUS</tt> signal.  That, 
+of course, leaves the process in the position of having to resolve the page
+fault on its own.  A tool provided to help with that task is the new
+<tt>remap_anon_pages()</tt> system call:
+<p>
+<pre>
+    int remap_anon_pages(void *dest, void *src, unsigned long len,
+    			 unsigned long flags);
+</pre>
+<p>
+This system call will take the pages holding <tt>len</tt> bytes starting at
+<tt>src</tt> and 
+move them in the process's address space to the region starting at
+<tt>dest</tt>.  A number of conditions must be met for this operation to
+succeed, starting with the fact that the full range in <tt>dest</tt> must
+currently be unmapped — <tt>remap_anon_pages()</tt> will not overwrite an
+existing page mapping.  The range in <tt>src</tt>, instead, must all be
+present and mapped, and the pages cannot be shared with other processes.
+All of these rules exist to simplify the implementation, but also to try to
+catch race conditions in user-space fault handling.
+<p>
+If <tt>src</tt> is a huge page, and <tt>len</tt> is a multiple of 2MB, then
+the full huge page(s) will be moved to <tt>dest</tt> without being split.
+<p>
+With this mechanism in place, an application's <tt>SIGBUS</tt> signal
+handler can respond to a fault by allocating memory, filling it with the
+needed contents, and mapping it into the proper location with
+<tt>remap_anon_pages()</tt>.  Once the signal handler returns, the page
+fault will be retried, but, this time, the needed memory will be in place,
+so application execution will continue.
+<p>
+Anybody who has worked with signal handlers on Unix-like systems is
+probably thinking at this point that all that work does not belong in such
+a handler.  And, indeed, signal handlers are not the way that processes are
+expected to deal with page-fault handling.  To make life easier, Andrea
+adds another system call:
+<p>
+<pre>
+    int userfaultfd(int flags);
+</pre>
+<p>
+This call will return an open file descriptor which may be used to
+communicate with the kernel about page fault handling.  The <tt>flags</tt>
+argument is mostly unused, though <tt>O_NONBLOCK</tt> may be provided to
+request non-blocking behavior.
+<p>
+The first step after acquiring the file descriptor is for the application
+to write a 64-bit integer indicating which version of the userfault
+protocol it understands.  The kernel will respond with the same number if
+the protocol is supported, <tt>-1</tt> otherwise.  Once agreement has been
+reached in that area, the application can read a 64-bit address whenever a
+page fault occurs.  It should resolve the fault, then write back two
+pointers indicating the range of memory which has been mapped in response
+to the fault.
+<p>
+The idea here is that a process can dedicate a thread to page-fault
+handling.  Whenever a fault occurs, the faulting thread will pause while
+the handler thread puts things in place.  No <tt>SIGBUS</tt> signals will
+be delivered if <tt>userfaultfd()</tt> has been called.  So, for the
+faulting thread, life just continues as usual, with the possible exception
+that some page faults may take longer to handle than one might expect.
+<p>
+As was mentioned above, there might be multiple use cases for user-space
+page fault handling.  What if a single application wishes to exercise more
+than one of those cases?  To that end, the application can open more than
+one file descriptor with <tt>userfaultfd()</tt> and restrict each to a
+specific range of memory.  That restriction is requested by writing two pointers
+indicating the range to be covered; the least-significant bit should be set
+on the start pointer.  Thereafter, only faults within the given range will
+be directed to that file descriptor.  The application must still set
+<tt>MADV_USERFAULT</tt> on the ranges in question.  Multiple ranges can be
+set up to go to a single file descriptor, but a given range of memory can
+only have its faults handled by a single descriptor.
+<p>
+
+The bulk of the commentary on the patch set has been around the
+<tt>remap_anon_pages()</tt> system call.  Linus initially <a
+href="/Articles/615097/">wondered</a> whether <tt>remap_anon_pages()</tt>
+made more sense than <tt>remap_file_pages()</tt>, which he called an
+"<q>unmitigated disaster</q>" and which <a
+href="/Articles/597632/">may be removed</a> in the near future.  Later he
+<a href="/Articles/615228/">added</a> that he would prefer an interface
+where the fault handler process would simply <tt>write()</tt> the data to
+the page of interest, causing it to be allocated and mapped.  Andrea <a
+href="/Articles/615229/">responded</a> that such an interface might be
+possible; the handler would write the data to the <tt>userfaultfd()</tt>
+file descriptor and the kernel would handle the rest.  But he worried about
+losing the zero-copy behavior that was carefully designed into the current
+interface.  Linus's <a href="/Articles/615231/">answer</a> to that made it
+clear that he was not concerned about zero-copy behavior, which, he said,
+is almost never worth the cost of implementing it.
+<p>
+What we may see is that the <tt>get_user_pages()</tt> optimizations will
+find their way in relatively soon, though Linus <a
+href="/Articles/615098/">wasn't entirely happy</a> with those either.
+The remaining work will take a while longer, and the end result seems
+unlikely to include <tt>remap_anon_pages()</tt>.  But, given that the use case
+is real, a significant improvement to live migration is going to be hard to
+turn down in the long run.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Virtualization">Memory management/Virtualization</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#remap_anon_pages">remap_anon_pages()</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#userfaultfd">userfaultfd()</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/615086/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor615443"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page faults in user space: MADV_USERFAULT, remap_anon_range(), and userfaultfd()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2014 1:40 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/615443/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm glad to see that this avoids the obvious issue of letting userspace handle page faults caused by kernel-space accesses, given the classic UNIX bug of observing how far a privileged process reads into a password buffer to guess the password one character at a time.  Better to stop that entire class of problems at once, rather than auditing every bit of the kernel to make sure it leaks no information by how far it reads.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615443/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor615447"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page faults in user space: MADV_USERFAULT, remap_anon_range(), and userfaultfd()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2014 1:55 UTC (Thu)
+                               by <b>mtanski</b> (guest, #56423)
+                              [<a href="/Articles/615447/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is pretty exciting work for other things (besides live VM migration). This should allow us to write a pretty high performance Garbage Collector. Something ala the Azul JVM GC.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615447/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor615658"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page faults in user space: MADV_USERFAULT, remap_anon_range(), and userfaultfd()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2014 17:59 UTC (Thu)
+                               by <b>lkundrak</b> (subscriber, #43452)
+                              [<a href="/Articles/615658/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm wondering if a more generic mechanism could have been used instead of userfaultfd(). Maybe an extended version of signalfd().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615658/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor615693"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page faults in user space: MADV_USERFAULT, remap_anon_range(), and userfaultfd()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2014 21:52 UTC (Thu)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/615693/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem with signalfd() is that it requires the signal to be blocked.  SIGBUS is a thread-directed signal, and cannot be blocked; if you block it, the kernel will behave as if it were SIG_DFL and kill your process.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615693/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor615929"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page faults in user space: MADV_USERFAULT, remap_anon_range(), and userfaultfd()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2014 10:06 UTC (Sun)
+                               by <b>meyert</b> (subscriber, #32097)
+                              [<a href="/Articles/615929/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is no such thing as a thread directed signal. All signals operate on process level. But if I'm wrong please point me to the relevant documentation!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615929/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor615932"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page faults in user space: MADV_USERFAULT, remap_anon_range(), and userfaultfd()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2014 11:28 UTC (Sun)
+                               by <b>mpr22</b> (subscriber, #60784)
+                              [<a href="/Articles/615932/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Happy to oblige. The Linux kernel has had the <a href="http://linux.die.net/man/2/tgkill"><tt>tgkill()</tt></a> syscall ("send signal to thread") since 2.5.75.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615932/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor615756"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page faults in user space: MADV_USERFAULT, remap_anon_range(), and userfaultfd()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2014 6:55 UTC (Fri)
+                               by <b>kugel</b> (subscriber, #70540)
+                              [<a href="/Articles/615756/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is exactly what I am wondering too, and was already wondering with memfd().<br>
+<p>
+I'm thinking why not just open a special file /dev/userfault (analogous to /dev/shm) to obtain an fd, no additional syscall needed. This has the bonus that system admins can tweak access to this feature via normal file permissions. And if the file doesnt exist then the kernel has simply no support for it.<br>
+<p>
+For memfd() I can perhaps follow that they need such fds before /dev is mounted but not for this case, especially not since /dev is always either part of the rootfs or mounted very early as devtmpfs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615756/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor615706"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page faults in user space: MADV_USERFAULT, remap_anon_range(), and userfaultfd()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2014 22:44 UTC (Thu)
+                               by <b>ch</b> (guest, #4097)
+                              [<a href="/Articles/615706/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Mach had a pluggable swapper.   I experimented using it to support the garbage collector in CMU Common Lisp; there is no reason to write the dirty pages in the old semispace in a Cheney-style collector.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615706/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor615877"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page faults in user space: MADV_USERFAULT, remap_anon_range(), and userfaultfd()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2014 8:48 UTC (Sat)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/615877/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The version-agreement protocol feels very cumbersome. Why not just pass a version argument to userfaultfd? Better yet, why not just make a character device with a version-specific name?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615877/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor615930"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page faults in user space: MADV_USERFAULT, remap_anon_range(), and userfaultfd()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2014 10:19 UTC (Sun)
+                               by <b>meyert</b> (subscriber, #32097)
+                              [<a href="/Articles/615930/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if this could be used in user mode linux as a replacement for he PTRACE_FAULTINFO extension.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615930/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

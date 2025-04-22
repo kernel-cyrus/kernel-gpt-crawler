@@ -1,0 +1,605 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Dynamically sizing the kernel stack [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/974367/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/973889/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/974367/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Dynamically sizing the kernel stack</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 21, 2024</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2024/">LSFMM+BPF</a>
+</div>
+The kernel stack is a scarce and tightly constrained resource; kernel
+developers often have to go far out of their way to avoid using too much
+stack space.  The size of the stack is also fixed, leading to situations
+where it is too small for some code paths, while wastefully large for
+others.  At the <a
+href="https://events.linuxfoundation.org/lsfmmbpf/">2024 Linux Storage,
+Filesystem, Memory Management, and BPF Summit</a>, Pasha Tatashin proposed
+making the kernel stack size dynamic, making more space available when
+needed while saving memory overall.  This change is not as easy to
+implement as it might seem, though.
+<p>
+Every thread has its own kernel stack, he began.  The size of each thread's
+kernel stack was 8KB for a long time, and it is still that way on some
+architectures, but it was <a href="/Articles/600644/">increased to 16KB</a>
+on x86 systems in 2014.  That change, which was driven by stack overflows
+experienced with subsystems like KVM and FUSE, makes every thread in the
+system heavier.
+<p>
+Expanding the stack size to 16KB has not solved all of the problems,
+though; kernel code is using more stack space in many contexts, he said.
+I/O is becoming more complex, perf events are handled on the stack,
+compilers are more aggressively inlining code, and so on.  Google has stuck
+with 8KB stacks internally for memory efficiency, but is finding that to be
+increasingly untenable, and will be moving to 16KB stacks.  That, he said,
+is an expensive change, causing an increase in memory use measured in
+petabytes.  There are applications that create millions of threads, each of
+which pays the cost for the larger kernel stack, but 99% of those threads
+never use more than 8KB of that space.
+<p>
+<a href="/Articles/974374/"><img
+src="https://static.lwn.net/images/conf/2024/lsfmm/PashaTatashin-sm.png" alt="[Pasha Tatashin]"
+title="Pasha Tatashin" class="lthumb"></a>
+
+Thus, he proposed making the kernel stack size dynamic; each thread would
+start with a 4KB stack, which would be increased in response to a page
+fault should that space be exhausted.  An initial implementation was <a
+href="/ml/linux-kernel/20240311164638.2015063-1-pasha.tatashin@soleen.com/">posted
+in March</a>.
+
+The proposed solution takes advantage of <a
+href="/Articles/692953/">virtually mapped stacks</a>, which make it
+relatively easy to catch overflows.  A larger stack is allocated in the
+kernel page tables, but only one 4KB page is mapped.  The result is a
+significant speedup because the kernel does not have to find as much memory
+for kernel stacks, and tests have shown a 70-75% savings in memory used for
+the stacks.  That, he said, was from a "simple boot test"; tests with real
+workloads would have shown a larger savings.
+<p>
+There is an interesting challenge associated with page faults for stack
+access, though: page faults are also handled on the kernel stack, which has
+just run out of space.  When a thread tries to access an unmapped page and
+causes a page fault, the fault handler will try to save the current
+processor state onto the kernel stack, which will cause a double fault.
+The x86 architecture does not allow handling double faults; code is simply
+supposed to abort and clean up when that happens.  If the kernel tries,
+instead, to handle that fault and expand the stack, it is operating outside
+of the rules defined by the architecture, and that tends not to lead to
+good things.
+<p>
+Solutions to that problem seem to be expensive.  One idea, suggested by
+Matthew Wilcox but also already present on Tatashin's slides, is to add an
+<tt>expand_stack()</tt> function that would be called by subsystems that
+know they will need more stack space.  It would map the extra space ahead
+of its use, avoiding the double-fault situation.  Michal Hocko responded
+that this solution seemed like a game of <a
+href="https://en.wikipedia.org/wiki/Whac-A-Mole">Whac-A-Mole</a>, with
+developers trying to guess where the stack might overflow.  But direct
+reclaim, which can call filesystem or I/O-related functions with deep stack
+use, can happen just about anywhere.  If that causes an overflow, the system
+will panic.
+<p>
+A second possible solution, Tatashin said, would be to take advantage of
+some of the kernel-hardening work to automatically grow the stack as
+needed.  Specifically, he would like to use the <a
+href="/Articles/764325/">STACKLEAK</a> mechanism, which uses a GCC plugin
+to inject stack-size checks into kernel functions as they are compiled.
+That code could be enhanced to automatically grow the stack when usage
+passes a threshold.  This solution adds almost no overhead to systems where
+STACKLEAK is already in use — but it is rather more expensive if STACKLEAK
+is not already enabled.
+<p>
+Finally, a third option would be to limit dynamic stacks to systems that
+either do not save state to the stack on faults or that can handle double
+faults.  Tatashin suggested that x86 systems with <a
+href="https://www.intel.com/content/www/us/en/content-details/779982/flexible-return-and-event-delivery-fred-specification.html">FRED</a>
+support might qualify, and 64-bit Arm systems as well.
+<p>
+Time for the session was running short as Hocko said that he liked the
+second solution but wondered what the cost would actually be.  Tatashin
+said that he has been working on reducing it; he has refactored the
+STACKLEAK code to be more generic, so that it can be used for this purpose
+without needing to include the hardening features.  A stack-frame size can
+be set at build time, and the plugin will only insert checks for functions
+that exceed that size.  David Hildenbrand said that this scheme could be
+thwarted by a long chain of calls to small functions; Hocko said that would
+make the feature less than fully reliable.  Tatashin answered that there is
+probably at least one large function somewhere in any significant call
+chain, but Hocko said that is not necessarily the case with direct reclaim.
+<p>
+Steve Rostedt said that, perhaps, the frame-size parameter could be set to
+zero, causing the check be made at every function call; Tatashin answered
+that, while he has not measured the overhead of the check, it would
+certainly add up and be noticeable in that case.  The final suggestion of
+the session came from Hocko, who said that perhaps the ftrace hooks
+could be used instead of the STACKLEAK infrastructure, but Rostedt said
+that option would be too expensive to be worth considering.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Kernel_stack">Kernel stack</a></td></tr>
+            <tr><td><a href="/Archives/ConferenceIndex/">Conference</a></td><td><a href="/Archives/ConferenceIndex/#Storage_Filesystem_Memory-Management_and_BPF_Summit-2024">Storage, Filesystem, Memory-Management and BPF Summit/2024</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/974367/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor974495"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 21, 2024 16:16 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/974495/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wasn't in this session, so I'm not sure how I made a suggestion that was already in his slides. Perhaps that was someone else ;-)<br>
+<p>
+Had I been there, I would have said to Michal Hocko that reclaim seems like the perfect example of a place to expand_stack().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/974495/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor974497"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 21, 2024 17:08 UTC (Tue)
+                               by <b>soleen</b> (subscriber, #113769)
+                              [<a href="/Articles/974497/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hey Mathew, I included a slide about expand_stack(), referencing your suggestion from the RFCv1 thread. I still believe it's a viable solution for architectures without kernel memory faulting, and may propose it in the next version.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/974497/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor974500"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 21, 2024 17:28 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/974500/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      So it seems I misinterpreted my notes, but that the origin of the suggestion was correct in the end?  I certainly don't want to misattribute anybody's words!
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/974500/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor974498"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 21, 2024 17:08 UTC (Tue)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/974498/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Finally, a third option would be to limit dynamic stacks to systems that either do not save state to the stack on faults or that can handle double faults. Tatashin suggested that x86 systems with FRED support might qualify, and 64-bit Arm systems as well.</span><br>
+<p>
+This seems like the ideal solution, for any target supporting it.<br>
+<p>
+Another option would be to get official guidance from x86 vendors about whether they could validate the ability to handle double-faults. If it currently *works*, going from that to "it's guaranteed to work" is not an impossible ask.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/974498/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor974504"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 21, 2024 18:27 UTC (Tue)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/974504/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was surprised to learn that handling a page fault can itself trigger a page fault.  (If you could guarantee that the page fault handler didn't need to be re-entrant, then it wouldn't need to use the stack, but could have a small dedicated memory area per processor.)  I guess it makes sense on complex modern systems that faulting in a page from swap space (for example) might itself perform filesystem or device driver operations that need to allocate.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/974504/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor974507"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 21, 2024 18:49 UTC (Tue)
+                               by <b>matthias</b> (subscriber, #94967)
+                              [<a href="/Articles/974507/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Of course, this can be arbitrarily complex. Swap space is still quite simple. Just think of faulting in a page from a memory-mapped file that lives in some FUSE filesystem. So you might actually need to wait for another user space process.<br>
+<p>
+But it is not necessary to think that complicated. Faulting in a page just from swap takes ages (even with SSDs). Thus you want to yield to another thread. And the other thread might also have a page fault while you are still waiting for the first page. So even for the simplest of cases you really want the fault handler to be re-entrant.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/974507/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor974511"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 21, 2024 20:24 UTC (Tue)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/974511/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It gets worse. A page fault in a VM can trigger multiple page faults in the hypervisor. Page tables themselves can also be swapped out. It is possible for fault handler to declare their own stack, but that's just shifting the problem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/974511/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor974633"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 22, 2024 19:55 UTC (Wed)
+                               by <b>alkbyby</b> (subscriber, #61687)
+                              [<a href="/Articles/974633/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if anyone has considered special-casing for most common places to "park" kernel threads. Specifically, this Google's case referred to above, has by far vast majority of threads are sleeping in fiber's wait and switchto syscalls. Non-idle threads or threads idling in less common or "complex" places, there is not too many of those and it is fine to reserve plenty of stack on them.<br>
+<p>
+If those "common/simple" idle threads "simply" release their stacks while idle/sleeping, Google should able to afford much bigger stacks (for non-idle kernel tasks) and still save ram and possibly at relatively small complexity cost. I.e. right after task has been switched "out of", we really only need to remember what it was waiting for and place for user-space context (registers), and this is relatively small amount of stuff.<br>
+<p>
+At second place at Google by count are threads sleeping in futex_wait (they tend to be all kind of worker threads waiting for work, with occasional sleepers on mutex), and those could also potentially be treated similarly.<br>
+<p>
+I am writing this without any knowledge of complexities of x64 context switching. So maybe this is harder then alternatives.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/974633/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor975929"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2024 8:06 UTC (Thu)
+                               by <b>dongmk</b> (subscriber, #131668)
+                              [<a href="/Articles/975929/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; There are applications that create millions of threads</span><br>
+<p>
+What kinds of applications need to create millions of threads, on a single machine? Can anyone share some more details about the specific scenario? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/975929/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor975941"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2024 8:29 UTC (Thu)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/975941/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; What kinds of applications need to create millions of threads, on a single machine?</span><br>
+<p>
+Pretty much any application trying to solve a big problem with recursion? Okay, recursion is often used when it shouldn't be, but it's a quick-n-dirty fix that's very popular ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/975941/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor976093"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2024 18:30 UTC (Thu)
+                               by <b>mrugiero</b> (guest, #153040)
+                              [<a href="/Articles/976093/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why would recursion launch threads? Maybe you were thinking of tasks that exhaust the stack instead?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/976093/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor976084"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2024 17:26 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/976084/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Various messaging services that have clients that are mostly idle, for example. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/976084/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor976152"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2024 10:54 UTC (Fri)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/976152/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For example, using Erlang where it is common to have one or more processes per client (eg WhatsApp). These processes are a form of user-space threading though and *very* lightweight. Largely because of the functional nature of the language, no sharing of data between processes and all data being read-only means the stacks can be very small (no registers to be saved/restored) and are allocated on demand. Millions of threads are not unheard of.<br>
+<p>
+But it's running on an interpreter, so can't really be compared with OS level threads in Linux where you're limited by what the hardware can support. If the CPU supported dynamically allocating stack frames when calling a function you'd also be able to get away with much smaller stacks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/976152/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor976344"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dynamically sizing the kernel stack</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2024 19:21 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/976344/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; If the CPU supported dynamically allocating stack frames when calling a function you'd also be able to get away with much smaller stacks.</span><br>
+<p>
+Golang tried that via segmented stacks. The problem is that switching between segments killed performance. So Go moved to relocatable stacks instead, which is easy for them because (by the language design) pointers can't point to objects on the stack.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/976344/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

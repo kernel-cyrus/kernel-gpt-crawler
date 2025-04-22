@@ -1,0 +1,461 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Some kernel memory-allocation improvements [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/658081/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/657667/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/658081/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Some kernel memory-allocation improvements</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 23, 2015</br>
+           </div>
+The kernel's memory allocator must work within a large set of constraints
+if it is to perform well under most workloads.  Over time, these
+constraints have led to the addition of significant complexity to the
+low-level allocation code.  But problems remain, and, as it turns out,
+sometimes the best solution is to get rid of some of that complexity and
+take a simpler approach.  <a href="/Articles/657967/">This patch set</a>
+from Mel Gorman has been making the rounds for some time and appears to be
+reaching a mature stage; it's worth a look as an example of what it takes
+to perform well in current kernels.
+<p>
+The allocator in question here is the low-level page allocator (or "buddy
+allocator").  The smallest unit of memory it deals with is a full page
+(4096 bytes on most systems).  The slab allocators (including
+<tt>kmalloc()</tt>) are built on top of the page allocator; they have their
+own complexities that we'll not be concerned with here.
+<p>
+The page allocator is the ultimate source of memory in the system; if that
+allocator can't fulfill a request, the memory simply cannot be had.  So
+considerable effort is put into ensuring that memory is available at all
+times, especially for high-priority callers that cannot wait for some
+memory to be reclaimed from elsewhere.  High-order allocations (those
+requiring more than one page of physically contiguous memory) complicate
+the problem; memory tends to fragment over time, making contiguous chunks
+hard to find.  Balancing memory use across NUMA systems adds yet another
+twist.  All of these constraints (and more) must be managed without slowing
+down the system in the allocator itself.  Solving this problem involves a
+significant amount of complex code, scary heuristics, and more; it is not
+surprising that memory-management changes can be hard to merge into the
+mainline.
+<p>
+<h4>The zone cache</h4>
+<p>
+The page allocator divides physical memory into "zones," each of which
+corresponds to memory with specific characteristics.  <tt>ZONE_DMA</tt>
+contains memory at the bottom of the address range for use by severely
+challenged devices, for example, while <tt>ZONE_NORMAL</tt> may contain most
+memory on the system.  32-bit systems have a <tt>ZONE_HIGHMEM</tt> for
+memory that is not directly mapped into the kernel's address space.  Each
+NUMA node has its own set of zones as well.  Depending on the
+characteristics of any given allocation request, the page allocator will
+search the available zones in a specific priority order.  For the curious,
+<tt>/proc/zoneinfo</tt> gives a lot of information about the zones in use
+on any given system.
+<p>
+Checking a zone to see whether it has the memory to satisfy a given request
+can be more work than one might expect.  Except for the highest-priority
+requests, a given zone shouldn't be drawn below specific low
+"watermarks," and comparing a zone's available memory against a watermark
+can require a significant calculation.  If the "zone reclaim" feature is
+enabled, checking a nearly-empty zone can cause the memory-management
+subsystem to try to reclaim memory in that zone.  For these reasons and
+more, the "zonelist cache" was <a
+href="http://git.kernel.org/linus/9276b1bc96a132f4068fdee00983c532f43d3a26">added</a>
+to the 2.6.20 kernel in 2006.  This cache simply tries to remember which
+zones have been found to be full in the recent past, allowing allocation
+requests to avoid checking full zones.
+<p>
+The case for the zonelist cache has been weakening for some time, and Mel's
+patch set weakens it further by making the watermark checks cheaper.  Zone
+reclaim has been fingered as a performance problem for a number of
+workloads (including <a href="/Articles/591723/">PostgreSQL server
+workloads</a>) and is now disabled by default.  But the biggest problem
+seems to be that, if a zone is unable to satisfy a high-order allocation,
+it will be marked as "full" even if single pages abound there.  Subsequent
+single-page allocations will then avoid the zone, even though that zone is
+entirely capable of satisfying those allocations.  That can
+cause allocations to be needlessly performed on remote NUMA nodes,
+worsening performance.
+<p>
+Mel notes that this problem "<q>could be addressed with additional
+complexity but as the benefit of zlc [the zonelist cache] is questionable,
+it is better to 
+remove it</q>".  This part of the patch series removes nearly 300 lines
+of complex memory-management code and improves some benchmarks in the
+process.  The fact that zones are always checked has some other effects;
+the most notable is apparently that more direct reclaim work
+(attempts to reclaim memory by the process performing an allocation)
+results from checking zones that would have previously been skipped.
+<p>
+<h4>The atomic high-order reserve</h4>
+<p>
+Within a zone, memory is grouped into "page blocks," each of which
+can be marked with a "migration type" describing how the block should be
+allocated.  In current kernels, one of those types is
+<tt>MIGRATE_RESERVE</tt>; it marks memory 
+that simply will not be allocated at all unless the alternative is to fail
+an allocation request entirely.  Since a physically contiguous range of
+blocks is so marked, the effect of this policy is to maintain a minimum
+number of high-order pages in the system.  That, in turn, means that
+high-order requests (within reason) can be satisfied even when memory is
+generally fragmented.
+<p>
+Mel <a
+href="http://git.kernel.org/linus/56fd56b868f19385c50af8941a4c78df433b2d32">added
+the migration reserve</a> during the 2.6.24 development cycle in 2007.  The
+reserve improved the situation at the time but, in the end, it relied on
+an accidental property of the minimum watermark implemented in the page
+allocator many years before.  The reserve does not actively keep high-order
+pages around; it simply steers requests away from a specific range of
+memory unless there is no alternative, in the hope that said range will
+remain contiguous.  The reserve also predates the current memory-management
+code, which does a far better job of avoiding fragmentation and performing
+compaction when fragmentation does occur.  Mel's current patch set
+implements the conclusion that this reserve has done its time and removes
+it.
+<p>
+There is still value in reserving blocks of memory for high-order
+allocations, though; fragmentation is still a concern in current kernels.
+So another part of Mel's patch set creates a new
+<tt>MIGRATE_HIGHATOMIC</tt> reserve that serves this purpose, but in a
+different way.  Initially, this reserve contains no page blocks at all.  If
+a high-order allocation cannot be satisfied without breaking up a
+previously whole page block, that block will be marked as being part of the
+high-order atomic reserve; thereafter, only higher-order allocations (and
+only high-priority ones at that) can be
+satisfied from that page block.
+<p>
+The kernel will limit the size of this reserve to about 1% of memory, so it
+cannot grow overly large.  Page blocks remain in this reserve until memory
+pressure reaches a point where a single-page allocation is about to fail;
+at this point, the kernel will take a page block out of the reserve to be
+able to satisfy that request.  The end result is a high-order page reserve
+that is more flexible, growing or shrinking in response to the demands of
+the current workload.  Since the demand for high-order pages can vary
+significantly from one system (and one workload) to the next, it makes
+sense to tune the reserve to what is actually running; the result should be
+more flexible allocations and higher-reliability access to high-order
+pages.
+<p>Lest kernel developers think that they can be more relaxed about high-order
+allocations in the future, though, Mel notes that, as a result of the
+limited size of the reserve, "<q>callers that speculatively abuse atomic
+allocations for long-lived high-order allocations to access the reserve
+will quickly fail</q>".  He gives no indication of just who he thinks
+those callers are, though.  There is one other potential pitfall with this
+reserve that bears keeping in mind: since the first page block
+doesn't enter the reserve until a high-order allocation is made, the
+reserve may remain empty until the system has been running for a long
+time.  By that point, memory may be so fragmented that the reserve can no
+longer be populated.  Should such situations arise in real-world use, they
+could be addressed by proactively putting a minimum amount of memory into
+the reserve at boot time.
+<p>
+The high-order reserve also makes it possible to remove the separate
+watermarks for high-order pages.  These watermarks try to ensure that
+each zone has a minimal number of pages available at each order; the
+allocator will fail allocations that drive the level below the relevant watermark
+for all but the highest-priority allocations.  These watermarks are
+relatively expensive to implement and can cause normal-priority allocations
+to fail even though suitable pages are available.  With the patch set
+applied, the code continues to enforce the single-page watermark, but, for
+higher-order allocations, it merely checks that a suitable page is available,
+counting on the high-order reserve to ensure that pages will be kept
+available for high-priority allocations.
+<p>
+<h4>Flag day</h4>
+<p>
+Memory-allocation requests in the kernel are always qualified by a set of
+"GFP flags" ("GFP" initially came from "get free page") describing what
+can and cannot be done to satisfy the request.  The most commonly used
+flags are <tt>GFP_ATOMIC</tt> and <tt>GFP_KERNEL</tt>, though they are
+actually built up from lower-level flags.  <tt>GFP_ATOMIC</tt> is the
+highest-priority request; it can dip into reserves and is not allowed to
+sleep.  Underneath the hood, <tt>GFP_ATOMIC</tt> is defined as the single
+bit <tt>__GFP_HIGH</tt>, marking a high-priority request.
+<tt>GFP_KERNEL</tt> cannot use the reserves but can sleep; it is the
+combination of <tt>__GFP_WAIT</tt> (can sleep), <tt>__GFP_IO</tt> (can
+start low-level I/O), and <tt>__GFP_FS</tt> (can invoke filesystem
+operations).  The full set of flags is huge; they can be found in <a
+href="/Articles/658108/"><tt>include/linux/gfp.h</tt></a>.
+<p>
+Interestingly, the highest-priority requests are not marked with
+<tt>__GFP_HIGH</tt>; instead, they are marked by the <i>absence</i> of
+<tt>__GFP_WAIT</tt>.  Requests with <tt>__GFP_HIGH</tt> can push memory
+below the watermarks, but only non-<tt>__GFP_WAIT</tt> requests can access
+the atomic reserves.  This mechanism doesn't work as well as it could in
+current kernels, where many subsystems may make allocations they don't want
+to wait for (often because there is a fallback mechanism available if the
+allocation fails), but those subsystems do not need access to the deepest
+reserves.  But, by leaving off <tt>__GFP_WAIT</tt>, such code will access
+those reserves anyway.
+<p>
+This problem, along with a general desire to have more explicit control
+over how memory-allocation requests are satisfied, has led Mel to rework
+the set of GFP flags somewhat.  To do so, he has added some new flags to
+the (already long) list:
+<p>
+<ul>
+<li> <tt>__GFP_ATOMIC</tt> identifies requests that truly come from atomic
+     context, where no sort of blocking or delay is acceptable and there is
+     no fallback in case of failure.  If an allocation is being made with
+     <tt>__GFP_ATOMIC</tt>, it may mean, for example, that spinlocks are
+     currently held.  These requests are the ones that get access to the
+     atomic reserves.
+<p>
+<li> <tt>__GFP_DIRECT_RECLAIM</tt> indicates that the caller is willing to
+     go into direct reclaim.  Doing so implies that the request can block
+     if need be.  This flag does not imply <tt>__GFP_FS</tt> or
+     <tt>__GFP_IO</tt>; they must be specified separately if they are
+     applicable (though in such cases it probably makes sense to just use
+     <tt>GFP_KERNEL</tt>).
+<p>
+<li> <tt>__GFP_KSWAPD_RECLAIM</tt> says that the <tt>kswapd</tt> kernel
+     thread can be woken up to perform reclaim.  Poking <tt>kswapd</tt>
+     does not imply blocking, but it may start activity in the system that
+     can affect performance in general.  As an example, consider a driver
+     that would very much like to allocate a high-order chunk of memory,
+     but it can get by with a bunch of single pages if that chunk is not
+     available.  The high-order allocation may be best tried without
+     <tt>__GFP_KSWAPD_RECLAIM</tt>, since things will still work fine if
+     that allocation fails and
+     there is no real need to start aggressively reclaiming memory.
+</ul>
+<p>
+With this set of flags, code can express the difference between being
+absolutely unable to sleep and not wanting to sleep.  The "must succeed"
+nature of a request has been separated from the "don't sleep" aspect,
+eliminating situations where allocations dip unnecessarily into the atomic
+reserves.  For users of the basic <tt>GFP_ATOMIC</tt> and
+<tt>GFP_KERNEL</tt> flag sets little will change, but Mel's patch set makes
+changes to several dozen call sites that deal with GFP flags at a lower
+level.
+<p>
+As a whole, this patch set touches 101 files and removes a net 240 lines of
+code.  With luck, a number of core memory-management algorithms have been
+simplified while improving performance and making the system more
+reliable.  Mel's strongly benchmark-focused approach will help to build
+confidence in this work, but it's still a set of significant changes to a
+complex kernel subsystem, so it's not surprising that the patches have
+had to go through a number of revisions and extensive review.  It seems
+likely that this process is coming to an end, and that this work will find
+its way into the mainline in the next development cycle or two.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-GFP_flags">Memory management/GFP flags</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/658081/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor658362"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Flag Day</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 24, 2015 21:17 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/658362/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Cute pun there. ;-)
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/658362/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor658969"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Some kernel memory-allocation improvements</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 1, 2015 21:20 UTC (Thu)
+                               by <b>Shabbyx</b> (guest, #104730)
+                              [<a href="/Articles/658969/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For a year now, I've had a problem with memory if I had used a lot of it (say &gt;4GB out of 8GB) with VirtualBox:<br>
+<p>
+- With swap disabled: When (according to System Monitor) I have used about 60% of my memory (the rest used as cache), apparently OOM killer is invoked, which makes the system go to a crawl for a few seconds and complete unresponsiveness afterwards.  After Alt+SysRq+s-then-u, it comes back alive and I can see the OOM logs.<br>
+- With swap enabled: All goes well, but when I shut the system down, there is a huge amount of wait (minutes) before something related to swap happens and the computer shuts down.  I have come to use Alt+SysRq+s-then-u-then-o to turn off since then whenever I use VirtualBox.<br>
+<p>
+Now that I have vented, I really hope the problem goes away with this patch-set!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/658969/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor659099"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Some kernel memory-allocation improvements</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 4, 2015 0:04 UTC (Sun)
+                               by <b>toyotabedzrock</b> (guest, #88005)
+                              [<a href="/Articles/659099/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I must be misunderstanding something because it sounds as if the patch waits till the system is about to run out of memory before it creates a reserve. It also sounds like it would create a bottleneck for future systems with more cores.<br>
+It's a shame Intel doesn't have a memory translation system like a ssd drive so the OS can pretend it has contiguous blocks of memory. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/659099/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor659107"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Some kernel memory-allocation improvements</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 4, 2015 4:29 UTC (Sun)
+                               by <b>Fowl</b> (subscriber, #65667)
+                              [<a href="/Articles/659107/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You mean like some sort of MMU?<br>
+<p>
+Perhaps something with multiple levels of page tables and a fairly complicated set of protection bits... ;)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/659107/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

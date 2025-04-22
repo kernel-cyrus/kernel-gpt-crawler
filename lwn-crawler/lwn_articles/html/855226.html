@@ -1,0 +1,679 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A pair of memory-allocation improvements in 5.13 [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/855226/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/855622/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/855226/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A pair of memory-allocation improvements in 5.13</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 6, 2021</br>
+           </div>
+Among the many changes merged for 5.13 can be found performance
+improvements throughout the kernel.  This work does not always stand out
+the way that new features do, but it is vitally important for the future of
+the kernel overall.  In the memory-management area, a couple of
+long-running patch sets have finally made it into the mainline; these
+provide a bulk page-allocation interface and
+huge-page mappings in the <tt>vmalloc()</tt> area.
+Both of these changes should make things faster, at least for some
+workloads. 
+<p>
+<h4>Batch page allocation</h4>
+<p>
+The kernel's memory-allocation functions have long been optimized for
+performance and scalability, but there are situations where that work still
+has not achieved the desired results.  One of those is high-speed
+networking.  Back in 2016, networking developer Jesper Dangaard Brouer <a
+href="/Articles/684616/">described the challenges</a> that come with the
+fastest network links; when the system is processing tens of millions of
+packets per second, the time available to deal with any given packet is
+highly constrained.  The kernel may only have a few hundred CPU cycles
+available to process each packet, and obtaining a page from the memory
+allocator may, by itself, require more than that.  Using the entire
+CPU-time budget to allocate memory is not the way to get the best network
+performance. 
+<p>
+At the time, Brouer asked for an API that would allow numerous pages to be
+allocated with a single call, hopefully with a much lower per-page cost.
+The networking code could then grab a pile 
+of memory, and quickly hand out pages as needed.  Nobody objected to the
+request at the time; it is well understood that batching operations can
+increase throughput in situations like this.  But it took some time for
+that interface to come around.
+<p>
+Mel Gorman took on that task and put together a patch series, <a
+href="/ml/linux-kernel/20210325114228.27719-1-mgorman@techsingularity.net/">the
+sixth version of which</a> was posted and taken into the -mm tree in
+March.  It adds two new interfaces for the allocation of single ("order-0")
+pages, starting with:
+<p>
+<pre>
+    unsigned long alloc_pages_bulk(gfp_t gfp, unsigned long nr_pages,
+    				   struct list_head *list);
+</pre>
+<p>
+The allocation flags to use are stored in <tt>gfp</tt>, <tt>nr_pages</tt>
+is the number of pages the caller would like to allocate, and <tt>list</tt>
+is a list onto which the allocated pages are to be put.  The return value
+will be the number of pages actually allocated, which could be less than
+<tt>nr_pages</tt> for any of a number of reasons.  The <tt>page</tt>
+structures for the allocated pages are assembled into a list (using the
+<tt>lru</tt> entry) and attached to the provided <tt>list</tt>.
+<p>
+Returning the pages in a linked list may seem a little strange, especially
+since "linked lists" and "scalability" tend not to go together well.
+The advantage of this approach is that it does not require allocating any
+memory to track the allocated pages.  Since the list is unlikely to be
+traversed (there is never a need to walk through the list as a whole), the
+scalability issues do not apply here.  Still, this interface 
+may seem awkward to some.  For those who would rather supply an array to be
+filled with pointers, a different interface is available:
+<p>
+<pre>
+    unsigned long alloc_pages_bulk_array(gfp_t gfp, unsigned long nr_pages,
+    					 struct page **page_array);
+</pre>
+<p>
+This function will store pointers to the <tt>page</tt> structures for the
+allocated pages into <tt>page_array</tt>, which should really be at least
+<tt>nr_pages</tt> elements long or unpleasant side effects may appear.
+Interestingly, pages will only be allocated for NULL entries in
+<tt>page_array</tt>, so <tt>alloc_pages_bulk_array()</tt> can be used to
+refill a partially emptied array of pages.  This array, thus, must be
+zeroed before the first call to <tt>alloc_pages_bulk_array()</tt>.
+<p>
+For users needing more control, the function under the hood that does the
+work of both <tt>alloc_pages_bulk()</tt> and
+<tt>alloc_pages_bulk_array()</tt> is:
+<p>
+<pre>
+    unsigned int __alloc_pages_bulk(gfp_t gfp, int preferred_nid,
+				    nodemask_t *nodemask, int nr_pages,
+				    struct list_head *page_list,
+				    struct page **page_array);
+</pre>
+<p>
+The additional parameters control the location of the allocated pages on a
+NUMA system; <tt>preferred_nid</tt> is the node to be used if possible,
+while <tt>nodemask</tt>, if present, indicates the allowable set of nodes.
+Exactly one of <tt>page_list</tt> and <tt>page_array</tt> should be
+non-NULL and will be used to return the allocated pages.  If both are
+supplied, <tt>page_array</tt> will be used and <tt>page_list</tt> will be
+ignored.
+<p>
+Benchmarks included with the patch set show a nearly 13% speed increase for
+the high-speed networking case, and something closer to 500% for a Sun RPC
+test case.  Gorman noted, though, that: "<q>Both potential users in this
+series are corner cases (NFS and high-speed networks) so it is unlikely
+that most users will see any benefit in the short term.</q>"  The <a
+href="https://git.kernel.org/linus/f6e70aab9dfe">Sun RPC</a> and <a
+href="https://git.kernel.org/linus/be5dba25b4b2">networking</a> uses have
+gone directly into 5.13; others are likely to follow.
+<p>
+<a name="vmalloc"></a>
+<h4>Huge-page vmalloc()</h4>
+<p>
+Most kernel memory-allocation functions return pointers to either pages or
+addresses in the kernel's 
+address map; either way, the addresses correspond to the physical address
+of the memory that has been allocated.  That works well for small
+allocations (one page or below), but physical memory allocations become
+harder to satisfy as the size of the
+allocation increases due to the fragmentation of memory over time.
+For this reason, much
+work has been done over the years to avoid the need for multi-page
+allocations whenever possible.
+<p>
+Sometimes, though, only a large, contiguous region will do; the
+<tt>vmalloc()</tt> interface exists to serve that need.  The pages
+allocated by <tt>vmalloc()</tt> will (probably) be scattered around
+physical memory, but they will be made virtually contiguous by mapping them
+into a special part of the kernel's address space.  Traditionally,
+excessive use of <tt>vmalloc()</tt> was discouraged due to the costs of
+setting up the mappings and the small size of the dedicated address space
+on 32-bit systems.  The address-space limitation is not a problem on 64-bit
+systems, though, and use of <tt>vmalloc()</tt> has been growing over time.
+<p>
+Addresses in the <tt>vmalloc()</tt> range are slower to use than addresses
+in the kernel's direct mapping, though, because the latter are mapped using
+huge pages whenever possible.  That reduces pressure on the CPU's
+translation lookaside buffer (TLB), which is used to avoid resolving
+virtual addresses through the page tables.  Mappings in the
+<tt>vmalloc()</tt> range use small ("base") pages, which are harder on the
+TLB.
+<p>
+As of 5.13, though, <tt>vmalloc()</tt> can use huge pages for suitably
+large allocations thanks to <a
+href="https://git.kernel.org/linus/121e6f3258fe">this patch</a> from
+Nicholas Piggin.  For <tt>vmalloc()</tt> allocations that are larger than
+the smallest huge-page size, an attempt will be made to use huge pages
+rather than base pages.  That can improve performance significantly for
+some kernel data structures, as Piggin <a
+href="/ml/linux-kernel/1616036421.amjz2efujj.astroid@bobo.none/">described</a>:
+<p>
+<blockquote class="bq">
+	Several of the most [used] structures in the kernel (e.g., vfs and
+	network hash tables) are allocated with vmalloc on NUMA machines,
+	in order to distribute access bandwidth over the machine. Mapping
+	these with larger pages can improve TLB usage significantly, for
+	example this reduces TLB misses by nearly 30x on a `git diff`
+	workload on a 2-node POWER9 (59,800 -&gt; 2,100) and reduces CPU
+	cycles by 0.54%, due to vfs hashes being allocated with 2MB pages.
+</blockquote>
+<p>
+There are some potential disadvantages, including wasting larger amounts of
+memory due to internal fragmentation; a 3MB allocation may be placed into
+two 2MB huge pages, for example, leaving 1MB of unused memory at the end.
+It is also possible that the distribution of memory across NUMA systems may
+be less balanced when larger pages are used.  Some <tt>vmalloc()</tt>
+callers may be unprepared for huge-page allocations, so they are not done
+everywhere; in particular, the module loader, which uses <tt>vmalloc()</tt>
+and could probably benefit from huge pages, does not currently use them.
+<p>
+Still, the advantages of using huge pages for <tt>vmalloc()</tt> would
+appear to outweigh the disadvantages, at least in the testing that has been
+done so far.  There is a new command-line parameter,
+<tt>nohugevmalloc=</tt>, which can be used to disable this behavior if need
+be.  
+<p>
+Most users are unlikely to notice any amazing speed improvements resulting
+from these changes.  But they are an important part of the ongoing effort
+to optimize the kernel's behavior wherever possible; a long list of changes
+like this is the reason why Linux performs as well as it does.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Scalability">Memory management/Scalability</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#vmalloc">vmalloc()</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/855226/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor855626"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A pair of memory-allocation improvements in 5.13</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2021 14:38 UTC (Thu)
+                               by <b>dullfire</b> (guest, #111432)
+                              [<a href="/Articles/855626/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Interestingly, pages will only be allocated for non-NULL entries in page_array, so alloc_pages_bulk_array() can be used to refill a partially emptied array of pages.</font><br>
+<p>
+Hmmm If I&#x27;&#x27;m not getting that backwards, shouldn&#x27;t it be only for &quot;NULL&quot; entries? (that way valid pointers aren&#x27;t lost)? That would seem to be consistent with the subsequent sentence that says the array needs to be zeroed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/855626/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor855629"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Duh</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2021 14:46 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/855629/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Yes, of course, that was wrong; not sure how nobody here (starting with me) noticed it.  Fixed now, sorry for the confusion.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/855629/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor855711"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why the list is unlikely to be traversed?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 7, 2021 10:33 UTC (Fri)
+                               by <b>glqhw</b> (guest, #131853)
+                              [<a href="/Articles/855711/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  Since the list is unlikely to be traversed (there is never a need to walk through the list as a whole), the scalability issues do not apply here.</font><br>
+<p>
+Without traversing the list, how does the caller use the allocated pages in the list?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/855711/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor855716"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why the list is unlikely to be traversed?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 7, 2021 10:59 UTC (Fri)
+                               by <b>dullfire</b> (guest, #111432)
+                              [<a href="/Articles/855716/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I&#x27;m pretty sure it&#x27;s supposed to be treated some what like a stack (you grab the next one in the list when ever you need a page).<br>
+<p>
+The &quot;list is unlikely to be traversed&quot; means that nobody is likely to need random access to list elements (just the first item on it).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/855716/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor855715"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why the list is unlikely to be traversed?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 7, 2021 10:59 UTC (Fri)
+                               by <b>Bigos</b> (subscriber, #96807)
+                              [<a href="/Articles/855715/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If I understand correctly, the list is embedded into struct page itself (one of its many packed fields). It means that if you want to do anything with the page you will need to load it into a cache line anyway, so there is (almost) no additional overhead.<br>
+<p>
+A similar idea is often used in userspace (and also in the kernel, I guess) which is a &quot;free list&quot;. You embed a list in the things you want to keep track of so that you can easily handle &quot;allocate a thing&quot; request by just returning a pointer to head (while you update the pointer using the embedded &quot;next&quot; pointer in the thing you just returned). This &quot;embedded list&quot; might be temporary - once you return the thing you can get rid of the list pointer, so you can easily handle same-sized memory chunks (at least sizeof(void*) long) without any overhead. And once you put the thing back on the list you reinstate the pointer and put it at the head.<br>
+<p>
+The only issue is when you need, say, 10 pages at the same time. The CPU will need to traverse a linked-list and load each struct page one after another. For the array variant, the CPU will still need to load each struct page but it can do so in parallel. However, I believe the use case here is to just ask for one page at a time. Heck, you can even try to prefetch the next struct page if you want to (though that is CPU-dependent).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/855715/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor855780"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A pair of memory-allocation improvements in 5.13</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 7, 2021 18:33 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/855780/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Returning the pages in a linked list may seem a little strange, especially since &quot;linked lists&quot; and &quot;scalability&quot; tend not to go together well. The advantage of this approach is that it does not require allocating any memory to track the allocated pages. Since the list is unlikely to be traversed (there is never a need to walk through the list as a whole), the scalability issues do not apply here. </font><br>
+<p>
+That&#x27;s not true, and we have data to prove it!<br>
+<a href="https://lore.kernel.org/linux-mm/20210319181031.44dd3113@carbon/">https://lore.kernel.org/linux-mm/20210319181031.44dd3113@...</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/855780/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor855797"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A pair of memory-allocation improvements in 5.13</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 8, 2021 1:02 UTC (Sat)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/855797/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So this is only for order-0 pages?<br>
+<p>
+What happens if someone is trying to do 100 Gbps networking with jumbo packets of 9,000 bytes? Each packet would need an order-2 allocation of 4 pages.<br>
+<p>
+It is more likely the card is doing RDMA and not letting the kernel see packets at all. But if it was...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/855797/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor855820"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A pair of memory-allocation improvements in 5.13</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 8, 2021 3:57 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/855820/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, it&#x27;s only for order-0 pages. Network cards have scatter-gather capabilities and will happily DMA a 9000 byte packet into three discontinuous pages.<br>
+<p>
+Networking people often try to do line rate with 64 byte packets. This is hard, hence the requests to the MM people to find ways to get memory more quickly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/855820/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor855880"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A pair of memory-allocation improvements in 5.13</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2021 14:14 UTC (Mon)
+                               by <b>dxin</b> (guest, #136611)
+                              [<a href="/Articles/855880/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I thought we have past the double underscore prefix thing already?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/855880/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor855944"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A pair of memory-allocation improvements in 5.13</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2021 19:19 UTC (Mon)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/855944/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What do you mean? Double-underscore is a common convention within the kernel to denote a variant of a function that is generally not for common use.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/855944/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor855945"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A pair of memory-allocation improvements in 5.13</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2021 19:55 UTC (Mon)
+                               by <b>abatters</b> (<b>&#x272D; supporter &#x272D;</b>, #6932)
+                              [<a href="/Articles/855945/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Probably referring to this:<br>
+<p>
+<a href="https://en.cppreference.com/w/c/language/identifier#Reserved_identifiers">https://en.cppreference.com/w/c/language/identifier#Reser...</a><br>
+<p>
+The following identifiers are reserved and may not be declared in a program (doing so invokes undefined behavior): <br>
+<p>
+3) All identifiers that begin with an underscore followed by a capital letter or by another underscore (these reserved identifiers allow the library to use numerous behind-the-scenes non-external macros and functions)<br>
+<p>
+---<br>
+<p>
+The kernel has been violating this rule for a long time.  It is more important in userspace though to avoid clashes with glibc internals.  I recall there was once a programming guide years ago (by Rusty Russell IIRC) that suggested using the kernel&#x27;s double-underscore convention in userspace, but it had to be updated once someone pointed out the above rule.  If there has been a recent push to get the kernel to follow the rule, I am not aware of it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/855945/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor856006"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A pair of memory-allocation improvements in 5.13</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2021 19:35 UTC (Tue)
+                               by <b>jiiksteri</b> (subscriber, #75247)
+                              [<a href="/Articles/856006/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The kernel has been violating this rule for a long time</font><br>
+<p>
+IIRC the kernel interpretation has been that the underscore prefix is reserved _for the runtime implementation_ and compared to the average comfy userspace, the kernel _is_ the implementation rather than a hosted environment.<br>
+<p>
+Plus as mentioned above, they should be mostly local helpers, and it&#x27;s probably good to feel a bit dirty using an exported __symbol :)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/856006/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor856216"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A pair of memory-allocation improvements in 5.13</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 13, 2021 18:52 UTC (Thu)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/856216/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+The networking code could then grab a pile of memory, and quickly hand out pages as needed.
+</blockquote>
+<p>
+Why can the networking code hand out pages from a pile more quickly than system memory allocator code?
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/856216/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor856535"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A pair of memory-allocation improvements in 5.13</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 19, 2021 11:58 UTC (Wed)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/856535/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because the pages are DMA-mapped to a specific PCI device. With an IOMMU, this can be an expensive operation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/856535/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2021, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

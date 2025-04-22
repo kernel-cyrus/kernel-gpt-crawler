@@ -1,0 +1,386 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>RCU-safe reference counting [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/93617/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/92806/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/93617/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>RCU-safe reference counting</h1>
+<div class="Byline">[Posted July 14, 2004 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+The "<tt>kref</tt>" mechanism is a simple structure for implementing
+reference-counted objects in the kernel; it was covered here <a
+href="http://lwn.net/Articles/75920/">last March</a>.  At the core of a
+<tt>kref</tt> is an <tt>atomic_t</tt> counter which contains the number of
+outstanding references.  When that counter goes to zero, the object is no longer used
+and can be freed.
+<p>
+The <tt>kref</tt> functions are simple.  Obtaining a reference is done with
+a call to <tt>kref_get()</tt>:
+<p>
+<pre>
+    struct kref *kref_get(struct kref *kref)
+    {
+	WARN_ON(!atomic_read(&amp;kref-&gt;refcount));
+	atomic_inc(&amp;kref-&gt;refcount);
+	return kref;
+    }
+</pre>
+<p>
+Releasing that reference is accomplished with <tt>kref_put()</tt>:
+<p>
+<pre>
+    void kref_put(struct kref *kref)
+    {
+	if (atomic_dec_and_test(&amp;kref-&gt;refcount)) {
+	    kref-&gt;release(kref);
+	}
+    }
+</pre>
+<p>
+The use of atomic types makes these functions safe in multiprocessor or
+preemptive environments; the reference count will always be correct.
+Except, of course, when things go wrong.  Consider the following order of
+operations performed by two kernel threads; they could be running on
+separate processors, or on a preemptive, uniprocessor system:
+<p>
+<center>
+<table>
+<tr><th>Thread 1</th><th>Thread 2</th></tr>
+<tr><td>
+<pre>
+/* In kref_get() */
+WARN_ON(!atomic_read(&amp;kref-&gt;refcount));
+</pre>
+</td><td></td></tr>
+
+<tr><td></td><td>
+<pre>
+kref_put(&amp;kref);
+</pre></td></tr>
+<tr><td>
+<pre>
+atomic_inc(&amp;kref-&gt;refcount);
+return kref;
+</pre></td><td></td></tr>
+</table>
+</center>
+<p>
+The first thread will be left thinking it holds a reference to an object
+which, in fact, has been deleted.  As a general rule, good things cannot be
+expected to result from this situation.  The <tt>kref</tt> code deals with
+this possibility by fiat: simultaneous calls to
+<tt>kref_get()</tt> and <tt>kref_put()</tt> on the same object are not
+allowed.  In practice, this restriction usually requires that these
+operations be called under the protection of a lock somewhere.
+<p>
+
+Developers interested in high-end scalability, however, often try to use
+lock-free algorithms.  Locks can easily become a performance bottleneck as
+the number of threads increases, so, if they can be eliminated, the kernel
+will scale better.  That is the motivation behind the use of techniques
+like <a href="/Articles/22818/">seqlocks</a> and <a
+href="/Articles/37889/">read-copy-update (RCU)</a>.  The locking
+requirement associated with
+the <tt>kref</tt> type makes that type difficult to use with these techniques.
+<p>
+Ravikiran G Thirumalai recently posted a patch entitled "<a
+href="/Articles/93565/">Refcounting of objects part of a lockfree
+collection</a>" which implements a new locking type (called
+<tt>refcount_t</tt>) for dealing with objects managed using no-lock
+techniques.  The explanation goes to great lengths to describe reference
+counting issued when working with RCU, but, in the end, all the patch is
+really doing, via a long path, is making a type which is like the
+<tt>kref</tt>, but which is not subject to the race described above.
+<p>
+<tt>kref_get()</tt>, as currently written, checks the reference count
+first; if that count is zero, the object has already been freed.  The
+current implementation merely complains when this happens; one could argue
+that stronger action is called for.  The real problem, though, is that this
+test and the subsequent incrementing of the reference count are not,
+together, atomic - other actions can come between the two.  Ravikiran's
+patch addresses this issue by coding his <tt>_get()</tt> function
+differently: 
+<p>
+<pre>
+    static inline int refcount_get_rcu(refcount_t *rc)
+    {
+	int c, old;
+	c = atomic_read(&amp;rc-&gt;count);
+	while ( c &amp;&amp; (old = cmpxchg(&amp;rc-&gt;count.counter, c, c+1)) != c) 
+		c = old;
+	return c;
+    }
+</pre>
+<p>
+The core of this function is the call to <tt>cmpxchg()</tt>, which is an
+inline assembly function giving access to the processor's <tt>cmpxchg</tt>
+instruction.  The function prototype looks like:
+<p>
+<pre>
+    int cmpxchg(int *location, int old, int new);
+</pre>
+<p>
+(The actual definition is a little more complex, depending on the real type
+of <tt>location</tt>).  The purpose of this function is to (1)&nbsp;compare
+the contents of <tt>*location</tt> with <tt>old</tt>, (2)&nbsp;if and only
+if the two are the same, assign <tt>new</tt> to <tt>*location</tt>, and
+(3)&nbsp;return the old value.  If <tt>cmpxchg()</tt> returns <tt>old</tt>,
+the operation succeeded; otherwise the value pointed to by
+<tt>location</tt> is unchanged.  The key point is that all of these
+operations are performed in an atomic manner
+<p>
+<tt>cmpxchg()</tt> is, in other words, a form of test-and-set instruction.
+It is used here to increment the reference count in an atomic manner while
+being absolutely sure that nobody else can possibly have seen that count
+reach zero.  When references are obtained in this way, the race described
+above cannot happen.
+<p>
+
+There is still a pitfall, however.  If the reference-counted object were to
+be freed and reused before another thread tried to obtain a reference, that
+thread might see a random "reference count" and think it succeeded.
+Preventing that turn of events is where RCU comes in.  The actual object is
+freed by way of an RCU callback, which cannot happen until every processor
+has scheduled.  If any thread can see a pointer to the object, said object
+will continue to exist, though its reference count may be zero.  After a
+complete quiescence cycle, no threads can see such a pointer, and the
+object can be safely deleted.
+<p>
+One other potential problem is that not all architectures offer a
+<tt>cmpxchg</tt> instruction.  On such systems Ravikiran uses a rather more
+elaborate and unsightly scheme involving a hashed array of spinlocks; see
+the patch if morbid curiosity gets the better of you.
+<p>
+This effort seems worthwhile; when this technique is used for <a
+href="http://lwn.net/Articles/93566/">looking up file descriptors</a>,
+tiobench performance improvements of 13% to 21% are claimed.
+There were objections, however, to the creation of a new
+reference counting API which is very similar to the <tt>kref</tt> API.  As
+a result, the patch is likely to be rewritten to use <tt>kref</tt>s,
+extending that API as need be to supply the required semantics.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#cmpxchg">cmpxchg()</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#kref">kref</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Race_conditions">Race conditions</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Read-copy-update">Read-copy-update</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Reference_counting">Reference counting</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/93617/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor93804"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RCU-safe reference counting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2004 20:32 UTC (Thu)
+                               by <b>dvdeug</b> (guest, #10998)
+                              [<a href="/Articles/93804/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Using the assembly instruction cmpxchg is all fine and dandy if you're running on ix86 or AMD-64. What happens on the other architectures?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/93804/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor93805"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RCU-safe reference counting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2004 20:33 UTC (Thu)
+                               by <b>dvdeug</b> (guest, #10998)
+                              [<a href="/Articles/93805/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Sorry; didn't read the article throughly enough.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/93805/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor93819"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RCU-safe reference counting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2004 22:24 UTC (Thu)
+                               by <b>sjmadsen</b> (guest, #4035)
+                              [<a href="/Articles/93819/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Never mind that cmpxchg() is a spinlock in different clothes.  It is ever so slightly more efficient <br>because taking the lock and the operation protected by the lock are one and the same, and you <br>don't have to free the lock afterwards.<p>Seems like the &quot;rather more elaborate and unsightly scheme involving a hashed array of <br>spinlocks&quot; could have been a single spinlock.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/93819/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor93999"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RCU-safe reference counting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 17, 2004 0:54 UTC (Sat)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/93999/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <i>>Never mind that cmpxchg() is a spinlock in different clothes</i>
+
+<p>I believe it beats a spinlock because the processor can implement it without actually stopping all the other CPUs.  It can go ahead and do the whole operation as if the other CPUs didn't exist, then check whether there had been any conflicting activity by another CPU, and in the unlikely event that there was, try again.  The spinlock requires all the other CPUs (that want that lock) to stop doing work while the one holder runs.
+<p>
+But here, we aren't talking about using cmpxchg() per se instead of a spinlock.  We're talking about using it as part of some RCU logic so that an entire sequence of (lookup, find, and add a reference) can happen at the same time as another thread is destroying the found object.  
+
+<p>Traditionally, that whole sequence would be covered by a spinlock, and two CPUs at a time could not do it, even for different objects.  Nor could any CPU destroy any object while another CPU was in this lookup sequence.  CPUs would be waiting for another CPU to do something that isn't even an actual conflict.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/93999/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor94093"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RCU-safe reference counting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 19, 2004 9:26 UTC (Mon)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/94093/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p><i>Never mind that cmpxchg() is a spinlock in different clothes.</i></p>
+
+<p>Yes and no. It's <b>reuse</b> of existing "spinlock". Each and every access to <b>every</b> byte of RAM on SMP system is covered by "spinlock" anyway - think about cache cogerency! Yes, it's not really implemented as spinlock and there are different implementations of idea but the end result is the same: access to every byte in modern SMP systems is covered by "sort of spinlock" (and if two processors stomp each other feets too often system slows down to a crawl as you can guess). And cmpxchg() is using this feature - that's all. Since <b>each and every access</b> to any variable should be held with such "spinlock" held it's not slower then simple access without cmpxchg() function.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/94093/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2004, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

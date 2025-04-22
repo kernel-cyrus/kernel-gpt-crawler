@@ -1,0 +1,721 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Revisiting the kernel's preemption model, part 2 [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/945422/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/945835/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/945422/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Revisiting the kernel's preemption model, part 2</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 2, 2023</br>
+           </div>
+In <a href="/Articles/944686/">last week's episode</a>, a need to preempt
+kernel code that is executing long-running instructions led to a deeper
+reexamination of how the kernel handles preemption.  There are a number of
+supported preemption modes, varying from "none" (kernel code is never
+preemptible) to realtime (where the kernel is almost always preemptible).
+Making better use of the kernel's preemption machinery looked like a
+possible solution to the immediate problem, but it seems that there are
+better options in store.  In short, kernel developers would like to give
+the scheduler complete control over CPU-scheduling decisions.
+<p>
+<h4>How we got here</h4>
+<p>
+The turn in the discussion was driven by <a
+href="/ml/linux-kernel/87cyyfxd4k.ffs@tglx/">this message</a> from Thomas
+Gleixner, which started with a review of how things got to this point.
+Initially, no preemption of kernel code was supported at all, as was the
+case with older Unix systems.  As problems were observed,
+<tt>cond_resched()</tt> calls were sprinkled into code paths where the
+kernel was observed to (or suspected of) running for too long and causing
+problems.  Each of those calls is a signal to the scheduler that it can
+switch to another thread if need be.
+<p>
+Later, the kernel gained "voluntary preemption", which turned hundreds of
+existing <tt>might_sleep()</tt> calls into additional scheduling points.
+Those calls were placed as a debugging aid to catch cases where a
+potentially sleeping function was called from a non-sleepable context; they
+indicate a place where it is possible to reschedule, but were never meant
+to indicate a <i>good</i> place to reschedule.  These calls were pressed
+into service because they were already there and convenient for this
+purpose.
+<p>
+Later yet, full preemption made the kernel preemptible at arbitrary points,
+and realtime preemption made even (most) code holding locks preemptible.
+<p>
+This progression is, Gleixner said, an example of the wrong way to be
+approaching this problem:
+<p>
+<blockquote class="bq">
+	The approach here is: Prevent the scheduler to make decisions and then
+	mitigate the fallout with heuristics.
+<p>
+	That's just backwards as it moves resource control out of the
+	scheduler into random code which has absolutely no business to do
+	resource control.
+</blockquote>
+<p>
+He pointed out that the realtime preemption work had run into a similar
+problem years ago.  Making kernel code preemptible, even when it is holding
+locks, can be good for latency (which is the point of the realtime work),
+but it can impose a cost in terms of throughput.  When preemption can
+happen at any time, locking contention, in particular, becomes more acute.
+Often, one thread will cause another to become runnable, at which point the
+new thread will preempt the first.  But if the first is holding a lock that
+the new one needs, the result will be an immediate block and another
+context switch.  That hurts performance.
+<p>
+In such cases, it would be better to avoid doing the preemption while the
+first thread is holding the lock.  For the realtime case, this was solved
+through the introduction of <a
+href="https://kernel.googlesource.com/pub/scm/linux/kernel/git/rt/linux-rt-devel/+/refs/tags/v5.9.1-rt20-patches/patches/preempt-lazy-support.patch">"lazy
+preemption"</a>.  This code, which has not landed in the mainline kernel,
+seeks to avoid excessive preemption when (and only when) one non-realtime
+task would preempt another.  If the task that is currently running is
+holding locks, then the scheduler will set a "lazy preempt" flag rather
+than preempting that task immediately.  Once the locks are released, the
+preemption can occur.  This change restored much of the performance that
+had been lost for throughput-oriented tasks, Gleixner said, without hurting
+response time for the realtime tasks.
+<p>
+The problem that is being discussed now is similar: enabling a fully
+preemptible kernel without hurting the performance of throughput-oriented
+tasks, many of which do better with voluntary preemption (or no kernel
+preemption at all).  The solution, Gleixner said, can be a variant of the
+same approach that was taken for the realtime work.
+<p>
+<h4>Lazy preemption for the mainline</h4>
+<p>
+Some brief background may be helpful for the understanding of the proposed
+scheme.  When the kernel is configured for full preemption, it maintains a
+"preemption count" that, in short, tracks how many things are preventing
+preemption of the current task at any time.  Its operation is described in
+<a href="/Articles/831678/">this article</a>, which includes this
+diagram:
+<p>
+<blockquote>
+<img src="https://static.lwn.net/images/2020/preempt-count.svg" class="photo"
+width=450px alt="[preempt_count]" border=0>
+</blockquote>
+<p>
+Whenever something happens to prevent preemption, such as a call to
+<tt>preempt_disable()</tt> or the arrival of an interrupt, the appropriate
+subfield of the preemption count is incremented.  When that condition no
+longer holds — <tt>preempt_enable()</tt> is called, for example — that
+count is decremented.  Whenever the count drops to zero, the kernel knows
+that it can jump into the scheduler to decide which task has the strongest
+claim on the CPU at that moment.
+<p>
+Calling into the scheduler is expensive, though, so it is best avoided if
+there is no need to change the running task.  Avoiding those calls is the
+purpose of the "reschedule needed" bit.  That bit has an inverted sense; if
+it is set, then rescheduling is <i>not</i> needed.  As long as that bit is
+set, the preempt count will not be zero, and no calls into the scheduler
+will be made.  When something happens that calls for rescheduling, such as
+waking a higher-priority task, the bit can be cleared and, as soon as the
+rest of the count drops to zero, the scheduler will be invoked.
+<p>
+In a non-preemptive kernel, about the only thing that can force
+rescheduling is the expiration of the current task's time slice.  This
+behavior can be good for a throughput-oriented workload, allowing tasks to
+run uninterrupted for relatively long periods of time.  There are limits,
+though, and letting tasks run beyond their time slice can lead to latency
+problems.  Long-running kernel code can cause that to happen; avoiding this
+problem is the motivation for placing calls to <tt>cond_resched()</tt> in
+long-running kernel functions.  Since the kernel cannot be preempted, it
+must choose to give up the CPU in such situations.
+<p>
+Gliexner's proposal is meant to preserve this behavior in a fully
+preemptible kernel.  In this world, the existing no-preemption and
+voluntary-preemption modes would be removed from the scheduler; only full
+preemption would remain.  The maintenance of the preempt count would happen
+always, as it does with the <tt>PREEMPT_DYNAMIC</tt> mode used by most
+distributions now.  But there would be one little tweak: if the system is
+configured to favor throughput, code paths that would normally clear the
+"reschedule needed" bit would only do so if the current time slice is
+exhausted.  Otherwise, a separate "reschedule eventually" bit, that is not
+contained within the preempt count, would be set instead.
+<p>
+This change will cause the current task to continue executing for as long
+as it has some of its time slice left, even if there is another task with
+the priority to preempt it.  There are just a couple of places where that
+can change; one is on return to user space from a system call, where
+preemption can occur even in current no-preemption kernels.  The
+"reschedule eventually" bit will be checked there, and might result in a
+switch to a different task.
+<p>
+The other point where a task might be preempted is when the scheduler
+interrupt happens; if the scheduler notices that the time slice has
+expired, it will check the "reschedule eventually" bit.  If that bit is
+set, then the "reschedule needed" bit will be cleared, the preempt count
+will go to zero, and preemption will happen at the next opportunity.
+<p>
+If, instead, the system is configured for low latency, as might be done for
+desktop use, for example, the "reschedule eventually" bit will not be used
+and the kernel will be fully preemptible.
+<p>
+Reworking the scheduler in this way, Gleixner said, would allow the removal
+of a lot of code that implements the other preemption modes (and which,
+seemingly, is not heavily used).  It would allow the removal of something
+like 1,400 <tt>cond_resched()</tt> calls, and would put the scheduler fully
+in charge of CPU-scheduling decisions.  If this solution can be made to
+work, it looks like a significant improvement over what the kernel does
+now.
+<p>
+<h4>Making it work</h4>
+<p>
+Can it be made to work?  Gleixner, after having bashed out a <a
+href="/ml/linux-kernel/8734z8v1lo.ffs@tglx/">proof-of-concept
+implementation</a> and measured its performance, thinks so: "<q>If this
+concept holds, which I'm pretty convinced of by now, then this is an
+opportunity to trade ~3000 lines of unholy hacks for about 100-200 lines of
+understandable code</q>".  Linus Torvalds <a
+href="/ml/linux-kernel/CAHk-=wix=nrfi2LkSXBvBSrTHgEAMYQebUfWXq8Q-PtH0x_SdQ@mail.gmail.com/">agreed</a>:
+"<q>I think you more than proved the concept</q>".
+<p>
+There is, of course, some ground to cover between a proof-of-concept
+implementation and a reworked scheduler that can be part of a production
+kernel release.  A couple of obstacles (at least) lie in the way.  One is
+that there are four architectures (alpha, hexagon, m68k, and um (user-mode
+Linux)) that do not support the preempt-count machinery; as things stand,
+they would be unable to support the new scheduler.  Matthew Wilcox was
+quick to <a
+href="/ml/linux-kernel/ZQmbhoQIINs8rLHp@casper.infradead.org/">suggest</a>
+that this problem qualifies those architectures for removal, but there is
+probably not much in the way of adding preempt-count support instead.
+<p>
+The other problem is that the CPU scheduler is a subtle and complex beast,
+and Gleixner is not actually a scheduler developer.  There will surely be
+performance issues that will emerge from a change like this, and they will
+require the right sorts of skills to resolve.  Gleixner has <a
+href="/ml/linux-kernel/87jzshhexi.ffs@tglx/">let it be known</a> that he is
+not the person with those skills:
+<p>
+<blockquote class="bq">
+	That's as much as I wanted to demonstrate and I'm not going to
+	spend more cycles on it as I have already too many other things on
+	flight and the resulting scheduler woes are clearly outside of my
+	expertise.
+<p>
+	Though definitely I'm putting a permanent NAK in place for any
+	attempts to duct tape the preempt=NONE model any further by
+	sprinkling more cond*() and whatever warts around.
+</blockquote>
+<p>
+So, in other words, the path to a simpler and better scheduler has been
+laid out, but to get there somebody else is going to have to do the work to
+push the job through to completion.  As of this writing, nobody has stepped
+forward to take this role.  That will likely change, but one should not
+expect to see a reworked scheduler in the immediate future; this is the
+kind of change that can take a while to settle into a stable solution.
+When that happens, though, the payoff should be significant.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Preemption">Preemption</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Scheduler-Latency">Scheduler/Latency</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/945422/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor946212"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption model, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2023 17:18 UTC (Mon)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/946212/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The diagram in the article has a transparent background, which makes it unreadable for anyone using a dark background color on LWN.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/946212/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor946407"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">transparency</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 3, 2023 23:51 UTC (Tue)
+                               by <b>bnorris</b> (subscriber, #92090)
+                              [<a href="/Articles/946407/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's this, which can be opened or downloaded separately to work around the problem: <a href="https://static.lwn.net/images/2020/preempt-count.svg">https://static.lwn.net/images/2020/preempt-count.svg</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/946407/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor946435"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">transparency</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 4, 2023 10:31 UTC (Wed)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/946435/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In Firefox, "Open image in new tab" from the image's context menu works well too.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/946435/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor946219"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption model, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2023 18:21 UTC (Mon)
+                               by <b>Manifault</b> (guest, #155796)
+                              [<a href="/Articles/946219/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is a no-brainer improvement in my book. The model we currently have where a task is considered non-preemptible by default for CONFIG_PREEMPT_NONE or CONFIG_PREEMPT_VOLUNTARY, rather than requiring it to communicate to the scheduler when it should try (keyword "try") to avoid being preempted, is fundamentally backwards and error prone. It's why we see the never-ending stream of "add cond_resched() call to avoid hogging CPU" patches flowing by. If it's a bug if we don't have a cond_resched() somewhere that would otherwise hog a core and starve important kthreads like ksoftirqd, then let's just flip the polarity and force callers to specify when they want the scheduler to try to avoid preemption for performance reasons.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/946219/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor946229"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption model, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2023 19:36 UTC (Mon)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/946229/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If my reading of the thread is correct, particularly this message by Ingo Molnar: <a href="https://lwn.net/ml/linux-kernel/ZQlV5l4pbKunQJug@gmail.com/">https://lwn.net/ml/linux-kernel/ZQlV5l4pbKunQJug@gmail.com/</a>  there wouldn't even be a need for some runtime/compile time knob to select between throughput-oriented and low-latency system modes as described in the article. But rather the lazy preemption would apply only to SCHED_OTHER (and IDLE and BATCH, not that I've ever seen anything use those) tasks with identical nice values, whereas higher priority tasks would preempt ASAP. So best of both worlds, in a sense.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/946229/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor946226"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption model, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2023 20:41 UTC (Mon)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/946226/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It feels like it would be possible to go a step further, and have tasks designated as latency-sensitive or throughput-sensitive, and have only latency-sensitive tasks preempt other tasks (and make them expend their time slice faster if they do). The system could then be configured to make tasks default to latency or throughput, but also able to give different tasks at the same priority different benefits.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/946226/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor946265"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption model, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 3, 2023 4:44 UTC (Tue)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/946265/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; It feels like it would be possible to go a step further, and have tasks designated as latency-sensitive or </span><br>
+<span class="QuotedText">&gt; throughput-sensitive, and have only latency-sensitive tasks preempt other tasks (and make them expend their</span><br>
+<span class="QuotedText">&gt; time slice faster if they do).</span><br>
+<p>
+An obvious way to perform such designations is via the deadline scheduler.   The fact that deadline scheduling is scarcely mentioned in discussions like this article confirms the suspicion that it is usable only in a limited set of contexts.   Perhaps deadline scheduling is really only workable for RTOSes or systems with fewer tasks, like guest OSes running on top of a hypervisor.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/946265/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor946250"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption model, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2023 20:47 UTC (Mon)
+                               by <b>wildea01</b> (subscriber, #71011)
+                              [<a href="/Articles/946250/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For those who weren't at Kernel Recipes last week, Thomas gave a great presentation about this work there. The recording is available on YouTube and complements the article nicely:<br>
+<p>
+<a href="https://www.youtube.com/live/OUhB9-v-2r8?t=2h4m45s">https://www.youtube.com/live/OUhB9-v-2r8?t=2h4m45s</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/946250/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995254"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption model, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2024 9:34 UTC (Wed)
+                               by <b>meted</b> (subscriber, #168857)
+                              [<a href="/Articles/995254/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; For those who weren't at Kernel Recipes last week, Thomas gave a great presentation about this work there. The recording is available on YouTube</span><br>
+<span class="QuotedText">&gt; and complements the article nicely:</span><br>
+<span class="QuotedText">&gt; <a href="https://www.youtube.com/live/OUhB9-v-2r8?t=2h4m45s">https://www.youtube.com/live/OUhB9-v-2r8?t=2h4m45s</a></span><br>
+<p>
+The link says the "video has been removed". Could you post the presentations title so, who ever is curious can search for it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995254/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor946271"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption model, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 3, 2023 7:52 UTC (Tue)
+                               by <b>terminus</b> (subscriber, #49129)
+                              [<a href="/Articles/946271/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  So, in other words, the path to a simpler and better scheduler has been laid out, but to get there somebody else is going to have to do the work to push the job through to completion. </span><br>
+<p>
+Working on a RFC series to do just that. Thomas' approach (obviously) works, but as always there are kinks to clean up.<br>
+<p>
+cond_resched(), in particular, has accumulated a variety of functionality almost in the manner of the fleas in the poem:<br>
+<p>
+  "Great fleas have little fleas upon their backs to bite 'em, <br>
+   And little fleas have lesser fleas, and so ad infinitum."<br>
+<p>
+As you note, keeping the preempt-count takes care of much of this but there are some tricky places, in particular RCU.<br>
+<p>
+Cheers<br>
+Ankur<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/946271/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor946342"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption model, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 3, 2023 15:21 UTC (Tue)
+                               by <b>PaulMcKenney</b> (<b>&#x272D; supporter &#x272D;</b>, #9624)
+                              [<a href="/Articles/946342/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On RCU, indeed!  It is very important to provide the occasional quiescent state to RCU, even if there is only one runnable task on the CPU in question. <br>
+<p>
+I was initially concern about nohz_full CPUs, but after more discussion with Frederic, this might actually be OK. If there is an RCU grace period in progress, RCU will restart the scheduler tick interrupt, otherwise maybe no one cares. Maybe. ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/946342/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor946580"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption model, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 5, 2023 0:42 UTC (Thu)
+                               by <b>tglx</b> (subscriber, #31301)
+                              [<a href="/Articles/946580/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+All of that is important, but can we please have the technical discussions on LKML instead of hand-waving here?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/946580/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor989665"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">follow up?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2024 18:49 UTC (Tue)
+                               by <b>meyert</b> (subscriber, #32097)
+                              [<a href="/Articles/989665/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm interested to know if this idea did make it to next or any other tree, I'm curious <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989665/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor989666"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">follow up?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2024 18:57 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/989666/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      There was a version of the lazy preemption patches posted in May.  Since then I've seen bits of conversation that suggest that the idea is still alive, but I'm not sure how actively it is being developed at the moment.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989666/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor989721"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">follow up?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2024 10:39 UTC (Wed)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/989721/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There was a presentation at the OSPM conference in June: <a href="https://www.youtube.com/watch?v=cVlT1CsRI18">https://www.youtube.com/watch?v=cVlT1CsRI18</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989721/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

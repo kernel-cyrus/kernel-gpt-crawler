@@ -1,0 +1,562 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Per-call-site slab caches for heap-spraying protection [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/986174/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/985784/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/986174/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Per-call-site slab caches for heap-spraying protection</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 20, 2024</br>
+           </div>
+One tactic often used by attackers set on compromising a system is <a
+href="https://en.wikipedia.org/wiki/Heap_spraying">heap spraying</a>; in
+short, the attacker fills as much of the heap as possible with crafted data
+in the hope of getting the target system to use that data in a bad way.  If
+heap spraying can be blocked, attackers will lose an important tool.  The
+kernel has some heap-spraying defenses now, including the <a
+href="/Articles/965837/">dedicated bucket allocator</a> merged for the
+upcoming 6.11 release, but its author, Kees Cook, thinks that more can be
+done.
+<p>
+A heap-spraying attack can be carried out by allocating as many objects as
+possible and filling each with data of the attacker's choosing.  If the
+kernel can be convinced to use that data, perhaps as the address of a
+function to call, then the attacker can gain control.  Heap spraying is not
+a vulnerability itself, but it can ease the exploitation of an actual
+vulnerability, such as a use-after-free bug or the ability to overwrite a
+pointer.
+
+The kernel's <tt>kmalloc()</tt> function (along with several variants)
+allocates memory from the heap.  Since <tt>kmalloc()</tt> is used heavily
+throughout the kernel, any call site that can be used for heap spraying can
+potentially be used to exploit a vulnerability in a distant, unrelated part
+of the kernel.  That makes the <tt>kmalloc()</tt> heap a tempting target
+for attackers.
+<p>
+<tt>kmalloc()</tt> makes its allocations from a set of "buckets" of
+fixed-sized objects; most (but not all) of those sizes are powers of two.
+So, for example, a 48-byte allocation request will result in the allocation
+of a 64-byte object.  The structure behind <tt>kmalloc()</tt> is, in a
+sense, an array of heaps, each of which is used for allocations of a given
+size range.  This separation can make heap spraying attacks easier, since
+it is not necessary to overwrite the entire heap to target an object of a
+given size.
+<p>
+The dedicated bucket allocator creates a separate set of buckets for
+allocation sites that are deemed to present an especially high
+heap-spraying risk.  For example, any allocation that can be instigated
+from user space and filled with user-supplied data would be a candidate for
+a dedicated set of buckets.  Then, even if the attacker manages to
+thoroughly spray that heap, it will not affect any other allocations; the
+attacker's carefully selected data cannot be used to attack any other part
+of the kernel.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+The way to get the most complete protection from heap spraying would be to
+create a set of dedicated buckets for every <tt>kmalloc()</tt> call
+site.  That would be expensive, though; each set of buckets occupies a fair
+amount of memory.  Inefficiency at that level is the sort of tradeoff that
+kernel developers tend to view with extreme skepticism; creating a set of
+buckets for every call site simply is not going to happen.
+<p>
+<a href="/ml/all/20240809072532.work.266-kees@kernel.org">This new patch
+series</a> from Cook is built around one of those observations that is
+obvious in retrospect: most <tt>kmalloc()</tt> call sites request objects
+of a fixed size that will never change.  Often that size (the size of a
+specific structure, for example) is known at compile time.  In such cases,
+providing the call site with a single dedicated slab for the size that is
+needed would give an equivalent level of protection against heap-spraying
+attacks.  There is no need to provide buckets for all of the other
+sizes; they would never be used.
+<p>
+The only problem with that idea is that there are thousands of
+<tt>kmalloc()</tt> call sites in the kernel.  Going through and examining
+each one would be a tedious and possibly error-prone task, that
+would result in a lot of code churn.  But the compiler knows whether the
+size parameter passed to any given <tt>kmalloc()</tt> call is a
+compile-time constant or not; all that is needed is a way to communicate
+that information to the call itself.  If that information were accompanied
+by something that identified the call site, the slab allocator could set up
+dedicated slabs for the call sites where it makes sense.
+<p>
+So the problem comes down to getting that information to <tt>kmalloc()</tt>
+in an efficient way.  Cook's approach is an interesting adaptation of the
+<a href="/Articles/932402/">code-tagging framework</a> that was merged for
+the 6.10 release.  Code tagging is part of the memory-allocation profiling
+subsystem, which is meant to help find allocation-related bugs; it ties
+allocations to the call site that requested them, so developers can find,
+for example, the source of a memory leak.
+<p>
+Code tagging was not really meant as a kernel-hardening technology, but
+it does provide the call-site information needed here.  Cook's series
+starts by augmenting the tag information stored for each call site with an
+indicator of whether the allocation size is constant and, if so, what that
+size is.  That information will be available to the slab allocator when the
+<tt>kmalloc()</tt> call is made.
+<p>
+If a given allocation request is at the <tt>GFP_ATOMIC</tt> level, it will
+be handled in the usual way to avoid adding any extra allocations to that
+path.  Otherwise, though, the allocator will check whether that call site
+uses a constant size; if so, a dedicated slab will be created for that site
+and used to satisfy the allocation request (and all that follow).  If the
+size is <i>not</i> constant, then a full set of buckets will be created
+instead.  Either way, the decision will be stored in the code tag to speed
+future calls.  It is worth noting that this setup is not done for any given
+call site until the first call is made, meaning that it is not performed
+for the many <tt>kmalloc()</tt> call sites that will never execute in any
+given kernel.
+<p>
+If this series is merged, the kernel will have three levels of defense
+against heap-spraying attacks.  The <a href="/Articles/938637/">randomized
+slab option</a>, merged for 6.6, creates 16 sets of slab buckets, then
+assigns each call site to one set randomly.  Its memory overhead is
+relatively low, but the protection is probabilistic — it reduces the chance
+that an attacker can spray the target heap, but does not eliminate it.  The
+dedicated-buckets option provides stronger protection, but is limited by
+the need to explicitly identify risky call sites and isolate them manually.
+This new option, instead, provides strong protection against heap spraying,
+but it will inevitably increase the memory overhead of the slab allocator.
+<p>
+The amount of that overhead will depend on the workload being run.  For an
+unspecified distribution kernel, Cook reported that the number of slabs
+reported in <tt>/proc/slabinfo</tt> grew by a factor of five or so.  Should
+the series land in the mainline, it will be up to distributors to decide
+whether to enable this option or not.  When a kernel is going to run on a
+system that is at high risk of heap-spraying attacks, though, that may
+prove to be an easy decision to make.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Slab_allocators">Memory management/Slab allocators</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Kernel_hardening">Security/Kernel hardening</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/986174/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor986464"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">AUTOSLAB ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2024 14:51 UTC (Tue)
+                               by <b>Lionel_Debroux</b> (subscriber, #30014)
+                              [<a href="/Articles/986464/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This reminds me of <a href="https://grsecurity.net/how_autoslab_changes_the_memory_unsafety_game">https://grsecurity.net/how_autoslab_changes_the_memory_un...</a> , from 2021:<br>
+"<br>
+Different from quarantining freed kernel heap objects, grsecurity developed an isolation-based approach where each generic allocation site (calling to k*alloc*) has its own dedicated memory caches. As such, two different object types will be isolated from each other since they are allocated from their own dedicated memory caches.<br>
+"<br>
+The article lists vulnerabilities and benchmarks which can be interesting for evaluating implementations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986464/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986666"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">AUTOSLAB ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2024 18:41 UTC (Wed)
+                               by <b>kees</b> (subscriber, #27264)
+                              [<a href="/Articles/986666/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+All I know is what they've written in their blog posts since "Grsecurity is a commercial product and is distributed only to paying customers."[1]<br>
+<p>
+The idea of separating allocation by type is not new[2] (though doing it per call site is easier). Getting Linux to a safer position to defend against heap UAF is going to take a lot of steps, and this series is just one of many needed steps (see my other comment further down).<br>
+<p>
+[1] <a href="https://perens.com/2017/06/28/warning-grsecurity-potential-contributory-infringement-risk-for-customers/">https://perens.com/2017/06/28/warning-grsecurity-potentia...</a><br>
+[2] <a href="https://chromium.googlesource.com/chromium/src/+/master/base/allocator/partition_allocator/PartitionAlloc.md">https://chromium.googlesource.com/chromium/src/+/master/b...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986666/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986670"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">AUTOSLAB ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2024 22:52 UTC (Wed)
+                               by <b>Lionel_Debroux</b> (subscriber, #30014)
+                              [<a href="/Articles/986670/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Since you're here: I look forward to reading your analysis and especially benchmarking (I'd expect the latter to be requested as a prerequisite to integrating the patches anyway ?) of your implementation, inspired by the blog post I linked ;)<br>
+<p>
+This sentence you quoted from that questionable post by Bruce Perens, published several weeks after PaX+grsecurity went commercial-only, _might_ have been correct at the time _if_ nobody had redistributed the patches yet... however, I can only think of it as factually incorrect since, at the latest, December 2018, when one version was redistributed to the general public, showcasing the improved defenses and highlighting mainline's stable backporting process missing a sizable number of important fixes (FTR, I did help with the latter).<br>
+Further making that sentence factually incorrect in 2024 is the fact that some grsecurity versions more than two years newer than that one, and four years (!) newer than the latest non-commercial ones, have been publicly available for download and usage - under the terms of the GPLv2, obviously - for years. AUTOSLAB is there, as is e.g. RESPECTRE.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986670/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986935"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">AUTOSLAB ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2024 23:49 UTC (Thu)
+                               by <b>kees</b> (subscriber, #27264)
+                              [<a href="/Articles/986935/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Once the new kmalloc_obj() API is finalized I'll make time to get some benchmarking done on this series for the next version. If you or anyone else would like to participate in this effort, I would welcome such an analysis!<br>
+<p>
+As far as inspiration, this series is not trying to implement what AUTOSLAB claims to do. The implementation goals come from all over the place, including MTE, kCTF patches, PartitionAlloc, the XNU kmalloc_type allocator, the GrapheneOS hardened_malloc, etc. Heap defense research is hardly unique to grsecurity. :)<br>
+<p>
+As for the Perens article quote being "factually incorrect", is grsecurity no longer a commercial product? Regardless, random monolithic source leaks is hardly useful for making robust upstream improvements. Besides, Linux has moved away from compiler plugins -- we've been driving language extensions directly in Clang and GCC so the entire Open Source ecosystem can benefit, and then refactoring Linux itself to gain better language robustness and hardening coverage.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986935/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986943"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">AUTOSLAB ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2024 8:11 UTC (Fri)
+                               by <b>Lionel_Debroux</b> (subscriber, #30014)
+                              [<a href="/Articles/986943/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From years of browsing through the PaX &amp; grsecurity patches before 2017, less so afterwards, I was usually able to quickly understand which protection the given hunks dealt with. While some of the protections, for instance KERNEXEC and MEMORY_UDEREF (both among the 5-6 defenses which foiled the implementations of most Linux exploits mentioned on LWN back in the day, without requiring SMEP/SMAP/PXN/PAN/equivalent hardware capabilities which were still scarce in 2017) are largely all-or-nothing, many bits related to e.g. constification and staticification of ops structs, structure layout randomization, or CFI, can be used to make robust upstream improvements. If people - preferably persons actually paid for that task, instead of relying on unpaid volunteers working in their spare time - do it, that is...<br>
+<p>
+You're mentioning moving away from infrastructure (compiler plugins) which has made it possible to provide ongoing support for a wide range of compiler versions for a decade or so, in order to replace it by built-in implementations of a subset of the capabilities provided by compiler plugins into only the newest and future compiler versions, while producing crippled kernel builds on compiler versions which don't support these newfangled extensions - i.e. most of them.<br>
+It's an interesting approach, which certainly has upsides beyond Linux (just like the GCC Rust efforts, which Open Source Security Inc. has been one of the very few entities providing actual funding to), if people start to use these language extensions. Their approach is arguably more practical, though. And they can still pull it as a tiny company, which has nowhere remotely near the resources any of the large Linux companies has access to.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986943/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor986530"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimization opportunity?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2024 20:10 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/986530/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This can be an optimization opportunity by skipping the slab search. Even maybe allocating them statically during the kernel compilation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986530/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986555"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimization opportunity?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2024 0:56 UTC (Wed)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/986555/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A further optimisation is that if the kmalloc size is, say, 576 bytes, you can get 7 objects per 4KiB page instead of rounding up to the 1KiB size and getting only 4 objects per page.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986555/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986577"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimization opportunity?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2024 7:33 UTC (Wed)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/986577/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wouldn't you need more information on possible alignment constraints to see if that is possible?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986577/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986583"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimization opportunity?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2024 8:20 UTC (Wed)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/986583/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not generally, I think, more than ARCH_KMALLOC_MINALIGN alignment isn't guaranteed in the first place. That might be high, but 576 is 9*64, so packing them has 64-byte alignment already. I don't think many architectures have more than that?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986583/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor986664"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimization opportunity?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2024 18:24 UTC (Wed)
+                               by <b>kees</b> (subscriber, #27264)
+                              [<a href="/Articles/986664/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, and I'm hoping to solve _that_ problem with another series to get type information (and therefore alignment needs), by replacing the existing code pattern of "void *" assignment into an allocation wrapper macro:<br>
+<p>
+<a href="https://lore.kernel.org/lkml/20240807235433.work.317-kees@kernel.org/">https://lore.kernel.org/lkml/20240807235433.work.317-kees...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986664/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor986728"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kalloc_type</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2024 1:09 UTC (Thu)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/986728/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Compare and contrast with Apple's approach to kernel heap partitioning, which is more like the randomized slab approach, but using struct layout information to group together types that are less dangerous if confused with each other:<br>
+<p>
+<a href="https://security.apple.com/blog/towards-the-next-generation-of-xnu-memory-safety/">https://security.apple.com/blog/towards-the-next-generati...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986728/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986934"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kalloc_type</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2024 23:19 UTC (Thu)
+                               by <b>kees</b> (subscriber, #27264)
+                              [<a href="/Articles/986934/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, this is why I was excited about the codetag infrastructure. Much like Xnu's _KALLOC_TYPE_DEFINE, Linux can start recording much more information about allocation sites and start building a lot more logic into choosing how to do additional hardening. Beyond just the size info in my PoC series, we can record alignment, type signatures (if we want to go that way), etc.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986934/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

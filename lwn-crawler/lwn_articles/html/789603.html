@@ -1,0 +1,1276 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A ring buffer for epoll [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/789603/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/789862/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/789603/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A ring buffer for epoll</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 30, 2019</br>
+           </div>
+The set of system calls known collectively as <a
+href="http://man7.org/linux/man-pages/man7/epoll.7.html">epoll</a> was
+designed to make polling for I/O events more scalable.  To that end, it
+minimizes the amount of setup that must be done for each system call and
+returns multiple events so that the number of calls can also be minimized.
+But that turns out to still not be scalable enough for some users.  The
+response to this problem, in the form of <a
+href="/ml/linux-kernel/20190516085810.31077-1-rpenyaev@suse.de/">this patch
+series</a> from Roman Penyaev, takes a familiar form: add yet another
+ring-buffer interface to the kernel.
+<p>
+The <tt>poll()</tt> and <tt>select()</tt> system calls can be used to wait
+until at least one of a set of file descriptors is ready for I/O.  Each
+call, though, requires the kernel to set up an internal data structure so
+that it can be notified when any given descriptor changes state.  Epoll
+gets around this by separating the setup and waiting phases, and keeping
+the internal data structure around for as long as it is needed.
+<p>
+
+An application starts by calling <a
+href="http://man7.org/linux/man-pages/man2/epoll_create1.2.html"><tt>epoll_create1()</tt></a>
+to create a file descriptor to use with the subsequent steps.  That call,
+incidentally, supersedes <tt>epoll_create()</tt>; it replaces an unused
+argument with a flags parameter.  Then <tt><a
+href="http://man7.org/linux/man-pages/man2/epoll_ctl.2.html">epoll_ctl()</a></tt>
+is used to add individual file descriptors to the set monitored by epoll.
+Finally, a call to <tt><a
+href="http://man7.org/linux/man-pages/man2/epoll_wait.2.html">epoll_wait()</a></tt>
+will block until at least one of the file descriptors of interest has
+something to report.  This interface is a bit more work to use than
+<tt>poll()</tt>, but it makes a big difference for applications that are
+monitoring huge numbers of file descriptors.
+<p>
+That said, it would seem that there is still room for doing things better.
+Even though epoll is more efficient than its predecessors, an application
+still has to make a system call to get the next set of file descriptors
+that are ready for I/O.  On a busy system, where there is almost always
+something that is needing attention, it would be more efficient if there
+were a way to get new events without calling into the kernel.  That is
+where Penyaev's patch set comes in; it creates a ring buffer shared between
+the application and the kernel that can be used to transmit events as they
+happen. 
+<p>
+<h4>epoll_create() — the third time is the charm</h4>
+<p>
+The first step for an application that wishes to use this mechanism is to
+tell the kernel that polling will be used and how big the ring
+buffer should be.  Of course, <tt>epoll_create1()</tt> does not have a
+parameter that can be used for the size information, so it is necessary to
+add <tt>epoll_create2()</tt>:
+<p>
+<pre>
+    int epoll_create2(int flags, size_t size);
+</pre>
+<p>
+There is a new flag, <tt>EPOLL_USERPOLL</tt>, that tells the kernel to use
+a ring buffer to communicate events; the <tt>size</tt> parameter says how
+many entries the ring buffer should hold.  This size will be rounded up to
+the next power of two; the result sets an upper bound on the number of file
+descriptors that this epoll instance will be able to monitor.  
+A maximum of 65,536 entries is
+enforced by the current patch set.
+<p>
+File descriptors are then added to the polling set in the usual way with
+<tt>epoll_ctl()</tt>.  There are some restrictions that apply here, though,
+since some modes of operation are not compatible with user-space polling.
+In particular, every file descriptor must request edge-triggered behavior
+with the <tt>EPOLLET</tt> flag.  Only one event will be added to the ring
+buffer when a file descriptor signals readiness; continually adding events
+for level-triggered behavior clearly would not work well.  The
+<tt>EPOLLWAKEUP</tt> flag (which can be used to prevent system suspend
+while specific events are being processed) does not work in this mode;
+<tt>EPOLLEXCLUSIVE</tt> is also not supported.
+<p>
+Two or three separate <tt>mmap()</tt> calls are required to map the ring
+buffer into 
+user space.  The first one should have an offset of zero and a length of
+one page; it will yield a page containing this structure:
+<p>
+<pre>
+    struct epoll_uheader {
+	u32 magic;          /* epoll user header magic */
+	u32 header_length;  /* length of the header + items */
+	u32 index_length;   /* length of the index ring, always pow2 */
+	u32 max_items_nr;   /* max number of items */
+	u32 head;           /* updated by userland */
+	u32 tail;           /* updated by kernel */
+
+	struct epoll_uitem items[];
+    };
+</pre>
+<p>
+
+The <tt>header_length</tt> field, somewhat confusingly, contains the length of
+both the <tt>epoll_uheader</tt> structure and the <tt>items</tt> array.  As
+seen in <a
+href="https://github.com/rouming/test-tools/blob/master/userpolled-epoll.c">this
+example program</a>, the intended use pattern appears to be that the
+application will map the header structure, get the real length, unmap the
+just-mapped page, then remap it using
+<tt>header_length</tt> to get the full <tt>items</tt> array.
+<p>
+One might expect that <tt>items</tt> is the ring buffer, but there is a
+layer of indirection used here.  Getting at the actual ring buffer requires
+calling <tt>mmap()</tt> another time with <tt>header_length</tt> as the
+offset and the <tt>index_length</tt> header field as the length.  The
+result will be an array of integer indexes into the <tt>items</tt> array
+that functions as the real ring buffer.
+<p>
+The actual items used to indicate events are represented by this structure:
+<p>
+<pre>
+    struct epoll_uitem {
+	__poll_t ready_events;
+	__poll_t events;
+	__u64 data;
+    };
+</pre>
+<p>
+Here, <tt>events</tt> appears to be the set of events that was requested
+when <tt>epoll_ctl()</tt> was called, and <tt>ready_events</tt> is the set
+of events that has actually happened.  The <tt>data</tt> field comes
+through directly from the <tt>epoll_ctl()</tt> call that added this file
+descriptor.
+<p>
+Whenever the <tt>head</tt> and <tt>tail</tt> fields differ, there is at
+least one event to be consumed from the ring buffer.  To consume an event,
+the application should read the entry from the index array at
+<tt>head</tt>; this read should be performed in a loop until a non-zero
+value is found there.  The loop, evidently, is required to wait, if
+necessary, until the kernel's write to that entry is visible.  The value
+read is an index into the <tt>items</tt> array — almost.  It is actually
+the index plus one.  The data should be copied from the entry and
+<tt>ready_events</tt> set to zero; then the <tt>head</tt> index should be
+incremented.
+<p>
+So, in a cleaned up form, code that reads from the
+ring buffer will look something like this:
+<p>
+<pre>
+    while (header-&gt;tail == header-&gt;head)
+        ;  /* Wait for an event to appear */
+    while (index[header-&gt;head] == 0)
+        ;  /* Wait for event to really appear */
+    item = header-&gt;items + index[header-&gt;head] - 1;
+    data = item-&gt;data;
+    item-&gt;ready_events = 0;  /* Mark event consumed */
+    header-&gt;head++;
+</pre>
+<p>
+In practice, this code is likely to be using C atomic operations rather
+than direct reads and writes, and <tt>head</tt> must be incremented in a
+circular fashion.  But hopefully the idea is clear.
+<p>
+Busy-waiting on an empty ring buffer is obviously not ideal.  Should the
+application find itself with nothing to do, it can still call
+<tt>epoll_wait()</tt> to block until something happens.  This call will
+only succeed, though, if the <tt>events</tt> array is passed as
+<tt>NULL</tt>, and <tt>maxevents</tt> is set to zero; in other words,
+<tt>epoll_wait()</tt> will block, but it will not, itself, return any
+events to the caller.  It will, though, helpfully return <tt>ESTALE</tt> to
+indicate that there are events available in the ring buffer.
+<p>
+This patch set is in its third revision, and there appears to be little
+opposition to its inclusion at this point.  The work has not yet found its
+way into linux-next, but it still seems plausible that it could be deemed
+ready for the 5.3 merge window.
+<p>
+<h4>Some closing grumbles</h4>
+<p>
+Figuring out the above interface required a substantial amount of reverse
+engineering of the code.  This is a rather complex new API, but it
+is almost entirely undocumented; that will make it hard to use, but the
+lack of documentation also makes it hard to review the API in the first
+place.  It is doubtful that anybody beyond the author has written any code
+to use this API at this point.  Whether the development community will
+fully understand this API before committing to it is far from clear.
+<p>
+Perhaps the saddest thing, though, is that this will be yet another of many
+ring-buffer interfaces in the kernel.  Others include perf events, ftrace,
+io_uring, <tt>AF_XDP</tt> and, doubtless, others that don't come
+immediately to mind.  Each of these interfaces has been created from
+scratch and must be understood (and consumers implemented) separately by user-space
+developers.  Wouldn't it have been nice if the kernel had defined a set of
+standards for ring buffers shared with user space rather than creating
+something new every time?  One cannot blame the current patch set for this
+failing; that ship sailed some time ago.  But it does illustrate a
+shortcoming in how Linux kernel APIs are designed; they seem doomed to
+never fit into a coherent and consistent whole.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Epoll">Epoll</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/789603/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor789891"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2019 17:03 UTC (Thu)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/789891/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm really confused. Why wouldn't we just use the AIO poll interface?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789891/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor789956"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 5:42 UTC (Fri)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/789956/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Too much overhead. If there's a continuous stream of ready file descriptors you want no system calls. This does it.<br>
+<p>
+Would be even less overhead if the kernel had a single sensible ring buffer implementation. This is not.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789956/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor790047"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2019 7:15 UTC (Sat)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/790047/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The event ring buffer can be accessed from user space without invoking io_getevents.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790047/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor789892"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2019 17:14 UTC (Thu)
+                               by <b>bjorntopel</b> (subscriber, #80345)
+                              [<a href="/Articles/789892/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Regarding the "Some closing grumbles" section: We (as in the AF_XDP authors) are looking into supporting the io_uring in addition to the AF_XDP rings. At least for sockets, the io_uring looks like an excellent fit. Jens Axboe has done some really good design decisions there!<br>
+<p>
+Now, let's pull the virtio ring into io_uring as well... ;-)<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789892/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor789933"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2019 23:34 UTC (Thu)
+                               by <b>mst@redhat.com</b> (subscriber, #60682)
+                              [<a href="/Articles/789933/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Now, let's pull the virtio ring into io_uring as well... ;-)</font><br>
+The old split ring layout is somewhat complex.<br>
+The new packed ring format might be a good fit for that.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789933/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor789921"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not need for new syscall</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2019 21:30 UTC (Thu)
+                               by <b>scientes</b> (guest, #83068)
+                              [<a href="/Articles/789921/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You just add a flag, and with that flag there is a second syscall argument. Look at futex() and the crazy variable number of arguments. glibc then magically calls it epoll_create2, or whatever. But no need for a new syscall, just a new flag.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789921/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor789923"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not need for new syscall</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2019 21:36 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/789923/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't quite get it why people are so opposed to new syscalls.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789923/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor789927"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not need for new syscall</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2019 21:50 UTC (Thu)
+                               by <b>scientes</b> (guest, #83068)
+                              [<a href="/Articles/789927/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I just checked, epoll_create1() checks for unknown flags, so there totally is no need for a new syscall.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789927/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor789931"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not need for new syscall</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2019 22:53 UTC (Thu)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/789931/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We are running out of syscall space. 5.3 will probably have 434 common syscalls on all architectures, and there are apparently cache-related performance impacts once you pass 512 (on x86 at least). This doesn't mean we should always avoid new syscalls, but rather we should be careful when we add them. If the only user-facing purpose of a new syscall is to add a struct argument then we should look at doing it that way.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789931/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor789971"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not need for new syscall</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 11:28 UTC (Fri)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/789971/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It seems there are two different issues here.  One is the ABI used to call into the kernel on different architectures.  That may support a fixed number of 'system call numbers' or have performance reasons to keep it down.  The other is the API provided to the C library and by the C library to applications so they can call the familiar named functions like open(2) or kill(2).  You could have an operating system running on i386 that used only a syscall number when calling into the kernel, but still provided the usual POSIX system call names.  Is there a reason Linux can't add new "system calls" indefinitely in this way?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789971/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor789972"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not need for new syscall</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 12:47 UTC (Fri)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/789972/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Multiplex syscalls are generally frowned upon these days. Indirection eats another register for the "real" syscall number, tracing and syscall filtering get more complicated, … Besides, yes the syscall table would be full after adding the 512th entry, but extending it to 1024 is not exactly rocket science.<br>
+<p>
+Adding a generator for these tables, in order to use a central point of syscall registry instead of the current arch hodgepodge, is certainly possible. Just do it …<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789972/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor790059"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not need for new syscall</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2019 15:24 UTC (Sat)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/790059/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What’s the issue on x86?  As far as I know, the only real issue is running into the silly x32 aliases, but we can easily fix that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790059/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor789961"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Not need for new syscall</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 6:56 UTC (Fri)
+                               by <b>koenkooi</b> (subscriber, #71861)
+                              [<a href="/Articles/789961/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My issue with new syscalls is that they usually get added and enabled for a single platform, x86_64, and only added to more platforms months or years after that. This happened with the original epoll and accept4. The issue manifested itself as a 180 second delay during boot due to accept4:<br>
+<p>
+* sys_accept4() was added in 2.6.28<br>
+* sys_accept4() was added for ARM in 2.6.36 <br>
+* (e)glibc built against 2.6.32 headers on and ARM board running 2.6.32<br>
+<p>
+With help from the systemd folks I tracked it down to accept4 missing, so I applied <a href="http://lists.infradead.org/pipermail/linux-arm-kernel/2010-August/022349.html">http://lists.infradead.org/pipermail/linux-arm-kernel/201...</a> to the 2.6.32 kernel. Still a 3 minute delay. That's when I realized I needed to build eglibc against the patched 2.6.32 headers as well as patching the kernel. Running a kernel with the new syscall hooked up is not enough!<br>
+<p>
+So everytime a new syscall gets proposed that is desired by the base layers in the OS I keep an eye on the ARM syscall list to avoid surprises. Marcin keeps this table up to date: <a href="https://fedora.juszkiewicz.com.pl/syscalls.html">https://fedora.juszkiewicz.com.pl/syscalls.html</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789961/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor789996"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System calls and architectures</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 13:50 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/789996/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      That's not really a problem with new system calls; it's about how they are implemented in the kernel.  The good news is that this situation has gotten a lot better and continues to improve.  A lot of the system-call boilerplate is being unified across architectures, and it's increasingly expected that new system calls will be enabled for most or all architectures from the outset.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789996/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor790004"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System calls and architectures</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 14:27 UTC (Fri)
+                               by <b>cyphar</b> (subscriber, #110703)
+                              [<a href="/Articles/790004/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And new (&gt;403) syscalls now use the same number on all architectures, so in principle there should be no need to rebuild libraries to get a __NR_foobar definition on a given architecutre -- libraries should be able to simply do a -ENOSYS check at runtime with an non-arch-specific __NR_foobar value.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790004/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor789939"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 0:55 UTC (Fri)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/789939/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; takes a familiar form: add yet another ring-buffer interface to the kernel. </font><br>
+<p>
+I wonder if future operating system designs will use ring buffers for everything instead of system calls. Want to open a file? Add an "open file" request to one ring buffer, and wait for the corresponding response in another ring buffer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789939/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor789953"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 2:50 UTC (Fri)
+                               by <b>sbaugh</b> (guest, #103291)
+                              [<a href="/Articles/789953/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;I wonder if future operating system designs will use ring buffers for everything instead of system calls</font><br>
+<p>
+Sounds like FlexSC: <a href="https://www.usenix.org/legacy/events/osdi10/tech/full_papers/Soares.pdf">https://www.usenix.org/legacy/events/osdi10/tech/full_pap...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789953/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor789963"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">FlexSC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 7:33 UTC (Fri)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/789963/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That paper seems very interesting. Too bad it's 9 years old and no follow-up has happened.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789963/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor790034"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 22:58 UTC (Fri)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/790034/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Very interesting. One of the things mentioned in that paper is that using a ring buffer for system calls allows running the kernel and user space in separate cores; this might be a way to reduce the impact of Spectre/Meltdown/etc mitigations, and even strengthen them by keeping both siblings of each SMT pair either in the kernel or in user space all the time (so there would no longer be a need to either disable SMT, or do a very expensive IPI on every kernel entry/exit to protect against MDS).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790034/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor789957"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 5:48 UTC (Fri)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/789957/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That, and a single syscall – to signal the kernel, when you write the first event to an empty buffer. (That syscall already exists, by the way: futex_wait(). You simply need to also support kernel threads.)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789957/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor790031"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 21:50 UTC (Fri)
+                               by <b>mm7323</b> (subscriber, #87386)
+                              [<a href="/Articles/790031/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You could call that syscall batching.  Apart from the downsides of error handling, I believe there are patent issues:<br>
+<p>
+<a href="https://patents.google.com/patent/US9038075B2/en">https://patents.google.com/patent/US9038075B2/en</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790031/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor790048"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2019 8:05 UTC (Sat)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/790048/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That patent is owned by Red Hat, so no problem here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790048/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor790071"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2019 5:07 UTC (Sun)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/790071/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think you mean "owned by IBM," ahem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790071/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor790073"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2019 9:48 UTC (Sun)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/790073/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I think you mean "donated to <a href="https://www.openinventionnetwork.com/about-us/">OIN</a>".
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790073/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor790081"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2019 14:52 UTC (Sun)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/790081/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;I think you mean "donated to OIN". </font><br>
+<p>
+There's some good news, at least.   The contrast between IBM's handling of RedHat and Oracle's of Sun is striking, at least so far.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790081/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor790095"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2019 19:30 UTC (Sun)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/790095/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So far Red Hat has not been acquired; it's still an independent public company, although in the process of being acquired.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790095/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor790108"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2019 9:09 UTC (Mon)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/790108/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Assignee of record is still RedHat.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790108/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor789998"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 14:14 UTC (Fri)
+                               by <b>jhoblitt</b> (subscriber, #77733)
+                              [<a href="/Articles/789998/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What happens if userspace doesn't keep up, the ring buffer is full, and new fd events are generated?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789998/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor789999"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filling the ring buffer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2019 14:21 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/789999/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      That cannot happen, as it turns out.  I didn't get deeply into this in the article, maybe I should have.  The new epoll code gives each file descriptor a dedicated entry in the <tt>items</tt> array; when one becomes ready, an index to it is added to the index array, which is the real ring buffer.  Until user space consumes the item, there is nothing more to add to the index array - the file descriptor is already there (though more POLL* bits could be set).  So the ring buffer can fill but never overflow.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/789999/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor855164"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filling the ring buffer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2021 14:08 UTC (Mon)
+                               by <b>brho</b> (subscriber, #50662)
+                              [<a href="/Articles/855164/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+this sounds a lot like what i did in a similar &quot;ring buffer for something like epoll&quot; in another OS: <br>
+<p>
+<a href="https://github.com/brho/akaros/blob/master/kern/include/ros/ceq.h">https://github.com/brho/akaros/blob/master/kern/include/r...</a>.  <br>
+<p>
+the &#x27;CEQ&#x27; was designed so that i could do epoll in userspace on a non-linux research OS.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/855164/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor790063"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2019 20:43 UTC (Sat)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/790063/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  Figuring out the above interface required a substantial amount of reverse engineering of the code. This is a rather complex new API, but it is almost entirely undocumented; that will make it hard to use, but the lack of documentation also makes it hard to review the API in the first place. It is doubtful that anybody beyond the author has written any code to use this API at this point. Whether the development community will fully understand this API before committing to it is far from clear. </font><br>
+<p>
+I don't understand how this is the case for just about every new linux API. Coming from another community (postgres), I really don't understand why it's not a hard requirement to provide some minimal set of API docs? It doesn't have to be in fully man-page formatted, nicely phrased, native-speaker level English. But it should provide at least enough information to be able to write that manpage (and a good bit of this article) without having to do a lot of original research. This isn't even hard to enforce?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790063/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor790084"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2019 16:05 UTC (Sun)
+                               by <b>daney</b> (guest, #24551)
+                              [<a href="/Articles/790084/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Your code for reading items out of the ring buffer is undoubtedly missing memory barrier operations.<br>
+<p>
+Within the kernel you have code review of memory access ordering issues and might have a chance at getting them implemented correctly.  How do you ensure the same on the consuming side in userspace?<br>
+<p>
+Somebody should probably provide a wrapper library for all this that tries to do the right thing.<br>
+<p>
+System calls make nice barriers, if you eliminate the system call, you move the responsibility for correctly implementing the barriers to the authors of any userspace code. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790084/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor790103"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2019 0:36 UTC (Mon)
+                               by <b>edeloget</b> (subscriber, #88392)
+                              [<a href="/Articles/790103/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree that handling memory barriers in user code is not very simple, but avoiding a system call is still a big win for the rare number of people who are in need for this interface (and, frankly, if you are in need for this API, you'd better write the code correctly :))<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790103/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor790180"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2019 16:14 UTC (Mon)
+                               by <b>daney</b> (guest, #24551)
+                              [<a href="/Articles/790180/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because you cannot change (break) userspace after a new facility is added to the kernel, you have to make sure the userspace interfaces are fully specified, and correct *before* they are added.<br>
+<p>
+Because use of this new epool interface requires correct, race-free, access to multiple memory locations (head, tail, items[i].ready_events, etc.) by both the kernel and userspace, instead of a simple system call, specification of ordering is important.   When running on x86, naive implementations may work by accident, where identical code may fail on more weakly ordered architectures.  It would be nice to see something that also works on arm64, ppc, et al. from the start.<br>
+<p>
+Also, since the kernel is consuming data from multiple memory locations that are under control of userspace, it would seem great care must be take to ensure that no security vulnerabilities are introduced.  The more common paradigm of:  Copy in user data at system call time, validate, compute result, return to user, no longer holds. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790180/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor790753"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2019 13:04 UTC (Sun)
+                               by <b>ianmcc</b> (subscriber, #88379)
+                              [<a href="/Articles/790753/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+item = header-&gt;items + index[header-&gt;tail] - 1;<br>
+<p>
+This looks suspicious.  Should it be<br>
+<p>
+item = header-&gt;items + index[header-&gt;head];<br>
+<p>
+?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790753/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor790756"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2019 15:00 UTC (Sun)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/790756/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Sigh, it should have been using the <tt>head</tt> index, yes; that has been fixed.  The "-1" is correct, though: remember that the index value is one higher than the actual distance into the array.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790756/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor790757"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A ring buffer for epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2019 15:21 UTC (Sun)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/790757/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It looks like it stores index plus one so that 0 can have a special meaning, but I don't understand why 0 needs a special meaning. Why wouldn't the kernel just write the correct index before incrementing tail (with a write barrier in between), so that userspace only needs to wait for tail and not wait again for index? I think the kernel has to be doing a write barrier anyway (after writing to the epoll_uitem, before writing to tail/index) so I don't see how it would be needed for performance.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/790757/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2019, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

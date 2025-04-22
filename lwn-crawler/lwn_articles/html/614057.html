@@ -1,0 +1,1056 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>How implementation details become ABI: a case study [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/614057/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/612443/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/614057/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>How implementation details become ABI: a case study</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 1, 2014</br>
+           </div>
+One of the final changes that went into the mainline kernel repository
+before the 3.17-rc7 release was <a
+href="http://git.kernel.org/linus/d2fa4a8476b911782f7e5167db18770222ac40c3">this
+fix from Mikhail Efremov</a>.  It affects some low-level code within the
+virtual filesystem layer that manages name changes in the dentry structure
+— the structure that handles the mapping between file names and in-kernel
+inode structures.  How that change came to be necessary makes a good lesson
+in how unintended behaviors can become part of the kernel's ABI over time.
+<p>
+<h4>The problem</h4>
+<p>
+The addition of the <a href="/Articles/569134/"><tt>renameat2()</tt> system
+call</a> in the 3.15 development cycle brought with it a subtle, unintended
+change in behavior that is best illustrated by example.  On a system
+running (a hopefully updated version of) Bash, one can type a
+sequence like the following:
+<p>
+<pre>
+    $ cd /tmp
+    $ touch foo bar
+    $ exec 42&lt;bar
+    $ ls -l /proc/self/fd/42
+    lr-x------ 1 corbet lwn 64 Sep 29 13:01 /proc/self/fd/42 -&gt; /tmp/bar
+</pre>
+<p>
+The <tt>exec</tt> command causes the shell to open <tt>bar</tt> as file
+descriptor&nbsp;42.  The output of the <tt>ls</tt> shows that, indeed,
+<tt>bar</tt> is open on that file descriptor.  What should happen, though,
+after the following sequence of commands?
+<p>
+<pre>
+    $ mv foo bar
+    $ ls -l /proc/self/fd/42
+</pre>
+<p>
+On a kernel prior to 3.15, the output will look like this:
+<p>
+<pre>
+    lr-x------ 1 corbet lwn 64 Sep 29 13:01 /proc/self/fd/42 -&gt; /tmp/bar (deleted)
+</pre>
+<p>
+On later kernels, instead, the result is:
+<p>
+<pre>
+    lr-x------ 1 corbet lwn 64 Sep 29 15:00 /proc/self/fd/42 -&gt; /tmp/foo (deleted)
+</pre>
+<p>
+When a file with open descriptors is deleted, the actual file remains in
+existence until all of those file descriptors are closed.  On kernels prior
+to 3.15, the name associated with that deleted file will be the name it had
+when it was deleted.  In newer kernels, instead, a file may, if it is
+deleted via a rename operation, end up appearing to have the name of the
+file that was renamed on top of it.
+<p>
+This change may appear to be nearly irrelevant; who is going to care about
+the apparent name of a deleted file that is no longer accessible via the
+filesystem?  But it seems that there are scripts out there that do care.
+One case was outlined by Mikhail in his patch posting: the package update
+utility on ALT Linux will replace (via a rename) the executable for a
+running daemon 
+process, then try to find existing processes that are running the older
+version of the executable.  But renaming the new version of the executable
+on top of the previous one causes any process running the old version to
+appear to be running something else, so the upgrade process fails.  Piotr
+Karbowski, who appears to have been the first to <a
+href="https://lkml.org/lkml/2014/9/6/120">report</a> the bug, stated that
+it made his system unusable.  This behavior change did, in fact, cause
+systems to break.
+<p>
+<h4>The cause</h4>
+<p>
+Understanding this bug requires delving into <tt>struct dentry</tt> and a
+somewhat obscure function called <tt>switch_names()</tt> that handles
+rename operations.  The <tt>dentry</tt> structure, since it is charged with
+name mapping, must contain the file name of interest.  But that name can
+be stored in two different ways.  If the length of the 
+name is less than <tt>DNAME_INLINE_LEN</tt> (a value between 32 and 40,
+chosen for optimal structure alignment), that name will be stored within
+the dentry structure itself.  Otherwise, the <tt>d_name</tt> field will
+contain a pointer to an externally-allocated string.
+<p>
+The <tt>switch_names()</tt> function is defined like this:
+<p>
+<pre>
+    void switch_names(struct dentry *dentry, struct dentry *target);
+</pre>
+<p>
+Its job is to cause <tt>dentry</tt> to have the name currently associated
+with <tt>target</tt>.  When moving names around, <tt>switch_names()</tt>
+must clearly pay attention to whether internal or external names are being
+used.  Since there are two <tt>dentry</tt> structures to work with, there
+are four possible combinations.  If both names are allocated externally,
+life is easy:
+<p>
+<pre>
+    swap(target-&gt;d_name.name, dentry-&gt;d_name.name);
+</pre>
+<p>
+One might wonder why the two names are exchanged in this way, since the
+stated purpose is only to affect <tt>dentry</tt>.  The swap is done because
+<tt>target</tt> is about to disappear anyway, so its "name" is not really
+seen to matter anymore.  Swapping allows this code to (1)&nbsp;avoid memory
+allocations, which, given how deep it is running within the VFS layer, is
+useful, and (2)&nbsp;not worry about freeing the old name associated with
+<tt>dentry</tt>, since that will now happen when <tt>target</tt> is freed
+anyway.
+<p>
+If, instead, both names are internal, memory allocations are not a concern.
+Prior to 3.15, the code for that case looked like this:
+<p>
+<pre>
+    memcpy(dentry-&gt;d_iname, target-&gt;d_name.name, target-&gt;d_name.len + 1);
+    dentry-&gt;d_name.len = target-&gt;d_name.len;
+</pre>
+<p>
+This operation would leave both <tt>dentry</tt> structures appearing to
+have the same name — different behavior than that seen with the
+external-names case.  Again, since <tt>target</tt> is expected to be
+destroyed soon, that difference should not really matter.  It did start to
+matter, though, when the cross-rename feature (allowing the names of two
+files to be atomically swapped) was added in 3.15.  In that case, the two
+names <i>should</i> be switched, as was done in the external case.  So, in
+current kernels, the code looks like this:
+<p>
+<pre>
+    unsigned int i;
+
+    for (i = 0; i &lt; DNAME_INLINE_LEN / sizeof(long); i++) {
+	swap(((long *) &amp;dentry-&gt;d_iname)[i], ((long *) &amp;target-&gt;d_iname)[i]);
+    }
+</pre>
+<p>
+
+This funny-looking loop allows the swapping of the two names without the
+need for temporary variables or extra copying.  (For completeness, the
+mixed internal/external cases swap the names).
+<p>
+As far as everybody could tell, the above code was correct; it made the
+internal-name case behave like the external-name case did.  But if
+(1)&nbsp;one file is renamed on top of another, and (2)&nbsp;both files have
+short names, the user-visible behavior of the system changes, and that
+change caused programs to break.  Breaking things in that way goes against
+one of the fundamental rules of kernel development, so some sort of fix
+needs to be put into place.
+<p>
+<h4>The fix</h4>
+
+<a href="/Articles/614063/">Mikhail's original patch</a> added a flag
+("<tt>exchange</tt>") to <tt>switch_names()</tt>.  If that flag is set (as
+would be the case for an atomic file swap operation), the
+3.15 behavior holds; otherwise, the code would revert back to the previous
+behavior for the both-internal case (names would still be swapped in the
+other cases).  This patch was initially rejected; Linus <a
+href="/Articles/614064/">called it</a> "<q>too ugly to live</q>":
+<p>
+<div class="BigQuote">
+	Yes, we had that hack before, but we didn't make it conditional. It
+	historically was more of a "it's easier to just memcpy the name"
+	than switch things around. Then that became accidental semantics,
+	and that's all normal. But then when we make this explicit and
+	intentional, I really think we should do it *right*, and either
+	switch() the names around or just copy it.
+<p>
+	Having a "switch_names()" function that *neither* switches *nor*
+	copies, and giving it an argument to decide which, but not even do it
+	*right*? That's just too f*cking disgusting for words.
+</div>
+<p>
+A proper solution would, thus, cause the "just copy the name to the new
+dentry" behavior to happen on rename operations in all cases where an
+explicit swap has not been requested, even those which were not handled
+that way in the past.  Implementing that behavior runs into a problem,
+though: in the case where both names are external, it may be necessary to
+allocate memory for a copy of the target file name.  Such an allocation
+would have to be handled in atomic context and would slow down code that
+needs to run quickly.  So a simple solution is not readily available.
+<p>
+Thus, the developers decided to merge a version of Mikhail's patch for
+3.17, even if they don't like it.  The patch has changed a bit since Al Viro
+took the opportunity to clean up the surrounding code a bit.  But that code
+will probably not last beyond the 3.17 release.
+<p>
+What is likely to happen, instead, is a variant of <a
+href="/Articles/614066/">this patch</a> from Al.  It adds a reference count
+to external names, allowing those names to be "copied" by just incrementing
+the count.  Actually freeing the name must be done conditionally based on
+the results of a
+decrement-and-test operation.  There are some additional complications; the
+name may be accessed under read-copy-update (RCU) rules, for example, so the
+actual freeing must happen in an RCU callback.  But the idea is simple
+enough and, since few places actually manipulate the names in
+<tt>dentry</tt> structures, the implementation is relatively small.
+<p>
+Still, that is a larger change than anybody would like to see go into 3.17
+at this point in the development cycle.  So reference-counted external
+names in <tt>dentry</tt> structures will have to wait until 3.18.
+Meanwhile, Mikhail's fix has gone in for 3.17 and been marked for the
+stable updates, so the old behavior will return in the near future.  This
+behavior was accidental and never documented, and the kernel developers
+seemingly believe that any code relying on it was poorly written to begin
+with.  But, all of that notwithstanding, that behavior has become a part of
+the kernel ABI, so those developers will preserve it even if they don't
+like it.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Development_model-User-space_ABI">Development model/User-space ABI</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#renameat2">renameat2()</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/614057/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor614352"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 1, 2014 15:32 UTC (Wed)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/614352/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Piotr originally reported the problem on the grsec forums:<br>
+<a href="https://forums.grsecurity.net/viewtopic.php?f=3&amp;t=4031">https://forums.grsecurity.net/viewtopic.php?f=3&amp;t=4031</a> and once identified, spender fixed it 3 weeks ago already.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614352/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614385"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 1, 2014 16:17 UTC (Wed)
+                               by <b>lkundrak</b> (subscriber, #43452)
+                              [<a href="/Articles/614385/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How is that relevant?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614385/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614402"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 1, 2014 17:02 UTC (Wed)
+                               by <b>doogie</b> (guest, #2445)
+                              [<a href="/Articles/614402/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Did you read the messages on that forum?  It's the same bug.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614402/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor615474"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2014 5:32 UTC (Thu)
+                               by <b>andza</b> (guest, #72692)
+                              [<a href="/Articles/615474/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Was it reported upstream and just as important, was the patch submitted to LKML? Otherwise I can only agree with the parent that it's mostly irrelevant. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615474/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor615509"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2014 10:32 UTC (Thu)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/615509/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Was it reported upstream</font><br>
+<p>
+did you read the forum post?<br>
+<p>
+<font class="QuotedText">&gt; and just as important, was the patch submitted to LKML?</font><br>
+<p>
+no because it was a quick hack, not something upstream (or even we) would want in the long run. in fact they've fixed it differently in the end (not their hack but Al's refcount approach) as you can read it in this very article.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615509/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor614393"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 1, 2014 16:53 UTC (Wed)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/614393/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If it was accidental that the old name of a deleted inode was readable, then why did procfs specifically support readlink() on them? That case was very clearly intended to work at one point, even if it ended up broken for longer names.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614393/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614521"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2014 3:24 UTC (Thu)
+                               by <b>flewellyn</b> (subscriber, #5047)
+                              [<a href="/Articles/614521/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree.  To me, it makes sense that the /proc/self/fd/* symlinks, as well as /proc/$NUM/fd/*, would keep symlinks to the old name of a deleted file, if the descriptor is still open.  Standard Unix semantics are that an unlinked file is not actually gone until the last FD pointing to it is closed, so it makes sense that any processes which still have it open should still have an idea of what it was called before deletion.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614521/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor614471"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 1, 2014 21:34 UTC (Wed)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/614471/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Does this mean there are now (or always were) subtle security bugs on ALT Linux that can be triggered by a few rename calls?  What happens on those systems if I run a binary named "sshd (deleted)"?  If you open /proc/$foo/fd/$bar, does it give you a copy of the existing open file descriptor, or is there a race condition attack because it's literally following the symlink?<br>
+<p>
+All of this is head-shakingly ugly to me.  If anything, this incident looks like a golden opportunity to flush out people building on top of accidental ABI and get them talking to kernel devs about what interfaces they really need to do what they're trying to do (judging from a quick read of the bug reports, cgroups would make more sense for these use cases).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614471/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614545"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2014 7:41 UTC (Thu)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/614545/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I had the same thought. The addition of "deleted" to the filename is very ugly, as in-band signaling tends to be. Why not note the deleted status in fdinfo instead?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614545/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614766"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 3, 2014 7:03 UTC (Fri)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/614766/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because that was years before /proc/*/fdinfo/*.  Again, those symlinks had never been followed by traversing *any* string as a pathname.  And they still do not.<br>
+<p>
+A bit more history: the original inspiration for that thing had been, as far as I can tell, either late Research Unix or Plan 9 and there it had been something different.  For one thing, no symlinks in there - as in "no such thing as a symlink".  For Plan 9 counterpart see<br>
+<a href="http://fxr.watson.org/fxr/source/port/devdup.c?v=PLAN9">http://fxr.watson.org/fxr/source/port/devdup.c?v=PLAN9</a><br>
+It's a single directory with a pair of entries for each descriptor in accessing process' descriptor table - as in 0, 0ctl, 1, 1ctl, etc.<br>
+opening 42 in there is equivalent to dup(42); opening 42ctl (can be done only for read) gives you a bunch of stats on file - basically, something similar to combination of our self/fdinfo/42 and readlink of self/fd/42.<br>
+<p>
+Note that it only covers what would, for us, been /dev/fd.  I.e. only your own descriptor table.  Moreover, unlike us they do, indeed, give the *same* opened struct file (Chan in their terms).  As dup(2) would.  We do not - we get a new open of the fs object behind the old open file.  Among other things, it means different behaviour of lseek() - with dup() the current position is shared between old and new descriptors, with new open it's independent.  They go for dup-like, we - for open-like.<br>
+<p>
+In part it's a historical accident, in part - the result of different API for -&gt;open(), in part - decision to make them look like symlinks and use readlink() to indicate which file it is.<br>
+<p>
+Another thing to keep in mind is that in Plan 9 it was *NOT* a part of procfs.  Their procfs has &lt;pid&gt;/fd, but unlike ours it's a regular file, not a directory.  With line per descriptor.  So the needs of lsof-like stuff are covered by that.  In our variant it was first a per-process directory, full of magic symlinks and then (many years later) - two directories; fd/* and fdinfo/*.  The latter - with regular files in it, more or less similar to contents of dupfs &lt;n&gt;ctl or lines in procfs &lt;pid&gt;/fd.<br>
+<p>
+Note that back when it started we *couldn't* report the path.  It simply hadn't been available.  It's older than dcache by several years (0.99 vs. 2.1.40ish, resp.).  So we had pseudo-symlinks resolving to (back then) inodes behind the open descriptors, with readlink(2) providing information for lsof and friends.  Basically, st_dev + st_ino of the same inodes.<br>
+Following those "symlinks" had never depended on the resulting string, or, indeed, the numbers themselves.<br>
+<p>
+In 2.1.43 or so we got dentries (and after a while they even started to work), and with that we got a way to calculate those pathnames.  Cheaply.  As the result, those pseudo-symlinks (back then used only for lsof, fuser and their ilk) suddenly acquired a much prettier readlink(2) output.  Which required a few utilities updated between 2.0 and 2.2.  And it was a very specialized API, with very few users.  Moreover, said users were already full of ifdefs - e.g. on *BSD those *had* to be suid-root; nosing in the kernel data structures requires that.  And yes, it was that scary.<br>
+<p>
+That had all the makings of bad API - few users and lack of anything in that area that would be even remotely portable on other Unices.  Indeed, comparison with peeking into kernel data structures from userland made for a _very_ low plank.<br>
+<p>
+Shortly after that somebody noticed that there had been no way to tell an unlinked file from something created in its place later.  Result: appending " (deleted)" in the end of readlink(2) output.  Kludgy, of course, but with so few (and specialized) users...  Again, the string reported by readlink(2) has nothing whatsoever to resolving the sucker.<br>
+Moreover, any user *must* look at the string it gets; think what should be returned for pipes and sockets.<br>
+<p>
+Note, BTW, that back then *all* dentry names had been external ones and in all cases names were swapped on d_move().  In 2.1.116 it had been changed - short names (majority of them, obviously) got embedded into dentry itself, giving better locality and lower cache footprint in dcache lookups.  At that point short names started to be copied.<br>
+<p>
+Nobody really considered "which unlinked file had this been" as even remotely sane question; indeed, how the hell can one tell how many files with that name had been created, opened and unlinked?  OK, you know that it used to be /tmp/foo and got unlinked since then; which one of them?<br>
+<p>
+Alas, there's no API that won't be abused.  Nevermind that it wasn't consistent, nevermind that results were actually useful for detecting anything reliably, it worked well enough for hell knows how many scripts.<br>
+Until they broke...<br>
+<p>
+In theory, we can't even make it consistent, lest some whiny wonder comes with a script that relied on "swap if either name is long" semantics - the filenames that got renamed being known to be long enough.  And relying on mv /tmp/&lt;name1&gt; /tmp/&lt;name2&gt; leaving you with /tmp/&lt;name1&gt; (deleted) coming from readlink(2).  I'll believe it when I see it; IMO it's extremely unlikely, though...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614766/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor615702"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2014 22:39 UTC (Thu)
+                               by <b>weue</b> (guest, #96562)
+                              [<a href="/Articles/615702/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Among others, "//deleted/PATH" (note the double slash) or "deleted/PATH" (relative path) would have been unambiguous.<br>
+<p>
+Whoever accepted "X (deleted)" is an idiot.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615702/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor615707"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2014 22:53 UTC (Thu)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/615707/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Whoever it had been, the whole point is that this ship has long sailed.  Perhaps the main lesson is that single-use APIs tend to suck.  "It's just for fuser and lsof" should've been a major red flag.  For _those_ this (deleted) thing was probably more convenient - no need to do anything with the string on the userland side.  And it wouldn't be a problem, except that there's no miracles and it *had* gained other users.  Worse, now we can't change it without breaking existing userland, as this story has demonstrated.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615707/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor614743"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 3, 2014 2:19 UTC (Fri)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/614743/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Following those suckers gives you vfsmount/dentry of deleted object.  They are *not* followed by interpreting the result of -&gt;readlink() (that's why -&gt;follow_link() is an independent method).  What you get opening those is *not* dup()-style extra reference to opened file; it's independently opened file over the same filesystem object (IOW, lseek() on one of those doesn't affect another).  Filesystem might refuse opening it, of course; local filesystems usually do not, with network ones it's up to server.  For sockets it explicitly fails; for pipes and FIFOs you get the same semantics you'd get from extra opener of named pipe.<br>
+<p>
+Note that it's more than just /proc/*/fd/* - e.g. /proc/*/exe and /proc/*/cwd are also like that.<br>
+<p>
+" (deleted)" is a kludge, and a damn unpleasant one.  But as this story shows, it's not something we can kill ;-/  It's before my involvement, but I suspect that original motivation was lsof/fuser.  And behaviour for rename(2) victim was an accident - check the history circa 2.1.40s; back when this " (deleted)" thing had been introduced *all* names had been external and d_move() swapped them in all cases.  It was more about the unlinked ones...  memcpy()-instead-of-swap had been introduced in 2.1.116 and it was more of "we need to put something there; just memcpy() it over".<br>
+<p>
+No, it really had been an accident.  BTW, prior to 2.1.43 those magic symlinks had the same semantics on follow_link, but gave "[%04x]:%u"<br>
+with st_dev and st_ino on readlink().  Next came an attempt to put something that usually gave pathname corresponding to the fs object in question, shortly followed by " (deleted)" tacked on the end of unlinked ones.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614743/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor614613"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2014 15:47 UTC (Thu)
+                               by <b>tomgj</b> (guest, #50537)
+                              [<a href="/Articles/614613/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Another sad case of "hack something together, and whatever ends up being exposed gets called the 'interface'".  This as opposed to the "actually write down what the interface is" school.<br>
+<p>
+Tellingly, the article does not refer to any interface specifications for the interface elements that are relevant in this "user-visible behaviour".  This is not a criticism of the article, but rather of the development process it describes: one where the philosophy of specified interfaces is not understood, and where no proper distinction is made between an actual interface, and a piece of implementation that happens to be visible.<br>
+<p>
+The test should be whether the interface consumer was depending on incidental behaviour, rather than specified behaviour, of the interface.  However, since there is not in Linux a culture of adequately specifying interfaces in the first place, we are not in a position where this test could be applied.<br>
+<p>
+It is interesting how bad Linux is at this. The old, proprietary Unixes came with manuals properly describing the interface specifications of each system, even if they were not always compatible with one another.  Windows does better than Linux on this front, as do the BSDs.<br>
+<p>
+It's a good job the original API design approach of Linux was to implement a more or less coherent API that had already been specified (POSIX).  It's unfortunate this hasn't carried through into a culture of properly writing down specifications for new interface elements as (or rather, before) they're introduced.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614613/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614738"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 3, 2014 1:28 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/614738/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+How would it have made a difference if the interface were written down?  Surely they would have written down that this unusual symbolic link value should give a name the file had when it had one, so this change would still be a bug and have to be fixed.
+<p>
+I guess I'm missing the article's thesis, that this is a case of "unintended behaviors can become part of the kernel's ABI over time."  It looks to me like the designers deliberately put the former name of the file in the symbolic link value; they didn't mean to put arbitrary garbage in there, that just happened by accident of implementation to be the former name of the file.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614738/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor615531"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2014 12:53 UTC (Thu)
+                               by <b>kevinm</b> (guest, #69913)
+                              [<a href="/Articles/615531/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It wouldn't matter if the original interface had been specified ("The value returned by readlink(2) is for presentational purposes only and should not be parsed.") or not: people would still have ignored it and written scripts depending on the implementation details, and those scripts would still have to be supported.<br>
+<p>
+The Linux culture is not to say "that userspace depended on something we didn't intend to be ABI, so it's OK to break it".  ABI is de facto, not de jure.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615531/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor614914"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 4, 2014 1:16 UTC (Sat)
+                               by <b>alonz</b> (subscriber, #815)
+                              [<a href="/Articles/614914/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      I wonder&nbsp;&ndash;&nbsp;is the extra effort in Al's new approach (= reference-counting the names) justified for any reason except solving this corner-case? (It does look like a pretty big hammer, which will add more complexity&hellip;)
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614914/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor614965"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 5, 2014 2:20 UTC (Sun)
+                               by <b>magcius</b> (guest, #85280)
+                              [<a href="/Articles/614965/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wait, if the behavior in old kernels changed based on how long the filename was, doesn't that mean ALT Linux would have just broken if I called my daemon something else or put it somewhere in /opt/com.foo.MyVendor/v6/ instead?<br>
+<p>
+This interface even changes depending on the architecture and kernel build options.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614965/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614967"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 5, 2014 3:14 UTC (Sun)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/614967/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, it would (not that they were in any real danger of stepping into that one - seriously, 32-character filename for a daemon binary?  And that would not include the pathname - just the last component that long).<br>
+<p>
+But yes, that's one of the reasons why their use of that trick had been bogus.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614967/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614969"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 5, 2014 3:26 UTC (Sun)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/614969/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One of our clients used to have a "paracetomoxyfrysebendroneomycind" daemon. Doing some drug discovery calculations, appropriately.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614969/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614971"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 5, 2014 4:47 UTC (Sun)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/614971/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+*snort*<br>
+<p>
+OK, I stand corrected - their script definitely breaks on that one... for 64bit host.  Anyway, I think it's bloody obvious that what they are doing is an awful kludge.<br>
+<p>
+Note that keeping the daemon running through the update is a very dubious approach; sure, the binary itself will stick around until we exit, but the rest of files in the package will get replaced, so if that daemon ever rereads them (e.g. in response to incoming request of some sort, or being asked to stop), the old binary will find new config/data/helper binaries/whatnot, with potentially spectacular results.  Much safer to stop the sucker before replacing any files and restart it afterwards.  And anything that does something more fancy (e.g. re-exec itself and transfer the internal state across that in one way or another) has no business using start-stop-daemon anyway.<br>
+<p>
+IOW, the entire "replace files, then stop the old processes" is a bad idea.  And prior to replacements there's no need whatsoever for that kind of kludges.  Mind you, I'd rather do stat() on the binary we are after, then looked for /proc/*/exe with stat() giving the matching st_dev/st_ino.  Without bothering with readlink() on those guys.  Has an extra benefit of doing the right thing when you have multiple links to the same binary, with different processes using different names...<br>
+<p>
+What they were doing is awful for a lot of reasons; sadly, that's not the criterion used in such situation ;-/  It worked for a long time, there's real-world userland code relying on it, so we get to keep it working.  It's not quite the same as bug-for-bug compatibility - if nothing breaks when we fix inconsistent behaviour, we can go for it even if it was possible to write something that would break.  Ditto if the code being broken is a rootkit or rootkit equivalent (i.e. relies on exploiting a security hole, by accident or not).  But "the code we broke would've broken in a lot of other cases anyway" isn't an acceptable excuse.  <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614971/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614979"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 5, 2014 11:10 UTC (Sun)
+                               by <b>JGR</b> (subscriber, #93631)
+                              [<a href="/Articles/614979/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Presumably a daemon designed to be upgraded whilst running in this way would load configuration and other files at startup or on HUP specifically to avoid these issues.<br>
+<p>
+Stopping the daemon, upgrading, then restarting it introduces a small period of downtime, which can be undesirable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614979/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614985"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 5, 2014 16:08 UTC (Sun)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/614985/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As I said, something more fancy shouldn't be using start-stop-daemon in the first place.  I really wonder how many common daemons take care about the races around the upgrade; stop/move new one in place/start is more robust...<br>
+It's not just config; anything from helper binaries to permissions on directories, etc. can become a surprise for old daemon binary.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614985/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor615925"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2014 8:11 UTC (Sun)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/615925/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ok, I have nothing witty or insightful to add.  But I have to say that's the most awesome executable name I've seen in a long time.  Bravo!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615925/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor614970"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 5, 2014 3:46 UTC (Sun)
+                               by <b>magcius</b> (guest, #85280)
+                              [<a href="/Articles/614970/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, from the "/tmp/foo (deleted)" string, I thought it was the full file path stored.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614970/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614973"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How implementation details become ABI: a case study</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 5, 2014 5:05 UTC (Sun)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/614973/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Nope - in that case there are 3 or 4 dentries involved (depending on whether /tmp is a mountpoint).  There's root directory of root filesystem.  Name's empty, parent - itself.  There's /tmp on root filesystem.  Name being "tmp", parent - root of root filesystem.  There's (possibly) root directory of whatever is mounted on /tmp.  Again, name is empty, parent - itself.  And there's /tmp/foo - name is "foo", parent - /tmp on root fs or root of filesystem mounted on /tmp.  And it's unhashed since that rename.<br>
+<p>
+We start with that dentry and vfsmount of either root fs or that mounted on /tmp and walk towards root.  When we reach the root of current vfsmount we just proceed to dentry and vfsmount of mountpoint and continue from there.  When we reach the process' root (sensu chroot(2)) or global root (vfsmount that isn't mounted on anything) we stop.<br>
+<p>
+In this case the names we see along the way are "foo" and "tmp", and or dentry is unhashed, so d_path() produces "/tmp/foo (deleted)".  And that's what readlink() on these guys returns.  See fs/dcache.c:d_path() and the stuff next to it.<br>
+<p>
+The name of dentry is just a single pathname component.  That "/tmp/foo (deleted)" isn't stored anywhere - it's calculated on demand.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614973/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

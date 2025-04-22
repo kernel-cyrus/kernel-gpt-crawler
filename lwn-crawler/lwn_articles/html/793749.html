@@ -1,0 +1,1110 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Kernel analysis with bpftrace [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/793749/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/794274/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/793749/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Kernel analysis with bpftrace</h1>
+</div>
+<div class="ArticleText">
+<div class="GAByline">
+           <p>July 18, 2019</p>
+           <p>This article was contributed by <a href="http://www.brendangregg.com">Brendan Gregg</a></p>
+           </div>
+<p>At the <a href="/Articles/lsfmm2019/">2019 Linux Storage, Filesystem,
+and Memory-Management Summit</a> (LSFMM) I gave a keynote on <a
+href="/Articles/787131/">BPF 
+observability</a> that included a kernel issue I had debugged on Netflix
+production servers using <a
+href="https://github.com/iovisor/bpftrace"><tt>bpftrace</tt></a>. In this
+article I'll provide a 
+crash course on <tt>bpftrace</tt> for kernel developers—to help them more easily
+analyze their 
+code.</p>
+
+<p>I was recently discussing <tt>tcp_sendmsg()</tt> with another developer
+who was 
+concerned about large message sizes (such as 100 megabytes) causing
+failures. 100 MB?? I doubt Netflix is sending messages anywhere near that
+large in production. Many 
+of you may know the function prototype well, it is (from
+<a
+href="https://elixir.bootlin.com/linux/latest/source/net/ipv4/tcp.c#L1415"><tt>net/ipv4/tcp.c</tt></a>):</p>  
+
+<pre>
+    int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size);
+</pre>
+
+<p><tt>bpftrace</tt> is already installed on Netflix  (and 
+other companies) production
+servers, so I ssh-ed to a busy server to check the size distribution
+of messages for ten seconds:</p>
+
+<pre>
+    # <b>bpftrace -e 'k:tcp_sendmsg { @size = hist(arg2); } interval:s:10 { exit(); }'</b>
+    Attaching 2 probes...
+    
+    @size: 
+    [4, 8)                25 |                                                    |
+    [8, 16)               74 |                                                    |
+    [16, 32)               5 |                                                    |
+    [32, 64)           13603 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+    [64, 128)           2527 |@@@@@@@@@                                           |
+    [128, 256)            21 |                                                    |
+    [256, 512)           181 |                                                    |
+    [512, 1K)           1587 |@@@@@@                                              |
+    [1K, 2K)            2992 |@@@@@@@@@@@                                         |
+    [2K, 4K)            9367 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                 |
+    [4K, 8K)           12461 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     |
+    [8K, 16K)            995 |@@@                                                 |
+    [16K, 32K)          1977 |@@@@@@@                                             |
+    [32K, 64K)           428 |@                                                   |
+    [64K, 128K)           14 |                                                    |
+    [128K, 256K)           2 |                                                    |
+</pre>
+
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>The largest is in the 128 to 256KB range. This is using a kprobe
+(&quot;<tt>k</tt>&quot;) on <tt>tcp_sendmsg()</tt>, and saving a histogram
+of <tt>arg2</tt> 
+(<tt>size</tt>) to 
+a BPF map named &quot;<tt>@size</tt>&quot; (the name is unimportant, I'm
+just using 
+it to annotate the output). An interval event fires after 10 seconds and
+exits, at which point all BPF maps are printed.</p>
+
+<p>What about errors?:</p>
+
+<pre>
+    # <b>bpftrace -e 'kr:tcp_sendmsg { @retvals[retval &gt; 0 ? 0 : retval] = count(); }
+        interval:s:10 { exit(); }'</b>
+    Attaching 2 probes...
+    
+    @retvals[0]: 49794
+</pre>
+
+<p>No errors. This time I am using a kretprobe (&quot;<tt>kr</tt>&quot;),
+and I'm 
+frequency counting <tt>retval</tt>, which is either a negative error code or the
+size. Since I don't care about the size, I used a ternary operator to set
+all positive values to zero.</p>
+
+<p><tt>bpftrace</tt> lets you answer these questions immediately, in
+production, and 
+without needing debuginfo (Netflix does not typically have it
+installed). For this case, it showed that Netflix was unlikely to see
+the <a href="https://github.com/iovisor/bcc/issues/2440">large
+<tt>tcp_sendmsg()</tt> problem</a> for this workload. 
+</p>
+
+<h4>Other one-liners</h4>
+
+<p>The previous <tt>tcp_sendmsg()</tt> one-liners demonstrate some
+<tt>bpftrace</tt> kernel 
+analysis capabilities. To show you some more capabilities, here are several
+more one-liners that also use <tt>tcp_sendmsg()</tt> as the example. You
+can imagine 
+switching it to other kernel functions.</p>
+
+<p>Show <tt>tcp_sendmsg()</tt> sizes bigger than 8192 bytes, per-event:</p>
+
+<pre>
+    bpftrace -e 'k:tcp_sendmsg /arg2 &gt; 8192/ { printf("PID %d: %d bytes\n", pid, arg2); }'
+</pre>
+
+<p>Show a histogram of request size for each process (PID and comm):</p>
+
+<pre>
+    bpftrace -e 'k:tcp_sendmsg { @size[pid, comm] = hist(arg2); }'
+</pre>
+
+<p>Frequency count return values:</p>
+
+<pre>
+    bpftrace -e 'kr:tcp_sendmsg { @return[retval] = count(); }'
+</pre>
+
+<p>Show per-second statistics: event count, average size, and total
+bytes:</p>
+
+<pre>
+    bpftrace -e 'k:tcp_sendmsg { @size = stats(arg2); }
+        interval:s:1 { print(@size); clear(@size); }'
+</pre>
+
+<p>Count calling stack traces:</p>
+
+<pre>
+    bpftrace -e 'k:tcp_sendmsg { @[kstack] = count(); }'
+</pre>
+
+<p>Count calling stack traces, three levels deep:</p>
+
+<pre>
+    bpftrace -e 'k:tcp_sendmsg { @[kstack(3)] = count(); }'
+</pre>
+
+<p>Show function latency as a histogram, in nanoseconds:</p>
+
+<pre>
+    bpftrace -e 'k:tcp_sendmsg { @ts[tid] = nsecs; }
+        kr:tcp_sendmsg /@ts[tid]/ { @ns = hist(nsecs - @ts[tid]); delete(@ts[tid]); }'
+</pre>
+
+<p>This last example is saving a timestamp in one probe (keyed on thread
+ID) and retrieving it in another. This pattern can be used for custom
+latency measurements.</p>
+
+<h4><tt>struct</tt> data</h4>
+
+<p>There is an important capability missing from those one-liners:
+<tt>struct</tt> 
+navigation. Here is the function prototype again:</p>
+
+<pre>
+    int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size);
+</pre>
+
+<p><tt>bpftrace</tt> provides <tt>arg0</tt>-<tt>argN</tt> for kprobe
+function arguments, simply 
+mapping them to the registers for the calling convention (<tt>arg2</tt>
+becomes <tt>%rdx</tt> 
+on x86_64, for example). Since <tt>bpftrace</tt> can read kernel headers,
+which are often installed on 
+production systems, accessing <tt>struct</tt> data is possible by including the
+right header and casting the arguments:</p>
+
+<pre>
+    #include &lt;net/sock.h&gt;
+    [...]
+            $sk = (struct sock *)arg0;
+</pre>
+
+<p>Here's an example of a <tt>bpftrace</tt> tool that prints the address
+information, size, and return value from <tt>tcp_sendmsg()</tt>. Example
+output:</p> 
+
+<pre>
+    # <b>./tcp_sendmsg.bt </b>
+    Attaching 2 probes...
+    10.0.0.65       49978 -&gt; 52.37.243.173   443  : 63 bytes, retval 63
+    127.0.0.1       58566 -&gt; 127.0.0.1       22   : 36 bytes, retval 36
+    127.0.0.1       22    -&gt; 127.0.0.1       58566: 36 bytes, retval 36
+    [...]
+</pre>
+
+<p>The source of <tt>tcp_sendmsg.bt</tt>:</p>
+
+<pre>
+    #!/usr/local/bin/bpftrace
+    
+    #include &lt;net/sock.h&gt;
+    
+    k:tcp_sendmsg
+    {
+	    @sk[tid] = arg0;
+	    @size[tid] = arg2;
+    }
+    
+    kr:tcp_sendmsg
+    /@sk[tid]/
+    {
+	    $sk = (struct sock *)@sk[tid];
+	    $size = @size[tid];
+	    $af = $sk-&gt;__sk_common.skc_family;
+	    if ($af == AF_INET) {
+		    $daddr = ntop($af, $sk-&gt;__sk_common.skc_daddr);
+		    $saddr = ntop($af, $sk-&gt;__sk_common.skc_rcv_saddr);
+		    $lport = $sk-&gt;__sk_common.skc_num;
+		    $dport = $sk-&gt;__sk_common.skc_dport;
+		    $dport = ($dport &gt;&gt; 8) | (($dport &lt;&lt; 8) &amp; 0xff00);
+		    printf("%-15s %-5d -&gt; %-15s %-5d: %d bytes, retval %d\n",
+		        $saddr, $lport, $daddr, $dport, $size, retval);
+	    } else {
+		    printf("IPv6...\n");
+	    }
+	    delete(@sk[tid]);
+	    delete(@size[tid]);
+    }
+</pre>
+
+<p>In the kprobe, <tt>sk</tt> and <tt>size</tt> are
+saved in per-thread-ID maps, so 
+they can be retrieved in the kretprobe when <tt>tcp_sendmsg()</tt>
+returns. The kretprobe casts <tt>sk</tt> 
+and prints out details, if it is an IPv4 message, using the
+<tt>bpftrace</tt> function <tt>ntop()</tt> to 
+convert the address to a string. The destination port is flipped from
+network to host order. To keep this short I skipped IPv6, but you can add
+code to handle it too (<tt>ntop()</tt> does support IPv6 addresses).</p>
+
+<p>There is work underway for <tt>bpftrace</tt> to use <a
+href="https://www.kernel.org/doc/html/latest/bpf/btf.html">BPF Type
+Format</a> (BTF) 
+information as well, which brings various advantages including <tt>struct</tt>
+definitions that are missing from kernel headers.</p>
+
+<h4>Advanced example</h4>
+
+<p>So far I've shown straightforward tracing capabilities. For an advanced
+example, I'll demonstrate off-CPU profiling.</p>
+
+<p>CPU profiling of a task is typically easy: I can sample stacks, inspect
+performance-monitoring counters (PMCs) and
+model-specific registers (MSRs) to see what was running on-CPU and why it
+was slow. Off-CPU 
+profiling, on the other hand, has been problematic. I can show blocking
+stacks on context switches, but they often show that the task is blocked on
+something else (<tt>select()</tt>, <tt>epoll()</tt>, or a lock.) I need to
+know what that 
+something else is.</p>
+
+<p>BPF has provided a solution at long last to this problem: the ability to
+save stack traces and retrieve them later (something I've always wanted
+DTrace to do, but it cannot). Here is a <tt>bpftrace</tt> version of the
+solution, 
+which shows the process name, blocking stack, waker stack, and a
+blocking-time histogram in microseconds:</p> 
+
+<pre>
+   # <b>./offwake.bt</b>
+   Attaching 4 probes...
+   Tracing off-CPU time (us) with waker stacks. Ctrl-C to end.
+   ^C
+   [...]
+   
+   @us[ssh,
+       finish_task_switch+1
+       schedule+44
+       schedule_hrtimeout_range_clock+185
+       schedule_hrtimeout_range+19
+       poll_schedule_timeout+69
+       do_select+1378
+       core_sys_select+471
+       sys_select+183
+       do_syscall_64+115
+       entry_SYSCALL_64_after_hwframe+61
+   ,
+       try_to_wake_up+1
+       pollwake+115
+       __wake_up_common+115
+       __wake_up_common_lock+128
+       __wake_up_sync_key+30
+       sock_def_readable+64
+       tcp_rcv_established+1281
+       tcp_v4_do_rcv+144
+       tcp_v4_rcv+2423
+       ip_local_deliver_finish+98
+       ip_local_deliver+111
+       ip_rcv_finish+297
+       ip_rcv+655
+       __netif_receive_skb_core+1074
+       __netif_receive_skb+24
+       netif_receive_skb_internal+69
+       napi_gro_receive+197
+       ieee80211_deliver_skb+200
+       ieee80211_rx_handlers+5376
+       ieee80211_prepare_and_rx_handle+1865
+       ieee80211_rx_napi+914
+       iwl_mvm_rx_rx_mpdu+1205
+       iwl_mvm_rx+77
+       iwl_pcie_rx_handle+571
+       iwl_pcie_irq_handler+1577
+       irq_thread_fn+38
+       irq_thread+325
+       kthread+289
+       ret_from_fork+53
+   ]:
+   [64, 128)              1 |@@                                                  |
+   [128, 256)             1 |@@                                                  |
+   [256, 512)             1 |@@                                                  |
+   [512, 1K)              1 |@@                                                  |
+   [1K, 2K)               4 |@@@@@@@@@@                                          |
+   [2K, 4K)              10 |@@@@@@@@@@@@@@@@@@@@@@@@@@@                         |
+   [4K, 8K)              18 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@   |
+   [8K, 16K)              3 |@@@@@@@@                                            |
+   [16K, 32K)            16 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         |
+   [32K, 64K)            19 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+   [64K, 128K)            3 |@@@@@@@@                                            |
+</pre>
+
+<p>I've included one stack pair in this output. This shows an ssh process
+with a blocking stack in <tt>select()</tt>. The waker stack reveals what it was
+waiting for: a network packet. The histogram shows the durations for this
+offcpu/waker path, in microseconds.</p>
+
+<p>The source to <tt>offwake.bt</tt> is:</p>
+
+<pre>
+   #!/usr/local/bin/bpftrace
+   
+   #include &lt;linux/sched.h&gt;
+   
+   BEGIN
+   {
+	   printf("Tracing off-CPU time (us) with waker stacks. Ctrl-C to end.\n");
+   }
+   
+   kprobe:try_to_wake_up
+   {
+	   $p = (struct task_struct *)arg0;
+	   @waker[$p-&gt;pid] = kstack;
+   }
+   
+   kprobe:finish_task_switch
+   {
+	   $prev = (struct task_struct *)arg0;
+   
+	   // record timestamp of sleeping task:
+	   @ts[$prev-&gt;pid] = nsecs;
+   
+	   if (@ts[tid]) {
+		   $offcpu_us = (nsecs - @ts[tid]) / 1000;
+		   @us[comm, kstack, @waker[tid]] = hist($offcpu_us);
+		   delete(@ts[tid]);
+		   delete(@waker[tid]);
+	   }
+   }
+   
+   END
+   {
+	   clear(@waker);
+	   clear(@ts);
+   }
+</pre>
+
+<p>The kernel stack on <tt>try_to_wake_up()</tt> is saved with the task ID,
+which is 
+later retrieved on <tt>finish_task_switch()</tt>. This is a simple
+<tt>bpftrace</tt> version 
+of the <a
+href="https://github.com/iovisor/bcc/blob/master/tools/offwaketime.py"><tt>offwaketime</tt></a>
+tool from BCC, and the <tt>samples/bpf/offwaketime*</tt> 
+examples in the kernel source.</p>
+
+<p>I explained this problem and the BPF solution in my Performance@Scale
+talk (<a
+href="http://www.slideshare.net/brendangregg/linux-bpf-superpowers">slides
+[Slideshare]</a>, 
+<a
+href="https://www.facebook.com/atscaleevents/videos/1693888610884236/">video</a>),
+showing how these stack traces can be <a
+href="http://www.brendangregg.com/FlameGraphs/offcpuflamegraphs.html">visualized
+as flame graphs</a>. Sometimes 
+you need to show who woke the waker, and who woke them, and so on. By
+walking the wakeup chain, I can construct a &quot;chain graph&quot; to show
+the original source of the latency (usually interrupts).</p>
+
+<h4>Tracepoints</h4>
+
+<p>The previous examples used kprobes, and these will need updating as the
+kernel changes. Tracepoints are much preferable to kprobes for
+<tt>bpftrace</tt> programs, even though they are &quot;best effort&quot;
+and might change. That's still
+better than kprobes, which can change anytime, or show up as missing
+because they were inlined. However, some kprobes are more stable than
+others, particularly those for 
+internal kernel interfaces, such as VFS, <tt>struct file_operations</tt>,
+<tt>struct 
+proto</tt>, etc.</p>
+
+<p>Just as a simple example, here are the arguments provided by the
+<tt>timer:hrtimer_start</tt> tracepoint:</p>
+
+<pre>
+   # <b>bpftrace -lv 't:timer:hrtimer_start'</b>
+   tracepoint:timer:hrtimer_start
+       void * hrtimer;
+       void * function;
+       s64 expires;
+       s64 softexpires;
+</pre>
+
+<p>Frequency counting the function argument:</p>
+
+<pre>
+   # <b>bpftrace -e 't:timer:hrtimer_start { @[ksym(args-&gt;function)] = count(); }'</b>
+   Attaching 1 probe...
+   ^C
+   
+   @[sched_rt_period_timer]: 6
+   @[watchdog_timer_fn]: 16
+   @[intel_uncore_fw_release_timer]: 290
+   @[it_real_fn]: 376
+   @[hrtimer_wakeup]: 12301
+   @[tick_sched_timer]: 36433
+</pre>
+
+<p>The tracepoint arguments are accessible via <tt>args</tt>. In this case,
+I used 
+the <tt>ksym()</tt> <tt>bpftrace</tt> function to return the kernel symbol
+name for the 
+address.</p>
+
+<h4>More examples and information</h4>
+
+<p>I stepped through a Netfilx production example in my LSFMM keynote (<a
+href="https://www.slideshare.net/brendangregg/lsfmm-2019-bpf-observability-143092820">slides
+[Slideshare]</a>). More examples of
+programs can be found in the <tt>bpftrace</tt> repository under <a
+href="https://github.com/iovisor/bpftrace/tree/master/tools">tools</a>. At
+LSFMM, I previewed more tools I had developed for an upcoming BPF analysis
+book for Addison-Wesley; they will be made available on the <a
+href="http://www.brendangregg.com/bpf-performance-tools-book.html">BPF book
+page</a>.</p>
+
+<p>To try <tt>bpftrace</tt> yourself, see the <a
+href="https://github.com/iovisor/bpftrace/blob/master/INSTALL.md">INSTALL</a>
+guide, and get the latest version: 0.9.1 or newer. There are packages for
+different distributions, companies including Netflix and Facebook have
+their own internal package, or you can build from source. <tt>bpftrace</tt>
+currently uses LLVM and Clang for dependencies (as does <a
+href="https://github.com/iovisor/BCC">BCC</a>), although a future version
+may make them optional.</p>
+
+<p>Also see the <a
+href="http://www.brendangregg.com/BPF/bpftrace-cheat-sheet.html"><tt>bpftrace</tt>
+Cheat Sheet</a> for a summary of the language as well as the full <a
+href="https://github.com/iovisor/bpftrace/blob/master/docs/reference_guide.md"><tt>bpftrace</tt>
+Reference Guide</a>.</p>
+
+<h4>What about perf, ftrace?</h4>
+
+<p>I use the best tool for the job, and many times that's not <tt>bpftrace</tt>: it
+is perf or ftrace. Examples:</p>
+
+<ul class="spacylist">
+<li>Frequency counting many functions (e.g, <tt>tcp_*</tt>): ftrace, because it's
+fast to initialize. BPF kprobe attaching will become faster with
+multi-attach <tt>perf_event_open()</tt> once it is developed.</li> 
+<li>Function flow tracing: ftrace function graphing.</li>
+<li>PMC statistics: perf.</li>
+<li>CPU sampling with timestamps: perf, as its <tt>perf.data</tt> output has been
+optimized.</li> 
+</ul>
+
+<p>For the last one, sometimes I need timestamps on samples, but often I
+don't and can just use <tt>bpftrace</tt>; for example, sampling kernel
+stacks at&nbsp;99 
+Hertz:</p>
+
+<pre>
+    # <b>bpftrace -e 'profile:hz:99 { @[kstack] = count(); }'</b>
+</pre>
+
+<h4>Conclusion</h4>
+
+<p>Times have changed for Linux. It now has an advanced tracer,
+<tt>bpftrace</tt>, 
+built from the ground-up for extended BPF and Linux that is solving real
+production problems at Netflix and other companies. With simple one-liners
+or short tools you can inspect your own code in custom ways. This article
+showed lots of examples.</p>
+
+<p>If you'd like to see how your code is running in Netflix production,
+email me your <tt>bpftrace</tt> program and I can reply with the output (so
+long as 
+it isn't company/customer revealing). If it helps you discover some
+inefficiencies with how Linux is executing our workload, and you develop a
+fix, that's great for Netflix. I am bgregg@netflix.com.</p>
+
+<p>[<em>Thanks to Alastair Robertson for creating <tt>bpftrace</tt>, and the
+<tt>bpftrace</tt>, BCC, and BPF communities for all the work over the past five
+years.</em>]</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#BPF-Tracing">BPF/Tracing</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Tracing-with_BPF">Tracing/with BPF</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Gregg_Brendan">Gregg, Brendan</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/793749/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor794134"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 18, 2019 19:04 UTC (Thu)
+                               by <b>SPYFF</b> (guest, #131114)
+                              [<a href="/Articles/794134/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Really good introduction to bpftrace. Finally a good alternative to perf probe creation then perf trace. I would really like to see something BPF based function flow tracing/graphing, that would be a true killer!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794134/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor794135"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 18, 2019 19:14 UTC (Thu)
+                               by <b>dw</b> (guest, #12017)
+                              [<a href="/Articles/794135/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Very excited about BTF arriving, but I'm a little confused. I expected this would mean every typical kernel would ship with type info, but read a few things in the past week to suggest this isn't quite how distros are actually going to treat it? (Sorry, lost links). The advantage of BTF for me is not having to mess with essentially getting a 'development setup' on any random machine that might need to be touched, but separate dbginfo-type package installation is exactly that<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794135/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor794141"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 18, 2019 20:16 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/794141/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As a side note -- tangential but I can't resist -- CTF support has already landed in binutils (only the library at first, but the linker portion is under review now and does work in my testing). This should let us have CTF type info in the kernel as well, built from the toolchain-generated CTF info :) and it's not stripped by strip(1), either, so the thing is always present in the binaries. (I will eventually teach it to handle FreeBSD etc CTF info as well -- but BTF is off the table, it's just too different.)<br>
+<p>
+(Obviously, it's non-loaded info, but it's crazy to parse this sort of stuff in kernel space anyway. This is for userspace tools to use when analysing other things... like, say, the kernel. The kernel is actually a special case: because of network booting, boots from /boot that is then unmounted etc it is quite common to boot from a kernel you can't actually access, and the kernel has *vast* amounts of type info in it, far too much to sanely load all of it at once. So we'll keep the kernel's type info in a separate, compressed, loadable archive. It's only every other binary that gets its type info in a built-in .ctf section.)<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794141/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor794143"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 18, 2019 20:23 UTC (Thu)
+                               by <b>SEJeff</b> (guest, #51588)
+                              [<a href="/Articles/794143/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is there a git repo you have so we can follow along by chance?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794143/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor794202"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CTF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 19, 2019 21:03 UTC (Fri)
+                               by <b>mjw</b> (subscriber, #16740)
+                              [<a href="/Articles/794202/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is already in the upstream binutils git repo:<br>
+<a href="https://sourceware.org/git/?p=binutils-gdb.git;a=history;f=libctf;hb=HEAD">https://sourceware.org/git/?p=binutils-gdb.git;a=history;...</a><br>
+<p>
+With additional work being discussed on the binutils mailinglist:<br>
+<a href="http://sourceware.org/ml/binutils/current">http://sourceware.org/ml/binutils/current</a><br>
+<p>
+Support for the linker posted here:<br>
+<a href="https://sourceware.org/ml/binutils/2019-07/msg00159.html">https://sourceware.org/ml/binutils/2019-07/msg00159.html</a><br>
+<p>
+The GCC support just saw its V4 RFC:<br>
+<a href="https://gcc.gnu.org/ml/gcc-patches/2019-07/msg01209.html">https://gcc.gnu.org/ml/gcc-patches/2019-07/msg01209.html</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794202/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor794191"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 19, 2019 13:57 UTC (Fri)
+                               by <b>nivedita76</b> (guest, #121790)
+                              [<a href="/Articles/794191/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+is there a doc somewhere? What is the use case for type info for binaries without debug info?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794191/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor794196"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 19, 2019 15:25 UTC (Fri)
+                               by <b>bgregg</b> (subscriber, #46639)
+                              [<a href="/Articles/794196/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Who are still the end users of CTF? I wanted it years ago, but now we have BTF.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794196/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor794197"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 19, 2019 15:43 UTC (Fri)
+                               by <b>dw</b> (guest, #12017)
+                              [<a href="/Articles/794197/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+FreeBSD is a heavy user<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794197/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor794146"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 18, 2019 20:58 UTC (Thu)
+                               by <b>bgregg</b> (subscriber, #46639)
+                              [<a href="/Articles/794146/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Don't overlook how much can be done from linux headers, without BTF. Out of the 100+ new tools I developed in the BPF book, only three of them hit issues with missing structs where I needed to manually declare them. Although, that ratio will get higher (worse) the deeper you dig into things.<br>
+<p>
+Facebook have already added BTF to the build process as CONFIG_DEBUG_INFO_BTF, and I've heard that it can be included in vmlinux, so the kernel is self describing. We will need to convince distros to enable this and whatever options to deliver BTF-embedded vmlinux's by default (I can ask Canonical for Ubuntu). The BTF dedup work keeps it small, so adding it by default should be acceptable.<br>
+<p>
+I don't think there is a howto about building vmlinux with BTF yet. Arnarldo did talk about the recent BTF work[0] and there's an older post from Andrii about it[1], and there's the BTF docs in the kernel [2].<br>
+<p>
+[0] <a href="http://vger.kernel.org/~acme/perf/btf-perf-pahole-lsfmm-san-juan-2019/#/3/2">http://vger.kernel.org/~acme/perf/btf-perf-pahole-lsfmm-s...</a><br>
+[1] <a href="https://facebookmicrosites.github.io/bpf/blog/2018/11/14/btf-enhancement.html">https://facebookmicrosites.github.io/bpf/blog/2018/11/14/...</a><br>
+[2] <a href="https://www.kernel.org/doc/html/latest/bpf/btf.html#btf-generation">https://www.kernel.org/doc/html/latest/bpf/btf.html#btf-g...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794146/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor794156"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 18, 2019 23:14 UTC (Thu)
+                               by <b>unixbhaskar</b> (guest, #44758)
+                              [<a href="/Articles/794156/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wonderful! Brendan ...enjoyed very much! <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794156/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor794155"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 18, 2019 23:17 UTC (Thu)
+                               by <b>dgc</b> (subscriber, #6611)
+                              [<a href="/Articles/794155/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Brendan, running on debian and installing the distro bpftrace package, stuff like your off-wake.bt script doesn't work.<br>
+<p>
+The problem is that your script does this:<br>
+<p>
+#include &lt;linux/sched.h&gt;<br>
+<p>
+and it assume that it picks up a kernel internal header file, not the uapi/linux/sched.h that the distro has installed in /usr/include/linux/. Hence:<br>
+<p>
+$ sudo ./offwake.bt<br>
+Unknown struct/union: 'task_struct'<br>
+Unknown struct/union: 'task_struct'<br>
+$<br>
+<p>
+And pointing it at the installed kernel header package via:<br>
+<p>
+$ sudo ./offwake.bt -I /usr/src/linux-headers-5.0.0-trunk-common/include -I /usr/src/linux-headers-5.0.0-trunk-common/arch/x86/include/<br>
+/usr/src/linux-headers-5.0.0-trunk-common/arch/x86/include/asm/bitops.h:134:2: warning: implicit declaration of function 'barrier' is invalid in C99 [-Wimplicit-function-declaration]<br>
+.....<br>
+fatal error: too many errors emitted, stopping now [-ferror-limit=]<br>
+<p>
+Throws so many warnings/errors that it aborts.<br>
+<p>
+So there's some magic in your setup that is not apparent from either the article, your code samples or the documentation. Any ideas?<br>
+<p>
+-Dave.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794155/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor794157"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 18, 2019 23:44 UTC (Thu)
+                               by <b>bgregg</b> (subscriber, #46639)
+                              [<a href="/Articles/794157/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'd raise this as a bpftrace issue please[0]; my guess is you've got an older version of LLVM, but the Debian package description does say llvm-7, which should be fine.<br>
+<p>
+Using bpftrace to check how bpftrace is running that tool on my system:<br>
+<p>
+# BPFTRACE_STRLEN=128 bpftrace -e 't:syscalls:sys_enter_openat /comm == "bpftrace"/ { printf("opening: %s\n", str(args-&gt;filename)); }' | grep sched<br>
+opening: /lib/modules/4.15.0-54-generic/build/include/linux/sched.h<br>
+opening: /lib/modules/4.15.0-54-generic/build/include/uapi/linux/sched.h<br>
+opening: /lib/modules/4.15.0-54-generic/build/include/asm-generic/bitops/sched.h<br>
+opening: /lib/modules/4.15.0-54-generic/build/include/linux/sched/prio.h<br>
+<p>
+(We're switching from BPF stack to map storage for strings, so needing to increase BPFTRACE_STRLEN should become a thing of the past.)<br>
+<p>
+[0] <a href="https://github.com/iovisor/bpftrace/issues">https://github.com/iovisor/bpftrace/issues</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794157/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor794159"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 19, 2019 0:44 UTC (Fri)
+                               by <b>dgc</b> (subscriber, #6611)
+                              [<a href="/Articles/794159/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ok, so there's no /lib/modules/&lt;vers&gt;/build directories on any of my machines. And my test VMs don't even run a modular kernel (it's supplied externally by qemu invocation) so I'm guessing this is the issue. I'll have a bit of a look around to see if I can get this populated and whether than makes the problem go away. If I can't solve it easily, then I'll raise an issue for it.<br>
+<p>
+Thanks!<br>
+<p>
+-Dave.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794159/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor794712"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2019 16:59 UTC (Fri)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/794712/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you build the kernel with "make bindeb-pkg" you'll get those kernel headers packaged up in a linux-headers-&lt;release&gt; package, same as for a distribution kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794712/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor794745"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2019 5:56 UTC (Sat)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/794745/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was wondering what that new CONFIG_IKHEADERS  in kernel 5.2 could possibly be useful for; this scenario (kernel image living outside the known filesystem) sounds like exactly it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794745/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor794166"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 19, 2019 9:13 UTC (Fri)
+                               by <b>nilsmeyer</b> (guest, #122604)
+                              [<a href="/Articles/794166/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That still doesn't make up for Netflix cancelling shows I like. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794166/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor888629"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel analysis with bpftrace</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 21, 2022 13:25 UTC (Mon)
+                               by <b>ideal</b> (guest, #157529)
+                              [<a href="/Articles/888629/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+# bpftrace -e &#x27;t:timer:hrtimer_start { @[ksym(args-&gt;function)] = count(); }&#x27;<br>
+<p>
+on kernel v5.16.x，need to include &lt;linux/hrtimer.h&gt;，or else enum hrtimer_mode is not defined.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/888629/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2019, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,619 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The trouble with iowait [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/989272/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/988985/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/989272/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The trouble with iowait</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 10, 2024</br>
+           </div>
+CPU scheduling is a challenging job; since it inherently requires making
+guesses about what the demands on the system will be in the future, it
+remains reliant on heuristics, despite ongoing efforts to remove them.
+Some of those heuristics take special note of tasks that are (or appear to
+be) waiting for fast I/O operations.  There is some unhappiness, though,
+with how this factor is used, leading to a couple of patches taking rather
+different approaches to improve the situation.
+<!-- middle-ad -->
+<p>
+In theory, a task that is waiting for short-term I/O (a state referred to
+in the kernel as "iowait") will need to execute soon.  That means that
+there can be some advantages to treating the task as if it were executing now.
+The kernel maintains a one-bit field (called <tt>in_iowait</tt>) in the <a
+href="https://elixir.bootlin.com/linux/v6.11-rc6/source/include/linux/sched.h#L756"><tt>task_struct</tt>
+structure</a> to mark such tasks.  This bit is set prior to waiting for an
+I/O operation that is expected to be fast (typically a block I/O operation)
+and cleared once the operation completes.  The kernel then uses this
+information in a couple of ways:
+<P>
+<ul class="spacylist">
+<li> When an iowait task wakes on completion of the I/O, the scheduler will
+     inform the CPU-frequency governor.  The governor, in turn, may choose
+     to run the target CPU at a higher frequency than it otherwise would.
+     Normally, the CPU-frequency decision is driven by the level of
+     utilization of the processor, but tasks performing a lot of I/O may
+     not run up a lot of CPU time.  That can lead the CPU-frequency
+     governor to choose a slower frequency than is optimal, with the result
+     that the next I/O operation is not launched as quickly and throughput
+     suffers.  Raising the frequency for iowait tasks is meant to help them
+     keep the I/O pipeline full.
+<li> If a CPU goes idle, the system will normally try to put it into a
+     lower-power state to save energy.  The deeper the sleep state, though,
+     the longer it takes for the CPU to get back to work when a runnable
+     task is placed on it.  The number of iowait tasks queued for a CPU is
+     used as a signal indicating upcoming CPU demand; the presence of those
+     tasks can cause the governor to choose a shallower sleep state than it
+     would otherwise.  </ul>
+<p>
+In theory, judicious use of the <tt>in_iowait</tt> flag can lead to
+significantly improved throughput for I/O-intensive tasks, and there are
+cases where that is demonstrably true.  But the iowait handling can bring
+other problems, and its effectiveness is not always clear.
+<p>
+<h4>Iowait and io_uring</h4>
+<p>
+Back in July 2023, Andres Freund <a
+href="/ml/io-uring/20230707162007.194068-1-andres@anarazel.de/">encountered
+a performance problem</a> in the kernel.  It was not quite as sensational
+as <a href="/Articles/967180/">certain other problems</a> he has run
+across, but still seemed worth fixing.  He noticed that PostgreSQL
+processes using io_uring ran considerably slower (as in, 20-40% slower)
+than those using normal, synchronous I/O.  In the synchronous case, the
+<tt>in_iowait</tt> flag was set, keeping the CPU out of deeper sleep
+states; that was not happening in the io_uring case.  Freund's proposed fix
+was to set the <tt>in_iowait</tt> flag for tasks waiting on the io_uring
+completion queue; that recovered the lost performance and more.  Io_uring
+maintainer Jens Axboe was <a
+href="/ml/io-uring/968801df-0973-4411-9092-95f272142a81@kernel.dk/">quickly
+convinced</a>; he merged the patch for the 6.5 kernel, and marked it for
+inclusion into the stable updates as well.
+<p>
+Once that patch was distributed in stable kernels, though, problem reports
+like <a
+href="/ml/linux-kernel/CAMEGJJ2RxopfNQ7GNLhr7X9=bHXKo+G5OOe0LUq=+UgLXsv1Xg@mail.gmail.com/">this
+one</a> from Phil Elwell began to appear.  Suddenly, tasks on the system
+were showing 100% iowait time, which looked like a confusing change of
+behavior: "<q>I can believe that this change hasn't negatively affected
+performance, but the result is misleading,</q>" Elwell commented.
+<p>
+The root of the problem is the treatment of the iowait state as being
+something close to actually running.  User-space tools (like <tt>top</tt>
+or <tt>mpstat</tt>) display it separately and subtract it from the idle
+time; the result is the appearance of a CPU that is running constantly,
+even though the CPU is actually idle almost all of the time.  That can
+result in the creation of confused humans, but also seemingly can confuse
+various system-management tools as well, leading them to think that a task
+with a lot of iowait time has gone off the rails.
+<p>
+Axboe responded with a change causing <tt>in_iowait</tt> to only be set in
+cases where there were active operations outstanding; it was <a
+href="https://git.kernel.org/linus/7b72d661f1f2">merged</a> later in the
+6.5 cycle.  That addressed the immediate reports, but has not put an end to
+the complaints overall.  For example, in February, David Wei <a
+href="/ml/all/20240224050735.1759733-1-dw@davidwei.uk">pointed out</a> that
+tools can still be confused by high iowait times; he included a patch to
+allow users to configure whether the <tt>in_iowait</tt> flag would be set
+or not.
+That patch went through a few variants, but was never merged.
+<p>
+Pavel Begunkov had <a
+href="/ml/all/678382b5-0448-4f4d-b7b7-8df7592d77a4@gmail.com">objected</a>
+to an early version of Wei's patch, saying that exposing more knobs to user
+space was not the right approach.  Instead, he said, it would be better to
+separate the concepts of reporting iowait time to user space and
+influencing CPU-frequency selection.
+<p>
+It took a while, but Axboe eventually went with that approach.  His <a
+href="/ml/all/20240819154259.215504-1-axboe@kernel.dk">patch series</a>,
+now in its sixth version, splits the <tt>in_iowait</tt> bit into two.  One
+of those (still called <tt>in_iowait</tt>) is used in CPU-frequency
+decisions, while the other (<tt>in_iowait_acct</tt>) controls whether the
+process appears to be in the iowait state to user space.  Most existing
+code in the kernel sets both bits, yielding the same user-space-visible
+behavior as before, but io_uring can only set <tt>in_iowait</tt>.  That,
+Axboe hopes, will bring an end to complaints about excessive iowait time.
+<p>
+This change is not universally popular; Peter Zijlstra <a
+href="/ml/all/20240905095134.GC15400@noisy.programming.kicks-ass.net">expressed
+some frustration</a> over the seeming papering-over of the problem: "<q>are
+we really going to make the whole kernel situation worse just because
+there's a bunch of broken userspace?</q>" User space is what it is, though,
+and Axboe's patch set can address some of the complaints coming from that
+direction — in the short term, at least.
+<p>
+<h4>Eliminating iowait</h4>
+<p>
+The discussion on the visibility of the iowait state has brought to the
+fore a related topic: does the iowait mechanism make any sense at all?  Or
+might iowait be a heuristic that has outlived its time?  Christian Loehle
+thinks that may be the case, and is <a
+href="/ml/all/20240905092645.2885200-1-christian.loehle@arm.com">working to
+remove</a> the iowait behavior entirely.
+<p>
+There are a number of problems with how iowait works now, he said.  A
+CPU-idle governor might keep a CPU in a higher-power state in anticipation
+that some iowait tasks will soon become runnable, but there is no guarantee
+that any of those tasks will actually wake in a short period of time.
+"Fast I/O" is not defined anywhere, and the kernel has no sense for how
+long an I/O operation will actually take.  So the CPU could be wasting
+power with nothing to do.  When a task does wake, the scheduler will pick
+what appears to be the best CPU to run it on; that may not be the CPU that
+was kept hot for it.
+<p>
+Boosting a CPU's frequency after a task wakes may appear to avoid these
+problems, but there are problems there too.  A task can migrate at any
+time, leaving its boosted CPU behind.  The targeted tasks run for short
+periods of time; the fact that they do not use a lot of CPU time is why the
+separate boosting mechanism was seen as necessary in the first place.  But
+changing a CPU's frequency is not an instant operation; the iowait task is
+likely to have gone back to sleep before the CPU ramps up to the new speed.
+That means that the CPU must be kept at the higher speed while the task
+sleeps, so that the boost can at least help it the next time it wakes.
+But, again, nobody knows when that will be or if the task will wake on the
+same CPU.
+<p>
+On top of all this, Loehle asserted that CPU-frequency boosting is often
+not helpful to I/O-intensive tasks in any case.  All of this reasoning (and
+more) can be found in the above-linked patch series, which removes the use
+of iowait in CPU-idle and CPU-frequency management entirely.  On the idle
+side, Loehle noted that the <a
+href="https://docs.kernel.org/admin-guide/pm/cpuidle.html#the-timer-events-oriented-teo-governor">timer
+events oriented (TEO) governor</a> gets good results despite having never
+used iowait, showing that the iowait heuristics are not
+performance-critical.  So, along with removing the use of iowait, the patch
+series makes TEO into the default CPU-idle governor, in place of the <a
+href="https://docs.kernel.org/admin-guide/pm/cpuidle.html#the-menu-governor">menu
+governor</a> that is the default in current kernels.
+<p>
+Loehle insisted that the iowait heuristics are only useful for
+"<q>synthetic benchmarks</q>".  For the io_uring case described above, he
+said, the real problem was the CPU-idle governor using iowait (or the lack
+thereof) to put the CPU into a deeper sleep state.  His patch series
+removes that behavior, so there is no longer any need for io_uring to set
+the <tt>in_iowait</tt> flag — or for changes to how iowait tasks are
+reported to user space.
+<p>
+He clearly thinks that this is the proper way to solve the problem; he <a
+href="/ml/all/c8cd6339-c168-4409-8cc4-e85e7ad92914@arm.com">described</a>
+Axboe's patch series as "<q>a step in the wrong direction</q>".  Axboe,
+though, <a
+href="/ml/all/9a0f2192-b897-4952-b4ea-7fe229f33001@kernel.dk">does not want
+to wait</a> for the iowait removal to run its course; his series solves the
+problem he is facing, he said, and it can always be removed later if iowait
+goes away.
+<p>
+Chances are that things will play out more-or-less that way.  Axboe's
+patches could land as soon as 6.12, bringing an end (hopefully) to
+complaints about how io_uring tasks appear to be using a lot of CPU time.
+Heuristics, though, have been built up over a long time and can be harder
+to get rid of; there will be a need for a lot of testing and benchmarking
+to build confidence that changing the iowait heuristics will not cause some
+workloads to slow down.  So Loehle's patch series can be expected to take
+rather longer to get to a point where it can be merged.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#io_uring">io_uring</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Scheduler-and_power_management">Scheduler/and power management</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/989272/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor989643"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Disk encryption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2024 16:13 UTC (Tue)
+                               by <b>abatters</b> (<b>&#x272D; supporter &#x272D;</b>, #6932)
+                              [<a href="/Articles/989643/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Years ago with:<br>
+<p>
+- Older kernels<br>
+- Software disk encryption<br>
+- A CPU that didn't support AES-NI<br>
+<p>
+...I used to manually switch the CPU frequency governor to 'performance' when copying a large amount of files, because otherwise the CPU would run at too low a frequency and slow things down considerably.  I guess the 'iowait' mechanism described here wasn't present or wasn't working as described back then.  I find less of a need to do the manual tweaking now, but I am not sure if it is because of newer kernels or having a CPU with AES-NI.<br>
+<p>
+So might I suggest benchmarking with software disk encryption before removing the iowait logic?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989643/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor989645"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Disk encryption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2024 16:36 UTC (Tue)
+                               by <b>cloehle</b> (guest, #128160)
+                              [<a href="/Articles/989645/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  So might I suggest benchmarking with software disk encryption before removing the iowait logic?</span><br>
+<p>
+Thanks for the hint and I can definitely do that for good measure.<br>
+Depending on when you ran that (&gt;15 years ago I assume?) there's definitely lots of other factors that changed like the block layer, the storage devices and their latencies, how we do DVFS / CPUfreq and PELT (I mentioned util_est helping here in the patchset), depending what you do maybe even the userspace API altogether, io_uring was mentioned in the article.<br>
+Something like copying a large set of files should behave pretty nicely, because there's little reason to not issue it in bulk and asynchronously. The rationale behind iowait boosting (the cpufreq part) really applies mostly to when the device is idle / not fully utilized in between issuing IO requests.<br>
+Modern storage devices can have many requests queued, so ideally the time userspace needs to get the next request ready is just fill the empty slot N-1 of the queue.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989645/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor989651"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Disk encryption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2024 17:43 UTC (Tue)
+                               by <b>Heretic_Blacksheep</b> (guest, #169992)
+                              [<a href="/Articles/989651/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Echoing the above post, unlike 32 bit x86 systems becoming increasingly rare due to attrition and a lack of software support.  It's still not uncommon to find older AMD64 CPUs of the early Core/Core2, Athlon, and Piledriver era without cryptographic accelerators still being used in back rooms.  I've got 3 such laptops scattered around in various states of use.  It's even possible to still get old-stock-never-used parts for them.  They all got cheap brand new RAM upgrades back in January extending their lifetime even longer.<br>
+<p>
+I think it would be a good thing to check the performance of those somewhat ancient systems against these patch series to see if the iowait removal has unanticipated side effects that may not easily show on more recent, and ostensibly more capable hardware.  That might or might not be a volunteer offer.  I haven't had to compile my own kernels for near 20 years.  No doubt I've lost the skill.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989651/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor989653"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Disk encryption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2024 18:01 UTC (Tue)
+                               by <b>cloehle</b> (guest, #128160)
+                              [<a href="/Articles/989653/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Note that, unless there's something in the stack that's not on my radar right now, not having/using AES-NI as opposed to having it should actually make iowait boosting *less* effective, not more. Taken to the extreme, if the workload is CPU-bound, we should already be driving the CPU at maximum frequency.<br>
+It's a bit counter-intuitive but the problem iowait boosting set out to solve originally was the CPU being driven at a low frequency because it appears mostly idle.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989653/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor989664"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Disk encryption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2024 18:52 UTC (Tue)
+                               by <b>Heretic_Blacksheep</b> (guest, #169992)
+                              [<a href="/Articles/989664/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ok, didn't think that through then, thanks for the explanation.  So... this sounds like something that would have been a necessary thing in the Sandy Bridge era where it was possible to have really slow IO buses like USB storage attached to USB 2 buses with encrypted media.  The Core 2 I5 2xxx series had AES-NI but some of the motherboards it ended up on didn't have USB 3 controllers so the CPU would be going into idle state because the IO bus was so slow.  Am I in the right mental model?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989664/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor989662"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reason for needing I/O wait</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2024 19:36 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/989662/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>If I've understood your descriptions properly, the point of I/O wait isn't about being CPU bound - it's about slow I/O devices (like hard drives instead of SSDs). A HDD can easily have an average seek time over 8ms, and a
+<a href="https://ark.intel.com/content/www/us/en/ark/products/codename/42174/products-formerly-haswell.html">Haswell-era Intel CPUs (4th Generation Core i7, for example)</a> has (according to <tt>static struct cpuidle_state hsw_cstates[]</tt> in intel_idle.c) a C-state with 7.7ms target residency, and 2.6ms exit latency (note that the numbers in the struct are in µs).
+<p>Without iowait, it's plausible that the system would determine that it can sleep for 7.7ms comfortably after a single read triggers a seek, and enter that deep sleep state; it then takes 2.6ms to wake up before it even processes the completion interrupt. With iowait, the process can contribute to "wakefulness" of the CPU, and ensure that it doesn't enter the deep C-state, and thus avoid sleeping.
+<p>Thus, I'd expect that you'd see the worst case with a CPU that has long exit latencies from the deep C state and a HDD as the I/O device - some of the time, you'll hit long exit latencies because cpuidle (correctly) predicts that you're going to sleep for a long time, and those exit latencies will hurt.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989662/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor989714"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reason for needing I/O wait</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2024 9:43 UTC (Wed)
+                               by <b>cloehle</b> (guest, #128160)
+                              [<a href="/Articles/989714/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You're correct but let me expand. I need to point out the difference between cpufreq and cpuidle regarding iowait behavior. One solves the IO utilization problem, the other selects shallower states on the CPU that had tasks go to sleep on with in_iowait set.<br>
+You're referring to cpuidle, in that case the long IO latency is a problem, as you said, with 8ms IO latency the cpuidle governor will have made a correct decision when choosing a state with a target residency ("How long do we have to sleep for this state to be worth it?") of &lt;8ms and doesn't care about the exit latency (I should note, exit latency is kind of treated as worst-case, so you will probably observe significantly less than 2.6ms in your example).<br>
+The theoretical worst-case would be an IO device that has a latency just above the target residency of the highest state (if the IO device is slower, the cost of the exit latency will diminish in the IO latency).<br>
+If you are in that theoretical worst-case and the exit latency does hurt you, you're much better off not relying on the governor altogether and either using the PM QoS API or disabling the state(s) while you're doing IO, menu (with iowait heuristic) wasn't always doing a good job there either, see the cover letter of my patch.<br>
+<p>
+Unfortunately even if we did say that iowait was a good metric to base cpuidle heuristics on (I have outlined why it isn't in the cover-letter), for how long will we choose to select shallower states? Tasks can be in_iowait for seconds even (i.e. aeons) and if you suffer 'end-to-end' throughput decrease by the exit latency (or for cpufreq the low CPU frequency) (and if that decrease might be a good trade-off for the power saved) is practically impossible for the kernel to tell.<br>
+Similarly to the iowait boost comment, if you're maximizing IO performance, that IO request that just completed is hopefully large enough for completion not too happen often or it is just one of many queued requests for the IO device.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989714/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor989674"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Contradiction?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2024 19:21 UTC (Tue)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/989674/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>I must be misunderstanding something.
+
+<p>So, if in kernels as recent as 6.5 it can be observed that "<q>PostgreSQL processes using io_uring ran considerably slower (as in, 20-40% slower) than those using normal, synchronous I/O</q>", then why, exactly, are we even saying that "<q>iowait [might] be a heuristic that has outlived its time</q>"?
+
+<p>Doesn't this exact observation prove the opposite?
+
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989674/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor989676"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Contradiction?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2024 19:23 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/989676/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      That point was addressed toward the end - the iowait heuristics can be said to have <i>caused</i> the worse behavior in the first place.  If the idle governor is no longer using iowait (or the lack thereof) to pick deeper sleep states, the problem should go away.  Assuming, of course, that the governor is making good decisions by some other means.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989676/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor989707"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Other situations with predictable future CPU needs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2024 8:31 UTC (Wed)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/989707/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is I/O really the only thing where we can anticipate a need for time on a CPU in the near future? It seems to me that this should maybe be turned into a more general concept?<br>
+<p>
+Also, the whole thing about keeping one CPU prepared for a task and the scheduler then choosing another seems broken.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989707/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor989776"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Please test your workloads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2024 17:46 UTC (Wed)
+                               by <b>cloehle</b> (guest, #128160)
+                              [<a href="/Articles/989776/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thank you Jonathan for the great article.<br>
+I just wanted to mention that the patchset about removing iowait behavior is posted as RFT and I mean that. I tested some workloads on some platforms, but with the quite diverse cpufreq and cpuidle world, I cannot possibly test them all.<br>
+I'm curious about regressions, but of course also very happy about any improvements people might find. Essentially spending power on CPU because of some iowait heuristic isn't free and the times the system can sustain 100% utilization of every component are gone for many platforms, you probably have a limited power and/or thermal budget.<br>
+There are regression reports caused by the power spent boosting the CPU then not being available to the GPU and reducing graphical performance.<br>
+<p>
+Even if you don't want to run a custom kernel, some distributions do provide both cpuidle governors: menu and teo (no iowait heuristic), so you can just switch at runtime and test the cpuidle part of the series.<br>
+If you are running intel_pstate active with HWP support, there is already a sysfs knob to enable/disable iowait boost for the cpufreq part, too: hwp_dynamic_boost.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/989776/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

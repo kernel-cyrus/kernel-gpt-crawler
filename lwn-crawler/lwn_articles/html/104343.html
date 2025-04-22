@@ -1,0 +1,602 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Watching filesystem events with inotify [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/104343/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/103367/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/104343/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Watching filesystem events with inotify</h1>
+<div class="Byline">[Posted September 29, 2004 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+It is not uncommon for applications to want to know when something happens
+within a subtree of a filesystem.  File managers are the most obvious
+example; if an application creates a new file within a directory
+represented in a file manager, users really like to see that new file show
+up, quickly.  One could also imagine other sorts of applications - such as
+security monitoring code or just daemons wanting to know when their
+configuration files have changed - which can benefit from being told about
+filesystem activity.
+<p>
+
+The Linux mechanism for communicating filesystem events to user space is
+called "dnotify."  A program watches a directory by opening it, then
+issuing a <tt>fcntl(F_NOTIFY)</tt> call.  Thereafter, changes in that
+directory will result in a <tt>SIGIO</tt> signal being sent to the process,
+which can then dig through its cached information and try to figure out
+just what happened.  People like to complain about dnotify; the interface
+is ugly (signals are a pain), it is hard to figure out what the changes
+are, it requires keeping files open and thus blocks the unmounting of
+removable media, etc.  So there has long been interest in a replacement.
+<p>
+
+The most visible effort in that direction is inotify, which has been under
+development (by John McCutchan) for some time now; recently Robert Love has
+jumped in to help the project along.  <a href="/Articles/104312/">inotify
+0.11</a> was released on September&nbsp;28, and an increasingly strong push
+is being made to get it included into -mm for wider exposure and testing. 
+<p>
+
+inotify works through a new character pseudo-device.  Any application which
+wants to monitor filesystem activity need only open <tt>/dev/inotify</tt>
+and issue one of two <tt>ioctl()</tt> commands to it:
+<p>
+<dl>
+<dt><tt>INOTIFY_WATCH</tt></dt>
+<dd>This call provides a filename and a mask of desired events; inotify
+    will begin watching the given file (or directory) for activity.
+</dd>
+<p>
+<dt><tt>INOTIFY_IGNORE</tt></dt>
+<dd>This call will stop the stream of events for the given file.</dd>
+</dl>
+<p>
+
+Quite a few possible events can be watched for: <tt>IN_ACCESS</tt> (the
+file was accessed), <tt>IN_MODIFY</tt> (the file was changed),
+<tt>IN_ATTRIB</tt> (file attributes changed), <tt>IN_OPEN</tt> and
+<tt>IN_CLOSE</tt> (for open and close events), <tt>IN_MOVED_FROM</tt> and
+<tt>IN_MOVED_TO</tt> (when files are renamed), <tt>IN_CREATE_SUBDIR</tt>
+and <tt>IN_DELETE_SUBDIR</tt> (creation and deletion of subdirectories),
+<tt>IN_CREATE_FILE</tt> and <tt>IN_DELETE_FILE</tt> (creation and deletion
+of files within a directory), <tt>IN_DELETE_SELF</tt> (when a monitored
+file is deleted), <tt>IN_UNMOUNT</tt> (when the filesystem containing the
+file is unmounted), and a couple of others.  The events themselves are
+obtained by simply reading from the device.  Thus a program can block on
+the device itself, or use <tt>poll()</tt> to incorporate notifications into
+a larger event-processing loop.  No signals are involved.
+<p>
+
+The actual implementation of inotify is relatively simple.  The in-core
+inode structure is augmented with a linked list of processes interested in
+events involving that inode.  When an <tt>INOTIFY_WATCH</tt> call is made,
+an entry is made in the corresponding list (and the inode is pinned into
+memory for the duration).  Various parts of the filesystem code get an
+extra <tt>inotify_inode_queue_event()</tt> call when an action succeeds.
+The rest is just the usual overhead of maintaining lists of events for
+processes, waking those processes up when new events arrive, etc.
+<p>
+While most interest and activity seems to be around 
+inotify, it is not the only dnotify replacement in circulation; <a
+href="/Articles/98922/">nonotify</a> is an alternative.    There
+are also some remaining issues about the interface exported by inotify.  It
+has been suggested that the inotify <tt>ioctl()</tt> calls should take file
+descriptors rather than file names; that change would eliminate problems in
+dealing with long file names and would also make access control checks
+happen automatically.  The interface would have to be done in such a way
+that the application could close the file and still receive events, though;
+otherwise dnotify's problems with unmount blocking and excessive use of
+file descriptors would just come back again.  These issues notwithstanding,
+inotify looks like it is headed for inclusion into a mainline kernel in the
+not-too-distant future.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Events_reporting">Events reporting</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Inotify">Inotify</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/104343/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor104435"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No more timer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 30, 2004 8:54 UTC (Thu)
+                               by <b>xav</b> (guest, #18536)
+                              [<a href="/Articles/104435/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Well, the only remaining bad design I saw (perhaps there are others) in inotify was the use of a fixed timer to dispatch events to listening tasks. RML has fixed that this week. Apparently some are still complaining about some quirks here and there, but that means they'll be ironed out soon.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/104435/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor105701"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Another pseudodevice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 7, 2004 23:36 UTC (Thu)
+                               by <b>nobrowser</b> (guest, #21196)
+                              [<a href="/Articles/105701/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Why?  Why not netlink?<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/105701/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor104442"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Watching filesystem events with inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 30, 2004 9:36 UTC (Thu)
+                               by <b>rjw</b> (guest, #10415)
+                              [<a href="/Articles/104442/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I remember long ago reading ( I believe on these very pages) that ioctl() was considered a bit skanky, and really people should be making devices that just need read() &amp; write().<br>
+<p>
+And if one of them has another meaning already, a separate control device should be created. <br>
+<p>
+That way echo &amp; friends can be used to test/use all this functionality...<br>
+<p>
+What happened to this idea?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/104442/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor104520"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Watching filesystem events with inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 30, 2004 13:27 UTC (Thu)
+                               by <b>elanthis</b> (guest, #6227)
+                              [<a href="/Articles/104520/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      The ioctl is simply easier to code and use, so it was used.<br>
+<p>
+The inotify developer is quite willing to switch to a write() based interface, if Linus/Andrew decide it's necessary.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/104520/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor104521"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Watching filesystem events with inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 30, 2004 14:18 UTC (Thu)
+                               by <b>rjw</b> (guest, #10415)
+                              [<a href="/Articles/104521/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I wasn't really asking about this specific case. <br>
+I was just wondering if this principle was still current... <br>
+it seems like new ioctl() calls are coming thick and fast. <br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/104521/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor104620"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Watching filesystem events with inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 30, 2004 20:10 UTC (Thu)
+                               by <b>elanthis</b> (guest, #6227)
+                              [<a href="/Articles/104620/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      ioctls are still frowned upon, yes.  they just happen to have their uses.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/104620/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor104531"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Typo</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 30, 2004 14:20 UTC (Thu)
+                               by <b>nhasan</b> (guest, #1699)
+                              [<a href="/Articles/104531/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <em>
+IN_CREATE_FILE and IN_DELETE_FILE (creation and creation of files within a directory), IN_DELETE_FILE (when a monitored file is deleted),
+</em>
+<p>
+Can you spot the problem?
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/104531/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor104537"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Typo</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 30, 2004 14:22 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/104537/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Fixed, thanks.
+<p>
+Request: typo reports sent to lwn@lwn.net have a higher chance of being seen and acted upon quickly...
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/104537/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor104590"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Watching filesystem events with inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 30, 2004 17:50 UTC (Thu)
+                               by <b>bronson</b> (subscriber, #4806)
+                              [<a href="/Articles/104590/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Is there any chance of getting the locate command to use inotify?  Incremental indexing would be sooo nice compared to brinnging my system to its knees at 2:00 every morning.<br>
+<p>
+Does anybody remember ON:Location?  That was a pretty amazing piece of software...  Of course, writing something like that nowadays would be quite a bit more involved than just patching out a few HFS hooks.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/104590/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor104750"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Watching filesystem events with inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 1, 2004 19:34 UTC (Fri)
+                               by <b>joeshaw</b> (guest, #13325)
+                              [<a href="/Articles/104750/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      You might be interested in <a href="http://gnome.org/projects/beagle">beagle</a>, which aims to index users' data and integrate it with the desktop.  You can follow a lot of the development in the blogs at <a href="http://planetbeagle.org">Planet Beagle</a>.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/104750/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor104803"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Watching filesystem events with inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2004 9:34 UTC (Sat)
+                               by <b>miallen</b> (guest, #10195)
+                              [<a href="/Articles/104803/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Here, here. Slocate is an abomination. Something about my laptop that causes the system to really freeze up. I turned it off long ago in favor of running it manually once in a while. It's really amazing such a crude technique has lasted this long. It will be a glorious day when slocate is replaced with something that has proper fs/kernel support.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/104803/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor149499"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Watching filesystem events with inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 29, 2005 9:14 UTC (Mon)
+                               by <b>gravious</b> (guest, #7662)
+                              [<a href="/Articles/149499/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      erm, check out rlocate :)<br>
+i use it on gentoo, and it just works (tm)<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/149499/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor105661"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">why not a syscall</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 7, 2004 20:10 UTC (Thu)
+                               by <b>huaz</b> (guest, #10168)
+                              [<a href="/Articles/105661/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Seems a syscall is more appropriate than a special device interface.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/105661/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor113863"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">why not a syscall</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2004 14:43 UTC (Thu)
+                               by <b>fursten</b> (guest, #26401)
+                              [<a href="/Articles/113863/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      My first reaction was "Why not add pioctl and use that?". For those who don't know pioctl: it's a syscall used by AFS and a couple of other remote fs implmementations. It's essentially ioctl on paths instead of file descriptors. This means that you get rid of the dnotify problems with the need of having the watched file open.<br>
+<p>
+I have on the other hand not studied this in any depth...<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/113863/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor140794"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Watching filesystem events with inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2005 18:02 UTC (Tue)
+                               by <b>stevef</b> (guest, #7712)
+                              [<a href="/Articles/140794/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      file/directory change notification would be particularly useful on network files (remote files accessed through network filesystems such as nfs or cifs, or cluster filesystems).  The current D_NOTIFY fcntl can be intercepted by a filesystem.  <br>
+<p>
+Can filesystems intercept inotify?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/140794/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor160673"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Watching filesystem events with inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 18, 2005 13:03 UTC (Fri)
+                               by <b>Drevic</b> (guest, #33945)
+                              [<a href="/Articles/160673/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      INOTIFY on SUSE 10.0 Linux<br>
+<p>
+Starting from kernel 2.6.13, inotify is part of the kernel.<br>
+/dev/inotify IS NOT AVAILABLE anymore - instead of it, there are system calls<br>
+<p>
+inotify_init<br>
+inotify_add_watch<br>
+inotify_rm_watch<br>
+<p>
+Please see my web page to find out more details:<br>
+<a rel="nofollow" href="http://www.drevic.wz.cz/index.html">http://www.drevic.wz.cz/index.html</a><br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/160673/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor168868"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Tutorial with code examples</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2006 19:50 UTC (Mon)
+                               by <b>dmarti</b> (subscriber, #11625)
+                              [<a href="/Articles/168868/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Robert Love's tutorial <a href="http://www.linuxjournal.com/article/8478">Intro to inotify</a> has good code examples (using a 2.6.13 kernel).
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/168868/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2004, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

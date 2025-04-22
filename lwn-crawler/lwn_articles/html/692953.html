@@ -1,0 +1,540 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Virtually mapped stacks 2: thread_info strikes back [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/692953/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/692485/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/692953/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Virtually mapped stacks 2: thread_info strikes back</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 29, 2016</br>
+           </div>
+In <a href="/Articles/692208/">last week's episode</a>, Andy Lutomirski had
+posted a set of patches moving kernel stacks to the kernel's
+<tt>vmalloc()</tt> area.  There are a number of advantages to doing so,
+including elimination of some high-order memory allocations, improved
+security, and better diagnostic output when a stack overflow occurs.  There
+was just one little problem: an additional 1.5µs of kernel overhead during
+process creation, a cost that Linus was unwilling to accept.  The first
+attempt to address that cost ran afoul of an obscure kernel data structure,
+but the end result looks to be a substantial cleanup of the kernel's
+management of process information.
+<p>
+The performance regression comes from using <tt>vmalloc()</tt> to allocate
+kernel stacks; <tt>vmalloc()</tt> is a relatively expensive way to allocate
+memory and has not been subjected to the same sort of optimization work
+that the slab allocators have seen.  One suggestion that had been made was
+to cache a small number of kernel stacks, allowing the quick reuse of
+cache-hot stacks after processes exit.  The hope was that, by eliminating
+<tt>vmalloc()</tt> calls, the code could be made faster in general.
+<p>
+<h4>A useless cache</h4>
+<p>
+Andy went off to implement this idea and <a
+href="/Articles/692955/">reported</a> a discouraging result: "<q>I
+implemented a 
+percpu cache, and it's useless.</q>"  The problem, in short, is that a
+process's resources (including its kernel stack) are not cleaned up
+immediately when the process exits.  Instead, the read-copy-update (RCU)
+mechanism is used to ensure that no references to those resources remain
+before they are freed.  That means (1)&nbsp;the freeing of the kernel
+stack will be delayed until the end of the next RCU grace period, and
+(2)&nbsp;the resources for <i>all</i> processes that exited during that
+grace period will be freed together.  So the cache for kernel stacks will
+almost always be empty, then will occasionally be hit with large numbers of
+released stacks, most of which will not fit into the cache and, thus, will
+be simply 
+freed.  In other words, the cache hit rate, especially with fork-heavy
+loads, will be close to zero.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+In theory there should be no need for a process's kernel stack after that
+process has died, so one might think that the stack could be released
+immediately, even if the other data structures need to stay around.  The
+problem is that the core information the kernel maintains about processes
+lives in two different places:
+<p>
+<ul>
+<li> The massive <a
+     href="https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/tree/include/linux/sched.h#n1457"><tt>task_struct</tt></a>
+     structure, found in <tt>&lt;linux/sched.h&gt;</tt>.  This structure,
+     which is (modulo a disturbing number of <tt>#ifdef</tt> blocks)
+     architecture-independent, contains most of the information the kernel
+     needs to know about a running process.
+<p>
+<li> The small <a
+     href="https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/thread_info.h#n45"><tt>thread_info</tt></a>
+     structure, which is architecture-specific.
+</ul>
+<p>
+The <tt>task_struct</tt> structure is allocated from the heap like most
+other kernel data structures.  The <tt>thread_info</tt> structure, though,
+lives at the bottom of the kernel stack, making it impossible
+to reuse the kernel stack as long as something might try to reference that
+structure.  For a brief period, Linus pursued changes
+that would allow the <tt>thread_info</tt> structure to be freed quickly,
+even while the 
+<tt>task_struct</tt> structure persisted, but it quickly became clear that
+no easy solutions were to be found in that direction.  Some information in
+<tt>thread_info</tt>, the <tt>flags</tt> field in particular, can be
+accessed at surprising times and needs to remain available as long as the
+kernel has any record of the associated process at all.
+<p>
+The existence of these two structures is something of a historical
+artifact.  In the early days of Linux, only the <tt>task_struct</tt>
+existed, and the whole thing lived on
+the kernel stack; as that structure grew, though, it became too large to
+store there.  But placement on the kernel stack conferred a significant
+advantage: the structure could be quickly located by masking some bits out
+of the stack pointer, meaning there was no need to dedicate a scarce
+register to storing its location.  For certain heavily used fields, this
+was not an optimization that the kernel developers wanted to lose.
+So, when the <tt>task_struct</tt> was moved out of the kernel-stack area, 
+a handful of important structure fields were left there,
+in the newly created <tt>thread_info</tt> structure.  The resulting
+two-structure solution is still present in current kernels, but it doesn't
+necessarily have to be that way.
+<p>
+<h4>Getting rid of thread_info</h4>
+<p>
+In relatively recent times, the kernel has moved to using per-CPU variables
+to store many types of frequently-needed information.  The scheduler caches
+some crucial 
+process-related information about the currently running process in the
+per-CPU area; that turns out to be faster than looking at the bottom of the
+kernel stack.  So the amount of useful data stored in <tt>struct
+thread_info</tt> has decreased over time.  Given that, an obvious question
+comes to mind: could the <tt>thread_info</tt> structure be removed
+altogether?  The question is not exactly new; moving <tt>struct
+thread_info</tt> away from the kernel stack was one of Andy's objectives
+from the beginning.  But the performance issue gave this question a higher
+level of urgency.
+<p>
+Linus quickly <a href="/Articles/692957/">discovered</a> that some users of
+the <tt>thread_info</tt> structure have no need of it, even with no other
+changes.  Mostly they used it to find the <tt>task_struct</tt> structure —
+which, typically, they already had a pointer to.  He fixed those, and
+committed the result for the <a href="/Articles/692762/">4.7-rc5</a>
+release.  This kind of change might not qualify as the sort of bug fix that
+late-cycle patches are normally restricted to, but he <a
+href="/Articles/692958/">made it clear</a> that he thought they were an
+acceptable change: "<q>Those are the 'purely legacy reasons for a bad
+calling convention', and I'm ok with those during the rc series to make it
+easier for people to play around with this.</q>"
+<p>
+He pushed the work further, getting to a point where he could move the
+(somewhat reduced) <tt>thread_info</tt> structure off the stack, and embed
+it within the <tt>task_struct</tt> instead.  That work progressed to
+where it would boot on a test system; Andy then picked it up and integrated it
+into his larger patch series.
+<p>
+As of this writing, that series is in <a href="/Articles/693026/">its
+fourth revision</a>.  It moves many <tt>thread_info</tt> fields into
+<tt>task_struct</tt>, changing the users of those fields along the way.  At
+the end, the 
+<tt>thread_info</tt> structure, now containing only the <tt>flags</tt>
+field, is moved over to the <tt>task_struct</tt> as well.  Getting there
+requires a number of changes to the low-level architecture code, so it is
+an x86-only change at the moment.  It seems likely that other architectures
+will follow along, though; getting rid of the separate <tt>thread_info</tt>
+structure is a useful cleanup and security enhancement, even without the
+rest of the work.
+<p>
+With regard to the real objective of the patch set (moving kernel stacks to
+the <tt>vmalloc()</tt> area): the removal of the
+<tt>thread_info</tt> structure makes it possible to free the kernel stack
+as soon as the owning process exits — no RCU grace period required.  That,
+in turn, makes it sensible to add a small per-CPU cache holding up to two
+free kernel stacks.  With the cache, Andy says, the 1.5µs performance
+regression becomes a 0.5&ndash;1µs performance gain.
+<p>
+So, at this point, Andy has a patch series that simplifies some core code,
+provides immediate detection of kernel-stack overruns, gives better
+diagnostics when that occurs, improves the security of the kernel, and even
+makes things run faster.  Unsurprisingly, objections are now becoming
+difficult to find.  The only remaining question might be when to merge this
+code, and the answer appears to be during the 4.8 merge window.  That is
+arguably aggressive, given the fundamental nature of the changes and the
+fact that there must certainly be a surprise or two still lurking there;
+indeed, <a href="/Articles/693021/">one such surprise</a> is still being
+worked out as of this writing.
+But the 4.8 cycle should give time to work through those surprises, and the
+end result should be worth having.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Kernel_stack">Kernel stack</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Linux_kernel">Linux kernel</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/692953/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor693057"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped stacks 2: thread_info strikes back</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 30, 2016 6:03 UTC (Thu)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/693057/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The kthread_stop surprise should be fixed in my got tree now.  The remaining known issues are bluetooth, rxkad, tcp md5, virtio_net, and virtio_console.  All but the virtio ones have fixes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693057/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor693063"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped stacks 2: thread_info strikes back</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 30, 2016 8:22 UTC (Thu)
+                               by <b>rwmj</b> (subscriber, #5474)
+                              [<a href="/Articles/693063/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Does this mean we can now have stacks which are substantially larger than the current 16K limit?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693063/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693086"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Larger stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 30, 2016 14:06 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/693086/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I've seen no talk of increasing the stack size, but allocating them from the <tt>vmalloc()</tt> area would certainly remove the biggest impediment to doing so.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693086/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693348"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Larger stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2016 13:12 UTC (Mon)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/693348/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed we could possibly do things the way userspace does, and have small initial stacks which use a guard page to expand at need, with a high sanity check to kill things if it gets huge. If that works (and it might not, since the kernel stack can presumably expand at times when vmalloc() is hard to do), hello recursive algorithms, deep recursion of nested filesystems, etc etc... it's probably hard to impossible but it sounds like a good place to aim for.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693348/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693368"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Larger stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2016 17:35 UTC (Mon)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/693368/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This would be difficult for a different reason on x86: page faults use the stack.  This means that a stack overflow gets a double fault, and the manual warns against trying to recover.<br>
+<p>
+Also, what happens if allocation fails?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693368/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693474"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Larger stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2016 16:07 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/693474/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ug! OK, that's a deal breaker. A real shame, but stacks are "very hardware" and limitations like this often turn up. (Also, double faults are extra-slow: you don't want to incur those unless you really have to.)<br>
+<p>
+I do suspect that recovery from double faults is, at best, very lightly tested, if at all, so even if it works on one CPU it might well fail on another. Ah well :(<br>
+<p>
+(On allocation failure, you obviously kill the process just like you would on a detected stack overflow in the soon-to-be-current world. That's no different from userspace.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693474/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693494"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Larger stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2016 21:55 UTC (Tue)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/693494/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; On allocation failure, you obviously kill the process just like you would on a detected stack overflow in the soon-to-be-current world. That's no different from userspace.</font><br>
+<p>
+Userspace has the kernel to clean up things like locks that were held at the time the process was killed. Who cleans up when a kernel thread dies unexpectedly due to an asynchronous out-of-memory condition? You can't just terminate a kernel thread at any arbitrary point, but you can't resume the thread either without extending the stack.<br>
+<p>
+Stack overflow is a programming error; you know how much stack you allocated and—barring unbounded recursion, variable-length arrays, or alloca()—can statically calculate how much you need (in the worst case) to complete a given function call. Stack overflow in a kernel thread could thus be treated as a bug with the potential to halt the system. An out-of-memory condition resulting from delayed allocation of stack pages is an entirely different matter. That can occur at any time, depending on the amount of memory available.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693494/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693601"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Larger stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 6, 2016 20:18 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/693601/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wasn't thinking kernel threads for this, I was thinking user threads in kernel mode -- but these have the same problem because they're not killable at arbitrary points, only when schedule()d or when returning to userspace. So yes, indeed, this is a doomed idea (like most of my ideas!)<br>
+<p>
+I was hoping we could *get*, not unbounded, but arbitrarily deep recursion: in complex situations like stacks of filesystems it can be very hard to compute how much space might be needed in advance, and possibly impractical to allocate it for every task just in case. What you're saying here is that system administrators can cause kernel bugs by stacking filesystems. That's the situation we have now, but it's very far from ideal: there is no conceptual reason why you shouldn't be able to stack the things fifty or five million deep (though obviously performance would start to suck!)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693601/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693614"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Larger stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 6, 2016 21:30 UTC (Wed)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/693614/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; What you're saying here is that system administrators can cause kernel bugs by stacking filesystems. ... there is no conceptual reason why you shouldn't be able to stack the things fifty or five million deep</font><br>
+<p>
+There are other ways to achieve the same result. One approach would be to employ "trampoline" functions; this only works if one filesystem can hand off to another without any further involvement. Rather than call the other filesystem directly you return a transformed version of the request, unwinding the stack, and a top-level iterative function passes the transformed request on to the other filesystem. When applicable, this approach can handle any number of nested filesystems in constant space.<br>
+<p>
+Another approach which is more compatible with existing code would be to explicitly extend the stack before calling into the other filesystem. Allocation failure at this point could be handled safely like any other out-of-memory condition:<br>
+<p>
+if (!ensure_minimum_stack(8192)) return -ENOMEM;<br>
+nested_filesystem_call();<br>
+<p>
+The problem was in extending the stack implicitly through page faults, where allocation cannot be allowed to fail, not the basic concept of having an extendable stack.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693614/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor693497"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped stacks 2: thread_info strikes back</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2016 22:34 UTC (Tue)
+                               by <b>roblucid</b> (guest, #48964)
+                              [<a href="/Articles/693497/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Nice one Linus, by not accepting the trade off with performance, the result is in end much better!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693497/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

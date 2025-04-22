@@ -1,0 +1,379 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Solving starvation problems in the scheduler [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/176635/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/175787/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/176635/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Solving starvation problems in the scheduler</h1>
+<div class="Byline">[Posted March 22, 2006 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+The Linux CPU scheduler has come a long way since the early 2.6 days, when
+it was the cause for quite a bit of worry.  Scheduling domains fixed many
+of the problems on larger systems, while a whole set of interactivity
+heuristics made desktops work better.  The interactivity work, in
+particular, is based on the notion of a "sleep average."  Any process which
+spends a significant amount of its time sleeping, relative to the time it
+runs, is deemed to be "interactive" and is given a higher priority.
+<p>
+
+This mechanism works well enough that few people complain about interactive
+response with current 2.6 kernels.  Every now and then, however, somebody
+comes up with a workload which manages to fool the scheduler and bring the
+desktop to a halt.  Mike Galbraith has been chasing down a few of these,
+producing patches in the process which should help to mitigate the
+problems.
+<p>
+
+The Linux scheduler maintains two "arrays" of run queues for each
+processor.  When a process starts out, it is given a time slice and put
+onto the "active" array, where it can compete for the CPU.  Once the time
+slice runs out, that process will move over to the "expired" array, where
+it languishes until all other runnable processes have used up their time
+slices.  Once all processes are on the expired array, the two arrays are
+switched and the process begins again.
+<p>
+
+There is an exception, however, in the 2.6 kernel: a process which is
+deemed to be interactive (because it spends enough time in interruptible
+sleeps) will, on expiration of its time slice, be put back onto the active
+array.  As a result, an interactive process should not have to wait while
+some long-running batch process cranks through its time slice.  To keep
+this mechanism from blocking out expired processes altogether, however, the
+scheduler checks to see if the processes in the expired array have been
+waiting for too long.  Once the starvation threshold has been exceeded, all processes
+go to the expired array at the end of their slices, allowing the scheduler
+to perform the array switch in the relatively near future.
+<p>
+
+Mike found that, on a system with a heavily-loaded Apache server running,
+tasks could find themselves starved for long periods of time; it seems that
+the starvation-avoidance logic was not working right.  The problem turned
+out to be in the wakeup code.  That code was always putting
+freshly-awakened processes onto the active array, regardless of what was
+going on elsewhere in the system.  With a large number of server processes
+being continually awakened as requests came in, the scheduler was never
+able to switch arrays.  <a href="/Articles/176638/">The fix</a> was to put
+the starvation test into <tt>__activate_task()</tt>; as a result, when
+expired processes are starving, processes will be awakened onto the expired
+array.  That small fix fixed much of the problem.
+<p>
+
+A fuller fix, however, involves the <a
+href="http://lwn.net/Articles/173469/">task throttling patch</a> which Mike
+has been working on for some time.  There's a number of fixes involved in
+this work, but the core observation is this: the "sleep average" code can
+be too generous to processes which sleep only part of the time.  A process
+which manages regular, short sleeps can boost its priority significantly,
+to the point that it can force out other processes running on the system.
+And once a process obtains an interactivity bonus, it can keep it for some
+time.  This behavior is all by design; some interactive programs can sit
+for a very long time, then perform some serious processing for a while.
+Think about the X server with that nice compositing window manager; it
+spends quite a bit of time idle, only to pin the CPU when the user starts
+dragging windows around.  But this behavior can also give an interactive
+priority bonus to processes which are not truly interactive.
+<p>
+
+The solution here involves a few changes.  One of them is to simply be a
+bit less generous with the interactivity bonuses.  But the core of the
+patch is a function called <tt>refresh_timeslice()</tt>.  This function
+looks at the current sleep average, and compares it to the amount of time
+that the process is actually spending in the CPU.  Based on this
+comparison, a per-process throttle time is adjusted.  If more CPU time is
+being used than would be suggested by the sleep average, the throttle time
+is moved backward; otherwise it moves forward.  If a process runs into the
+throttle time, its sleep average starts to decay quickly, depriving it of
+its interactivity bonus.
+<p>
+
+The throttle time provides a grace period which allows processes to use
+short bursts of CPU time without being penalized.  The amount of grace time
+can be adjusted by way of a pair of knobs exported by the throttling code.
+"Grace&nbsp;1" is the amount of time new processes get to establish their
+averages before being exposed to the throttling mechanism, while
+"grace&nbsp;2" is how long a process can run above its expected CPU usage
+before the throttle kicks in.  There have been some objections to the
+addition of these knobs; they look like another obscure set of kernel
+tunables that most administrators will not know how to set properly.  So
+there has been a push for the knobs to be replaced with a simple on/off
+switch.  Systems meant for interactive use would leave the throttling on,
+while server systems would simply turn it all off.  Working this issue out
+may delay the acceptance of this patch, though there seems to be little
+disagreement with the rest of it.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Interactivity">Interactivity</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Scheduler">Scheduler</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/176635/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor176928"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solving starvation problems in the scheduler</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 24, 2006 0:34 UTC (Fri)
+                               by <b>xorbe</b> (guest, #3165)
+                              [<a href="/Articles/176928/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I apologize, but the whole Linux scheduler strikes me as so messed up.  I have a 2.5GHz A64 w/2GB DDR500 that posts 7.8GB/s bandwidth in RMMA benchmark, with a recent hdd running 64-bit Linux -- and silly things like "ls" in the Mandriva cooker folder or copying to a USB2 drive bring the machine to a halt otherwise.  My WinXP partition provides better interactivity, and it's starting to burn.  I don't know what the problem is in the 2.6 series, but I wish it would get resolved soon.<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/176928/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor177033"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solving starvation problems in the scheduler</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 24, 2006 21:09 UTC (Fri)
+                               by <b>rahulsundaram</b> (subscriber, #21946)
+                              [<a href="/Articles/177033/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+<p>
+Could it be possible that you are running into a distribution specific issue rather than a kernel problem?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/177033/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor180859"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solving starvation problems in the scheduler</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2006 21:02 UTC (Thu)
+                               by <b>jospoortvliet</b> (guest, #33164)
+                              [<a href="/Articles/180859/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      well, there simply ARE problems with the kernel scheduler... tough he <br>
+might have more problems with the I/O scheduler (he should try CFQ...), as <br>
+i said some time ago (below here), the cpu scheduler needs some work, too. <br>
+and imho id needs removal... and replacement.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/180859/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor177162"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solving starvation problems in the scheduler</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 26, 2006 20:07 UTC (Sun)
+                               by <b>jospoortvliet</b> (guest, #33164)
+                              [<a href="/Articles/177162/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      as someone above said, this scheduler often comes up kind'a badly in the <br>
+news. really feels like a big hack... if you compare the design with dr. <br>
+Con Kolivas' [1] staircase scheduler - i really feel the kernel developers <br>
+should think about merging it.<br>
+<p>
+its designed with interactivity in mind, not hacked on. all this fiddling <br>
+to work around a (seemingly) wrong design - it doesn't sound like the <br>
+right thing to do... and if it saves hundreds of lines of code, and <br>
+generally seems to perform better [2], wouldn't it be smarter to get it <br>
+in, even as an alternative choice, for even wider testing (altough it is <br>
+quite mature, after all these years of hard work)? <br>
+<p>
+[1] <a href="http://members.optusnet.com.au/ckolivas/kernel/">http://members.optusnet.com.au/ckolivas/kernel/</a><br>
+[2] <a href="http://bhhdoa.org.au/pipermail/ck/2006-March/005693.html">http://bhhdoa.org.au/pipermail/ck/2006-March/005693.html</a><br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/177162/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor177918"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solving starvation problems in the scheduler</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 31, 2006 0:06 UTC (Fri)
+                               by <b>cyrus</b> (subscriber, #36858)
+                              [<a href="/Articles/177918/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      What are you talking about? This article refers to the CPU SCHEDULER, which decides when which process is about to run. The Staircase scheduler from Con is an I/O scheduler, which controls a block device. (When to access disk and stuff..)<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/177918/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor177919"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Staircase scheduler</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 31, 2006 0:27 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/177919/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      No, actually, the staircase scheduler is a CPU scheduler.  See <a href="http://lwn.net/Articles/87729/">this LWN article</a> from 2004.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/177919/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor177922"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Staircase scheduler</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 31, 2006 1:09 UTC (Fri)
+                               by <b>cyrus</b> (subscriber, #36858)
+                              [<a href="/Articles/177922/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Oh.. good to know, sorry for my previous post then, my fault.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/177922/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2006, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

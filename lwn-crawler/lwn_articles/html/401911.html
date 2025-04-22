@@ -1,0 +1,343 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Preventing overly-optimistic spinning [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/401911/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/400914/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/401911/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Preventing overly-optimistic spinning</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Benefits for LWN subscribers</b>
+<p>
+The primary benefit from <a href="/Promo/nst-nag5/subscribe">subscribing to LWN</a>
+       is helping to keep us publishing, but, beyond that, subscribers get
+       immediate access to all site content and access to a number of extra
+       site features.  Please sign up today!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 25, 2010</br>
+           </div>
+A kernel mutex is a sleeping lock; a thread which loses in contention for a
+specific mutex will be blocked until that mutex becomes available.  At least,
+that's what the documentation says; the reality is a bit more complicated.
+Experience has shown that throughput can sometimes be improved if processes waiting
+for a lock do not go to sleep immediately.  In particular, if (1)&nbsp;a
+thread finds a mutex to be unavailable, and (2)&nbsp;the holder of the
+mutex is currently running, that thread will spin until the mutex becomes
+available or the holder blocks.  That "optimistic" spinning allows the transfer of the
+mutex without going through a sleep/wakeup cycle, and, importantly, it
+gives the mutex to a running (and, thus, cache-hot) thread.  The result is
+an unfair, but better-performing mutex implementation.
+<p>
+Except that, as it turns out, it doesn't always perform better.  While
+doing some testing on a 64-core system, Tim Chen noticed a problem:
+multiple threads can be waiting for the same mutex at any given time.  Once
+the mutex becomes available, only one of this spinning threads will obtain
+it; the others will continue to spin, contending for the lock.  In general,
+optimism can be good, but excessive optimism can be harmful if it leads to
+continued behavior which does not yield useful results.  That would appear
+to be the case here.
+<p>
+Tim's response was <a href="/Articles/401912/">a patch</a> changing the
+optimistic spinning implementation slightly.  There is now an additional
+check in the loop to see if the owner of the mutex has changed.  If the
+ownership of a mutex changes while a thread is spinning, waiting for it,
+that means that it was released and somebody else grabbed it first.  In
+other words, there is heavy contention and multiple CPUs are spinning in a
+race that only one of them can win.  In such cases, it makes sense to just
+go to sleep and wait until things calm down a bit.
+<p>
+Various benchmark results showed significant performance improvements in
+heavily-contended situations.  That was enough to get the patch merged for
+2.6.36-rc2.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Locking_mechanisms-Mutexes">Locking mechanisms/Mutexes</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/401911/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor402082"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing overly-optimistic spinning</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2010 8:37 UTC (Thu)
+                               by <b>liljencrantz</b> (guest, #28458)
+                              [<a href="/Articles/402082/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wouldn't an alternative strategy, one where at most one thread will ever spin waiting for a specified Mutex have fewer edge cases?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/402082/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor402213"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing overly-optimistic spinning</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2010 15:12 UTC (Thu)
+                               by <b>PaulMcKenney</b> (<b>&#x272D; supporter &#x272D;</b>, #9624)
+                              [<a href="/Articles/402213/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hard to say.  The usual way to see that many threads are spinning is for these threads to write (using atomic instructions) to the lock word, which would result in more cache thrashing, and would delay the lock release.  This usually slows things down rather than speeding them up.<br>
+<p>
+But you can always give it a try and see what happens.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/402213/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor402225"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing overly-optimistic spinning</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2010 16:10 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/402225/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess it would depend on the cache protocol too, wouldn't it?  <br>
+<p>
+In a MESI, you would end up bouncing lines (S =&gt; M transition on the first writer, S =&gt; I on the others, followed by M =&gt; S and I =&gt; S).  An ESI system (write through caches w/ no notion of "modified"), you'd get something similar.<br>
+<p>
+In a MOESI such as Athlon's, I believe you minimize the cost.  The first writer does an S =&gt; O and broadcasts the write to everyone else that's in S.<br>
+<p>
+From that, I'd say it's rather important to measure on multiple architectures, since the tradeoffs will vary.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/402225/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor402229"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing overly-optimistic spinning</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2010 16:25 UTC (Thu)
+                               by <b>PaulMcKenney</b> (<b>&#x272D; supporter &#x272D;</b>, #9624)
+                              [<a href="/Articles/402229/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree with your MESI assessment, but would want to see test results for the MOESI case -- there would be added traffic from the broadcasts.  Which is all to say that I very much agree with you about the importance of testing on multiple architectures!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/402229/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor402207"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing overly-optimistic spinning</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2010 14:43 UTC (Thu)
+                               by <b>juanjux</b> (guest, #11652)
+                              [<a href="/Articles/402207/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Spinning threads". <br>
+<p>
+This is why I read this section.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/402207/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor402863"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing overly-optimistic spinning</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 30, 2010 17:25 UTC (Mon)
+                               by <b>dvhart</b> (guest, #19636)
+                              [<a href="/Articles/402863/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As I'm working on a similar mechanism for user-space mutexes, this caught my eye. One concern I have with the "if owner-changed then sleep" approach is the possibility of effectively disabling spinning for all but the first spinner. Perhaps this is unavoidable. I have considered an "only one spinner at a time" approach, and while it avoids a bunch of spinners stacking up, it has the same end result. I suppose workloads for which this is a benefit are not so concerned about a single block of threads trying to acquire a lock once, but rather several threads repeatedly trying to acquire the lock for the duration of the run. In this latter case, a heavily contended lock will frequently have a spinner. I wonder if the single spinner limitation would allow the system itself to perform better (on other things). <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/402863/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor403453"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing overly-optimistic spinning</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 3, 2010 8:20 UTC (Fri)
+                               by <b>efexis</b> (guest, #26355)
+                              [<a href="/Articles/403453/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Do locks get served in a first-come-first-served basis? If so, a single spinner solution would be an advantage, but if not, what you'd be doing is preempting a schedular decision, as a lock might not be passed to the first spinner, but to the one with the highest priority. You wouldn't want the high priority task to sleep because a low priority task started spinning first, and then have to wake the high priority task when the lock becomes available, have the low priority task notice an ownership change and then sleep.<br>
+<p>
+Are there other useful things that can be done while spinning on the processor that add latency to waking up when the lock is gained? Like saving power? Or does switching power states tend to be too hungry an operation in itself? Am just curious as a non-kernel-hacker :-)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/403453/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2010, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

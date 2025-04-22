@@ -1,0 +1,512 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Preventing kernel-stack leaks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/748642/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/748358/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/748642/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Preventing kernel-stack leaks</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 7, 2018</br>
+           </div>
+The kernel stack is a small, frequently reused region of memory in each
+thread's address space.  That reuse allows for efficient memory use and
+good performance as a result of cache locality, but it also presents a
+problem: data left on the stack can also end up being reused in ways that
+were not intended.  The PaX patch set contains a mechanism designed to
+clear that data from the stack and prevent leaks, but an attempt to merge
+that code into the kernel has run into a snag.
+<p>
+By design, the C language does not define the contents of automatic
+variables — those that are created on the stack when the function defining
+them is called.  If the programmer does not initialize automatic variables,
+they will thus contain garbage values; in particular, they
+will contain whatever happened to be left on the stack in the location
+where the variables are allocated.  Failure to initialize these variables
+can, as a result, lead to a number of undesirable behaviors.  Writing an
+uninitialized variable to user space will leak the data on the stack, which
+may be sensitive in one way or another.  If the uninitialized value is used
+within the function, surprising results may ensue; if an attacker can find
+a way to control what will be left on the stack, they may be able to
+exploit this behavior to compromise the kernel.  Both types of
+vulnerability have arisen in the kernel in the past and will certainly
+continue to pop up in the future.
+<p>
+Note that, while most uses of uninitialized data can be squarely blamed on
+the programmer, that is not always the case.  For example, structures
+stored on the 
+stack may contain padding between fields, and the compiler may well decide
+that it need not initialize the padding, since the program will not use
+that memory.  But that memory can still be exposed to user space, should
+the kernel write such a structure in response to a system call.
+<p>
+The best solution to this problem would be to find and fix every location
+where on-stack variables are not properly initialized.  Tools like <a
+href="/Articles/612153/">KASan</a> can help with this task, but chasing
+down this kind of problem is a never-ending game.  It would, thus, be nice
+to have a way of automatically preventing this type of vulnerability.
+<p>
+For some time, Alexander Popov has been working on a port of the <a
+href="https://pax.grsecurity.net/">PaX</a> 
+STACKLEAK feature to the mainline kernel; the <a
+href="/Articles/748485/">ninth version of the patch set</a> was posted on
+March&nbsp;3.  This series adds a GCC plugin that tracks the maximum depth
+of the kernel stack; this information can be used to help prevent stack
+overruns.  The main purpose of this tracking, though, is to allow the
+kernel to clear the kernel stack on return from every system call; the
+stack-clearing code can use the maximum depth to avoid clearing more stack
+space than was actually used.  According to the cover letter, turning on
+this feature incurs a performance cost of about&nbsp;1%; in return for this
+overhead, kernel code always runs in an environment where the contents of the
+stack are known to have been properly set.
+<p>
+Incidentally, the "clearing" of the stack is not setting it to zero.
+Instead, a special poison value is used; that should help to identify
+crashes that are caused by the use of uninitialized on-stack variables.
+<p>
+Kees Cook <a href="/Articles/748646/">remarked</a> that this series
+"<q>should be ready to land pretty soon</q>", but that was before
+<a href="/Articles/748647/">Linus Torvalds became aware of it</a>.
+Torvalds was not 
+pleased, and made it clear that the STACKLEAK code was unlikely to make it
+into the mainline in its current form.  He complained that:
+<p>
+<div class="BigQuote">
+	It doesn't actually seem to help *find* bugs at all. As such, it's
+	another "paper over and forget" thing that just adds fairly high
+	overhead when it's enabled.
+</div>
+<p>
+He suggested that security developers should focus more on finding and
+fixing problems, thus improving the kernel, rather than papering over
+issues in this way.
+<p>
+Needless to say, the developers involved see the situation a little
+differently.  Cook <a href="/Articles/748648/">responded</a>:
+<p>
+<div class="BigQuote">
+	I think it does improve the kernel, especially if we can gain more
+	complete coverage through native compiler options (instead of just
+	a plugin). Right now, for example, the kernel is littered with
+	memset()s because the compiler can't be trusted to correctly
+	zero-init padding, etc. This is an endless source of bugs, and this
+	patch series provides a comprehensive and fast way to keep the
+	stack cleared.
+</div>
+<p>
+That response led Torvalds to <a href="/Articles/748649/">start thinking
+about</a> what he described as a "<q>*smart*</q>" way of dealing with
+the problem. 
+Simply clearing the stack did not strike him as *smart*, but having the
+compiler initialize all automatic variables to zero would be.  This
+initialization would provide similar protection from uninitialized data,
+but it could also be omitted whenever the compiler could determine that the
+variable was properly initialized in some other way.  The result should be
+protection with significantly lower overhead.
+<p>
+That overhead could be reduced further in performance-sensitive code by
+adding a special marker for variables that the compiler should not
+initialize, even if it seems that initialization is necessary.  Places
+where this marker is needed would stand out in performance profiles, and
+the marker itself would be a red flag that uninitialized data may be
+present. 
+<p>
+Cook was <a href="/Articles/748650/">in favor</a> of adding this
+functionality to the compiler, but he also said that it is insufficient.
+It takes a long time for a new compiler to be widely adopted; people will
+build new kernels with old compilers for <a href="/Articles/748074/">a
+surprisingly long time</a>.  So an 
+approach based solely on the compiler will not provide anything close to
+universal coverage for years.  Adding the stack clearing into the kernel
+can protect sites regardless of whether a new compiler is used to build
+it.  He also pointed out that there are a couple of cases where the zeroing of
+automatic variables does not provide complete coverage.  If a vulnerability
+allows an attacker to read data below the current stack boundary, it can be
+exploited to read the possibly interesting data that will be sitting
+there.  Clearing the stack also wipes out data that might otherwise be read
+by an unrelated vulnerability, considerably narrowing the window
+in which that vulnerability could be exploited.
+<p>
+The discussion has no definitive conclusions as of this writing.  The
+STACKLEAK code has encountered a significant obstacle on its way into the
+mainline, but it shouldn't necessarily be written off quite yet.  There do
+appear to be some valid reasons for having this feature in the kernel, in
+the short term at least, and the stack clearing can be disabled for users
+who do not want to pay the cost.  So, with some persistence (and security
+developers have learned to be persistent), there may yet be a place for the
+STACKLEAK patches in the mainline.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Kernel_hardening">Security/Kernel hardening</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Linux_kernel-Hardening">Linux kernel/Hardening</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/748642/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor748763"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">About stack depth overflow</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 7, 2018 20:42 UTC (Wed)
+                               by <b>a13xp0p0v</b> (guest, #118926)
+                              [<a href="/Articles/748763/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for a nice article, Jonathan.<br>
+<p>
+Let me correct the description of the STACKLEAK gcc plugin. The plugin performs two kinds of the kernel code instrumentation:<br>
+<p>
+1. It inserts track_stack() calls for tracking the lowest border of the kernel stack. That is needed for erasing only the used part of the kernel stack at the end of syscalls. But that is _not_ used for detecting the stack depth overflow. <br>
+<p>
+2. The plugin inserts the check_alloca() call before each alloca in the kernel. That blocks the Stack Clash attack against the kernel stack. So the combination of STACKLEAK, VMAP_STACK (providing the guard pages) and THREAD_INFO_IN_TASK protects the kernel against known stack depth overflow attacks.<br>
+<p>
+I've described that in the last patch of the series, which updates Documentation/security/self-protection.rst.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/748763/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor748828"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing kernel-stack leaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2018 12:56 UTC (Thu)
+                               by <b>edos</b> (guest, #116377)
+                              [<a href="/Articles/748828/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In the article it is said,<br>
+"Note that, while most uses of uninitialized data can be squarely blamed on the programmer, that is not always the case. For example, structures stored on the stack may contain padding between fields, and the compiler may well decide that it need not initialize the padding, since the program will not use that memory. But that memory can still be exposed to user space, should the kernel write such a structure in response to a system call."<br>
+<p>
+But actually, it is not quite clear for me, could someone suggest a way exploiting a non-initialized paddings in the structures on the stack?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/748828/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor748834"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing kernel-stack leaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2018 13:28 UTC (Thu)
+                               by <b>domenpk</b> (guest, #12382)
+                              [<a href="/Articles/748834/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's an information leak. Stack often contains pointers, and leaking (parts of) them could be used to defeat KASLR for example.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/748834/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor749037"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing kernel-stack leaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 11, 2018 18:06 UTC (Sun)
+                               by <b>edos</b> (guest, #116377)
+                              [<a href="/Articles/749037/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, seems like, regardless of KASLR usage, I can find code area I need from these pre-initialized paddings in the memory<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/749037/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor748874"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">gcc plugin?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2018 16:38 UTC (Thu)
+                               by <b>mstefani</b> (guest, #31644)
+                              [<a href="/Articles/748874/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A gcc plugin cannot be used to initialize all automatic variables to zero?<br>
+I guess the answer is "no" else it would have been proposed instead of having to wait for new compiler version.<br>
+Just my curiosity on the "why?" that isn't possible.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/748874/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor748875"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing kernel-stack leaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2018 16:49 UTC (Thu)
+                               by <b>pspinler</b> (subscriber, #2922)
+                              [<a href="/Articles/748875/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think I'm missing something here, as a non kernel developer.  Might someone clarify for me, please:<br>
+<p>
+Cook is not in favor of an alternative compiler based solution due in large part to long delays in compiler adaptation, right?  But yet, his proposed solution depends on a compiler plugin.  Would not this compiler plugin, presumably distributed with the compiler, also not be available for years to many people?<br>
+<p>
+-- Pat<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/748875/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor748877"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Plugins</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2018 17:02 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/748877/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Plugins can be distributed with the kernel itself - they live in <tt>scripts/gcc-plugins/</tt>.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/748877/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor749357"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing kernel-stack leaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 15, 2018 8:23 UTC (Thu)
+                               by <b>ledow</b> (guest, #11753)
+                              [<a href="/Articles/749357/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So...<br>
+<p>
+It's like having a chef in a busy kitchen.<br>
+<p>
+Left to his own devices, the kitchen builds up gunk and he just keeps cooking on the surfaces.  This is obviously bad and dirt leaks out in the food.<br>
+<p>
+The stack-cleaning solution is like saying "Let's clean up the entire kitchen for each meal, and then dye every surface purple.  Then we know that purple surfaces are clean and any food that comes out not-purple could have been prepared in a bad way."  (I assume that people don't care about purple food so long as it's safe...)<br>
+<p>
+The compiler solution is like saying "Let's just make sure that the chef cleans whatever he uses before he starts using it in cooking".<br>
+<p>
+It does seem that this should be fixed in the compiler, not the kernel.  However, that may take a little while and in the meantime is it really worth hitting the kernel to do the compiler's job until people catch up?<br>
+<p>
+I'm not sure it is.  Those who want the feature (e.g. distributions and people who care) will compile with a known-good compiler.  Those who don't, won't care and probably won't want the 1% hit either.<br>
+<p>
+And though the stack-cleaning solution is a great debugging tool to find those places Linus is talking about, it's not going to do much once those places are found and probably has little use in the real kernel.  If it was zero-impact, sure, throw it in.  But 1% is a measurable hit, and that's 24 hours a day, 7 days a week, even if the software a computer is running never changes or suffers from the stack data being revealed like so.<br>
+<p>
+There have always been fuzzers that do things like deliberately corrupt stack data to see what happens when code is run on them.  But I'm not sure they belong in the kernel as anything other than a DEBUG_ option.  Fix the real problem - which is that variables aren't initialised if the programmer forgets to do so.  I've always said it should have been part of the specification of the language, we could have changed it decades ago and nobody ever did.  The impact is minimal as, pretty much, 99.999% of the time you have to initialise anyway and you can easily have a compiler indication of when not to bother, just like anything else.<br>
+<p>
+But clearing an entire stack every time you do something, and THEN code initialising over the top (as we have to assume the stack isn't clean), that's just doing the same job twice.  Let's do it once, but properly, which suggests extending the compiler's code, not the kernel's.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/749357/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor765838"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing kernel-stack leaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 20, 2018 15:25 UTC (Thu)
+                               by <b>roblucid</b> (guest, #48964)
+                              [<a href="/Articles/765838/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the compiler people tend to look at the specs and try to do as little compute work in the object code as they can, to do better in benchmarks; but then real programs end up having to take cover all defence measures or pay a cost in reliability, when they paper over the cracks.<br>
+<p>
+In Linux benchmarks to, distros have been penalised in comparative reviews, due to benchmarkers policy of accepting defaults, so a distro installation defaulting to settings intended to minimise risk of filesystem data loss are penalised.<br>
+<p>
+It's the way of the tl;dr world we are in!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/765838/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,689 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>daxctl() — getting the other half of persistent-memory performance [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/726481/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/726239/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/726481/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>daxctl() — getting the other half of persistent-memory performance</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 26, 2017</br>
+           </div>
+Persistent memory promises high-speed, byte-addressable access to storage,
+with consequent benefits for all kinds of applications.  But realizing those
+benefits has turned out to present a number of challenges for the Linux
+kernel community.  Persistent memory is neither ordinary memory nor
+ordinary storage, 
+so traditional approaches to memory and storage are not always well suited
+to this new world.  A proposal for a new <tt>daxctl()</tt> system call,
+along with the ensuing discussion, shows how hard it can be to get the most
+out of persistent memory.
+<p>
+The "DAX" mechanism allows an application to map a file in
+persistent-memory storage directly into its address space, bypassing the
+kernel's page cache.  Thereafter, data in the file can be had via a
+pointer, with no need for I/O operations or copying the data through
+RAM.  So far, so good, but there is a catch: this mode really only works
+for applications that are reading data from persistent memory.  As soon as
+the time comes to do a write, things get more complicated.  Writes can
+involve the allocation of blocks on the underlying storage device; they
+also create metadata updates that must be managed by the filesystem.  If
+those metadata updates are not properly flushed out, the data cannot be
+considered properly written.
+<p>
+The end result is that applications performing writes to persistent memory
+must call <tt>fsync()</tt> to be sure that those writes will not be lost.
+Even if the developer remembers to make those calls in all the right
+places, <tt>fsync()</tt> can create an arbitrary amount of I/O and, thus,
+impose arbitrary latencies on the calling application.  Developers who go
+to the trouble of using DAX are doing so for performance reasons; such
+developers tend to respond to ideas like "arbitrary latencies" with poor
+humor at best.  So they have been asking for a better solution.
+<p>
+<h4>daxctl()</h4>
+<p>
+That is why Dan Williams wrote in the introduction to <a
+href="/Articles/725699/">this patch series</a> that "<q>the full promise
+of byte-addressable access to persistent memory has only been half realized
+via the filesystem-dax interface</q>".  Realizing the other half
+requires getting the filesystem out of the loop when it comes to write
+access.  If, say, a file could be set up so that no metadata changes would
+be needed in response to writes, the problem would simply go away.
+Applications would be able to write to DAX-mapped memory and, as long as
+they ensured that their own writes were flushed to persistent store (which
+can be done in user space with a couple of special instructions), there
+should be no concerns about lost metadata.
+<p>
+Williams's proposal to implement this approach requires a couple of steps.
+The first is that the application needs to call <a
+href="http://man7.org/linux/man-pages/man2/fallocate.2.html"><tt>fallocate()</tt></a>
+to ensure that the file of interest actually has blocks allocated in
+persistent memory.  Then it has to tell the kernel that the file is to be
+accessed via DAX and that the existing block allocations cannot be changed
+under any circumstances.  That is done with a new system call:
+<p>
+<pre>
+    int daxctl(char *path, int flags, int align);
+</pre>
+<p>
+Here, <tt>path</tt> indicates the file of interest, <tt>flags</tt>
+indicates the desired action, and <tt>align</tt> is a hint regarding the
+size of pages that the application would like to use.  The
+<tt>DAXFILE_F_STATIC</tt> flag, if present, will put the file into the "no
+changes allowed mode"; if the flag is absent, the file becomes an ordinary
+file once again.  While the static mode is active, any operation on the
+file that would force metadata changes (changing its length with
+<tt>truncate()</tt>, for example) will fail with an error code.
+<p>
+The implementation of this new mode would seem to require significant
+changes at the filesystem level, but it turns out that this functionality
+already exists.  It is used by the swap subsystem which, when swapping to
+an ordinary file, needs to know where the blocks allocated to the file
+reside on disk.  There are two pieces to this mechanism, the first of which
+is this <tt>address_space_operations</tt> method:
+<p>
+<pre>
+    /* Unfortunately this kludge is needed for FIBMAP. Don't use it */
+    sector_t (*bmap)(struct address_space *s, sector_t sector);
+</pre>
+<p>
+A call to <tt>bmap()</tt> will return the physical block number on which
+the given <tt>sector</tt> is located; the swap subsystem uses this
+information to swap pages directly to the underlying device without
+involving the filesystem.  To ensure that the list of physical blocks
+corresponding to the swap file does not change, the swap subsystem sets the
+<tt>S_SWAPFILE</tt> inode flag on the file.  Tests sprinkled throughout the
+virtual filesystem layer (and the filesystems themselves) will block any
+operation that would change the layout of a file marked with this flag.
+<p>
+This functionality is a close match to what DAX needs to make direct writes
+to persistent memory safe.  So the <tt>daxctl()</tt> system call has simply
+repurposed this mechanism, putting the file into the no-metadata-changes
+mode while not actually swapping to it.
+<p>
+<h4>MAP_SYNC</h4>
+<p>
+Christoph Hellwig was not slow to register his opposition to this idea.  He
+would rather not see the <tt>bmap()</tt> method used anywhere else in the
+kernel; it is, in his opinion, <a href="/Articles/726489/">broken in a
+number of ways</a>.  Its use in swapping is also broken, he said, though
+"<q>we manage to paper over the fact</q>".  He <a
+href="/Articles/726490/">suggested</a> that development should be focused
+instead on making DAX more stable before adding new features.
+<p>
+An alternative approach, <a href="/Articles/726492/">proposed</a> by Andy
+Lutomirski, has been seen before: it was raised (under the name
+<tt>MAP_SYNC</tt>) during the <a href="/Articles/678011/">"I know what I'm
+doing" flag discussion</a> in early 2016.  The core idea here
+is to get the filesystem to transparently ensure that any needed metadata
+changes are always in place before an application is allowed to write to a page
+affected by those changes.  That would be done by write-protecting the
+affected pages, then flushing any needed changes as part of the process of
+handling a 
+write fault on one of those pages.  In theory, this approach would allow
+for a lot of use cases blocked by the <tt>daxctl()</tt> technique,
+including changing the length of files, copy-on-write semantics, concurrent
+access, and more.  It's a seemingly simple idea that hides a lot of 
+complexity; implementing it would not be trivial. 
+<p>
+Beyond implementation complexity, <tt>MAP_SYNC</tt> has another problem: it
+runs counter to the original low-latency goal.  Flushing out the metadata
+changes to a filesystem can be a lengthy and complex task, requiring
+substantial amounts of CPU time and I/O.  Putting that work into the
+page-fault handler means that page faults can take an arbitrarily long
+amount of time.  As Dave Chinner <a href="/Articles/726494/">put it</a>:
+<p>
+<div class="BigQuote">
+	Prediction for the MAP_SYNC future: frequent bug reports about
+	huge, unpredictable page fault latencies on DAX files because every
+	so often a page fault is required to sync tens of thousands of
+	unrelated dirty objects because of filesystem journal ordering
+	constraints.
+</div>
+<p>
+There was some discussion about how the impact of doing metadata updates in
+the page-fault handler could be reduced, but nobody has come forth with an
+idea that would reduce it to zero.  Those (<a href="/Articles/726495/">such
+as Hellwig</a>) who support the <tt>MAP_SYNC</tt> approach acknowledge that
+cost, but see it 
+as being preferable to adding a special-purpose interface that brings its
+own management difficulties.
+<p>
+On the other hand, this work could lead to improvements to the swap
+subsystem as well, making it more robust and more compatible with
+filesystems (like Btrfs) whose copy-on-write semantics work poorly with the
+"no metadata changes" idea.  There is another use case for this
+functionality: high-speed DMA directly to persistent memory also
+requires that the filesystem not make any unexpected changes to how the
+file is mapped.  That, and the relative simplicity of Williams's patch, may
+help to push the <tt>daxctl()</tt> mechanism through, even though it is not
+universally popular.
+<p>
+Arguably, the real lesson from this discussion is that persistent memory is
+not a perfect match to the semantics provided by the Unix API and current
+filesystems.  It may eventually become clear that a different type of
+interface is needed, at least for applications that want to get maximum
+performance from this technology.  Nobody really knows what that interface
+should look like yet, though, so the current approach of trying to retrofit
+new mechanisms onto what we have now would appear to be the best way
+forward.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#DAX">DAX</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Nonvolatile_memory">Memory management/Nonvolatile memory</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/726481/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor726503"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxctl() — getting the other half of persistent-memory performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 27, 2017 0:43 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/726503/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why not create a specialized daxfs that is specifically designed to be friendly to persistent memory? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726503/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726508"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 27, 2017 3:37 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/726508/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      People are working on such things; <a href="https://github.com/Andiry/nova">NOVA</a> was mentioned in the discussion, for example.  But new filesystems take a long time even when the problem domain is fully understood, and some of the problems are likely to be hard to work around even when starting from scratch.  I expect people will get there, but it will take a fair while yet.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726508/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726509"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 27, 2017 3:45 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/726509/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Are there any actual user-accessible NVDIMMs? All I can find are battery-backed DIMMs with NAND for long-term storage, with rather poor capacity (8-16Gb).<br>
+<p>
+It looks like there are at least a couple of years to make a polished FS. And it should be easier than usual, since you literally have non-volatile memory for all the important structures: simple atomic operations instead of barriers, no mucking with block devices, etc.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726509/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726533"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 27, 2017 13:09 UTC (Tue)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/726533/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, the Intel/Micron Crystal Ridge persistent memory or whatever they're calling it these days.<br>
+<p>
+It's not at RAM latencies yet, but it can be configured to be byte addressable.  (Or at least OEMs can do that - don't remember if the direct to consumer devices from Intel can.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726533/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726570"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">3DXP</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 27, 2017 15:22 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/726570/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The DIMMs are not yet for sale.  The NVMe devices that are available do not allow for byte-addressable storage.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726570/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726576"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">3DXP</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 27, 2017 16:21 UTC (Tue)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/726576/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, thanks for the clarification.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726576/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor729018"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2017 13:29 UTC (Thu)
+                               by <b>kh</b> (guest, #19413)
+                              [<a href="/Articles/729018/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Micron &amp; Intel's 3D XPoint:<br>
+<a href="https://www.micron.com/about/our-innovation/3d-xpoint-technology">https://www.micron.com/about/our-innovation/3d-xpoint-tec...</a><br>
+This seems like it is poised to change a lot of things.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729018/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor726616"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 28, 2017 5:01 UTC (Wed)
+                               by <b>nhippi</b> (subscriber, #34640)
+                              [<a href="/Articles/726616/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Alternatively why not work within the MTD subsystem, that has already support for Non-volatile addressable memories (NOR flash).  And already has a bunch of filesystems designed for them too...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726616/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726740"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 29, 2017 11:09 UTC (Thu)
+                               by <b>hkario</b> (subscriber, #94864)
+                              [<a href="/Articles/726740/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Flash is not byte addressable and has huge erase block sizes ("small" one is 16KiB, typical SSD is 512KiB)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726740/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726748"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 29, 2017 13:27 UTC (Thu)
+                               by <b>nhippi</b> (subscriber, #34640)
+                              [<a href="/Articles/726748/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You are thinking NAND flash, there is also NOR flash that can be byte addressible.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726748/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726916"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 30, 2017 19:52 UTC (Fri)
+                               by <b>alonz</b> (subscriber, #815)
+                              [<a href="/Articles/726916/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      NOR flash also has large-to-huge erase blocks. It is only byte addressable for reads, not for writes.
+<br>Note also that NOR flash appears to be mostly dead outside the deeply-embedded market: the largest NOR-flash device you can purchase right now from Micron is 1&nbsp;Gb (that is 1&nbsp;giga-bit, or 128&nbsp;megabytes) while NAND-flash devices are now at 6&nbsp;Tb (6&nbsp;tera-bits, or 750&nbsp;gigabytes).
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726916/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor726836"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxctl() — getting the other half of persistent-memory performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 30, 2017 0:28 UTC (Fri)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/726836/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Because the underlying need is broader than just DAX.
+<p>
+The underlying need is the ability to access a file using the storage address, without reference to the inode.
+<br>
+- swap-to-file uses this (though as we proved with NFS, it can be done differently)
+<br>
+- DMA-to-storage could use this. (The article mentions "high-speed DMA directly to persistent memory" but the email thread says
+<p>
+<pre>
+         "I have this
+	 high speed data aquisition hardware and we'd like to DMA data direct
+	 to the storage because it's far too slow pushing it through memory
+	 and then the OS to get it to storage. How do I map the storage
+	 blocks and guarantee the mapping won't change while we are
+	 transferring data direct from the hardware?".
+</pre>
+which isn't necessarily about persistent memory.
+<p>
+And DAX could benefit from this.
+<p>
+It really makes sense for the functionality to be included in existing filesystems where possible.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726836/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726919"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxctl() — getting the other half of persistent-memory performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 30, 2017 20:07 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/726919/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sure. But it looks like the current attempt to shoehorn existing filesystems is not a good fit for it.<br>
+<p>
+After all, they were designed to ship data back and forth between memory and persistent block storage. So a lot of functionality is simply superfluous when you can directly access your storage. And some functionality of filesystems is clearly incompatible with direct access: encryption and data compression, for example. Journals and snapshots have to be designed differently and so on.<br>
+<p>
+With the current DAX efforts if looks like the case of leaking abstractions all the way. And use-cases like DMA to NVRAM only underscores it - you really need guarantees from the filesystem that don't exist right now. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726919/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726926"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxctl() — getting the other half of persistent-memory performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 1, 2017 0:17 UTC (Sat)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/726926/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; you really need guarantees from the filesystem that don't exist right now. </font><br>
+<p>
+True, but they are guarantees that once could have been assumed.  It is only these new-fangled filesystems, which try to be clever, that the requirement isn't trivial for.  Even for them it is just a case of not being too clever for those files, and carefully identifying all the places where cleverness might be a problem.  So no relocation of blocks, no sharing of blocks, no compression, etc.<br>
+<p>
+From my quick glance at the email thread, I felt that filesystem developers were generally happy to provide the functionality, but needed to agree on details of interface and specific functionality.  I particularly liked an idea from Dace Chinner to add a new flag to fallocate().  With this flag the space would be allocated and initialized, the metadata would be persisted, and the inode would be marked so that the storage allocations were immutable.  Then the file could be safely used with DAX or swap or whatever.  This requires metadata changes to the filesystem which the original patch from Dan appeared to try and avoid, but it is probably a change worth making.  If we defined the immutability as only until the file was truncated, then old filesystems could support the new fallocate() flag with no metadata change (I think Dave wanted the flag to imply that truncation was not allowed, which is probably the better choice if you don't care about old filesystems).<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726926/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor726932"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">daxctl() — getting the other half of persistent-memory performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 1, 2017 1:23 UTC (Sat)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/726932/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I meant to also say: having to have multiple different filesystems for different uses is a royal pain.<br>
+Being able to have multiple different filesystems is liberating.<br>
+Being required to have them is quite the reverse.<br>
+It is bad enough that we have /proc and /sys and /dev/pts and /dev/mqueue and /dev/hugepages and /sys/kernel/debug and /sys/fs/cgroup and .... instead of just one virtual filesystem exporting kernel stuff.  Don't make us have to have multiple different filesystems for storing different sorts of data too.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726932/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2017, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

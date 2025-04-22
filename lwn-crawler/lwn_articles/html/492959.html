@@ -1,0 +1,727 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Allocating uninitialized file blocks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/492959/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/492103/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/492959/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Allocating uninitialized file blocks</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 17, 2012</br>
+           </div>
+The <tt>fallocate()</tt> system call can be used to increase the size of a
+file without actually writing to the new blocks.  It is useful as a way to
+encourage the kernel to lay out the new blocks contiguously on disk, or
+just to ensure that sufficient space is available before beginning a
+complex operation.  Filesystems implementing <tt>fallocate()</tt> take care
+to note that the new blocks have not actually been written; attempts to
+read those uninitialized blocks will normally just return zeroes.  To do
+otherwise would be to risk disclosing information remaining in blocks
+recently freed from other files.
+<p>
+For most users, <tt>fallocate()</tt> works just as it should.  In some
+cases, though, the application in question does a lot of random writes
+scattered throughout the file.  Writing to a small part of an uninitialized
+extent may force the filesystem to initialize a much larger range of
+blocks, slowing things down.  But if the application knows where it has
+written in the file, and will thus never read from uninitialized parts of
+that file, it gains no benefit from this extra work.
+<p>
+How much does this initialization cost?  Zheng Liu recently implemented <a
+href="/Articles/492920/">a new <tt>fallocate()</tt> flag</a> (called
+<tt>FALLOC_FL_NO_HIDE_STALE</tt>) that marks new blocks as being
+initialized, even though the filesystem has not actually written them;
+these blocks,
+will thus contain random old data.  A random-write benchmark that took
+76&nbsp;seconds on a mainline kernel ran in 18&nbsp;seconds when this flag
+was used.  Needless to say, that is a significant performance improvement;
+for that reason, Zheng has proposed that this flag be merged into the
+mainline.
+<p>
+Such a feature has obvious security implications; Zheng's patch tries to
+address them by providing a sysctl knob to enable the new feature and
+defaulting it to "off."  Still, Ric Wheeler <a
+href="/Articles/492963/">didn't like the idea</a>, saying "<q>Sounds
+like we are proposing the introduction a huge security hole instead of
+addressing the performance issue head on</q>".  Ted Ts'o was <a
+href="/Articles/492964/">a little more positive</a>, especially if access
+to the feature required a capability like <tt>CAP_SYS_RAWIO</tt>.  But
+everybody seems to agree that a good first step would be to figure out why
+performance is so bad in this situation and see if a proper fix can be
+made.  If the performance issue can be made to go away without requiring
+application changes or possibly exposing sensitive data, everybody will be
+better off in the end.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#fallocate">fallocate()</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/492959/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor493230"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2012 7:15 UTC (Thu)
+                               by <b>slashdot</b> (guest, #22014)
+                              [<a href="/Articles/493230/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is something that should never be done unless the benefit is truly huge it is mathematically provable that there's no other way to achieve it.<br>
+<p>
+Even if an application has root privileges, a bug in it (even just not zeroing out padding in a structure) may result in an accidental leak of data from a totally unrelated file to a remote client.<br>
+<p>
+The only sensible variant is zeroing blocks from deleted files in the background and only using those scrubbed blocks.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493230/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493318"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2012 15:35 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/493318/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How is this at all different than just opening up the device node associated with the partition?  If you're root, what's stopping you?<br>
+<p>
+As Ted Ts'o suggested, if a process has the capability to do raw I/O, why not let it see raw disk blocks occasionally?  You've already given it permission to do low level I/O in spite of a filesystem, so what's the harm in letting it stale blocks within a filesystem?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493318/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493383"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2012 19:28 UTC (Thu)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/493383/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem is that while a root process or one with raw I/O capabilities can see those blocks itself, it wouldn't usually write them out to a file which other users could read. However, if a root process allocates space for a file readable by non-root processes, and that space remains uninitialized, the other processes will have access to the former contents of those blocks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493383/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493453"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2012 5:41 UTC (Fri)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/493453/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <P>Well, this new<TT> fallocate() </TT>feature is explicit.  It's not like we're suddenly changing the semantics of holes in files.  It's really about policy vs. mechanism.  We need to ask if this is a useful mechanism, and if so, can user space use it safely if it adopts appropriate polices?</P>
+<P>The definition of "appropriate policy" depends entirely on the usage scenario and security requirements of the system and application.  A DVR disk that has nothing but video files on it won't leak anything interesting, so this<TT> fallocate() </TT>mode may be perfectly suited to it, for example, assuming a bittorent-style scattered download.</P>
+<P>All that said, this new mode does need to prove its usefulness.  If the performance issue is unique to ext4, then it's probably better to just fix ext4.</P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493453/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor493253"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2012 9:48 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/493253/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe the filesystem needs a low-priority scrubber process that zeroes out unallocated blocks, and marks them as zeroed.  They can then be allocated quickly later.<br>
+<p>
+If enough already-zeroed blocks aren't available (or they aren't contiguous enough) then you still have to go to the work of initializing blocks when fallocate() is called.  But if those blocks are never used and the file is then shrunk or deleted, the zeroed blocks are still available for next time so the work isn't entirely wasted.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493253/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493310"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2012 14:56 UTC (Thu)
+                               by <b>vonbrand</b> (subscriber, #4458)
+                              [<a href="/Articles/493310/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>The problem is that zeroing blocks is work, and besides SSDs (and RAIDs) shouldn't be written except when really needed.</p>
+<p>Why not just split the range fallocated and just rewrite the affected blocks, not the whole range?</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493310/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493337"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2012 17:01 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/493337/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, it's work, my point is that since most systems have idle periods and busy periods, it makes sense to do some of this work during idle periods so that it doesn't have to be done when the system (and the disk) is busy.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493337/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor493372"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2012 18:40 UTC (Thu)
+                               by <b>slashdot</b> (guest, #22014)
+                              [<a href="/Articles/493372/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If it's an SSD or a "smart" RAID array, use TRIM instead (if it's not supported, throw the stupid thing away and get a decent one).<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493372/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor493464"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2012 7:32 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/493464/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Modern SSDs have TRIM which 'zeroes' the TRIM-ed blocks automatically.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493464/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493593"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2012 19:31 UTC (Fri)
+                               by <b>drag</b> (guest, #31333)
+                              [<a href="/Articles/493593/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But then you are depending on your hardware to have correct functionality. <br>
+Which is a very very unsafe assumption.<br>
+<p>
+Anyways, I believe TRIM just tells them that the blocks are no longer being used. It's not a order to zero out the blocks. Without trim the SSD doesn't know if the file system still expects them to be used or not.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493593/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493598"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2012 20:17 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/493598/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+trim says that the blocks are not being used. If there is an attempt to read from blocks that are not being used, the SSD returns all 0's (it doesn't actually read the block, because after the trim, that block doesn't actually exist on the flash media anymore)<br>
+<p>
+If you were to take apart the drive and bypass the controller to read the flash chips directly, you would have a chance at recovering the data.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493598/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor493616"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2012 21:33 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/493616/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;But then you are depending on your hardware to have correct functionality. </font><br>
+<p>
+Its presence is indicated by the 'Deterministic read data after TRIM' capability (you can check it using "hdparm -I"). So it's not like you need to blindly trust your SDD.<br>
+<p>
+<font class="QuotedText">&gt;Anyways, I believe TRIM just tells them that the blocks are no longer being used. It's not a order to zero out the blocks. </font><br>
+<p>
+With deterministic zeros one can also use it as a way to quickly erase blocks.<br>
+<p>
+Besides, overwriting something on SDD in most cases would NOT actually overwrite it in the real hardware flash due to load balancing and remapping.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493616/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493619"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2012 21:39 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/493619/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+unfortunately trim is not a fast command for many drives<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493619/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493621"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2012 21:45 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/493621/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That depends. TRIM-ing 100Gb of data on my Intel SSD-based RAID takes little more than 2-3 seconds, it's way faster than writing zeros directly and more flash-friendly.<br>
+<p>
+However, TRIM command can't be queued. So it probably makes no sense to use it for large allocations and/or to keep a pool of recently-trimmed pages for immediate small allocations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493621/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493622"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2012 21:51 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/493622/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+the fact that it can't be queued is a major performance hit.<br>
+<p>
+The SSD does keep a pool of unused pages for new allocations. What trim does is it lets the SSD know that you no longer care about the data on that block, and so it can add the block back to that pool.<br>
+<p>
+If the SSD runs out of this pool, writing slows drastically as it must first erase a block before it can write anything. If you are expecting to do a LOT of writing to a SSD, you may want to make sure that you partition it to something less than the advertised size so that that extra space will remain in the pool (this works as long as that extra space has never been written to, or is explicitly relased via a TRIM command)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493622/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor493317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2012 15:21 UTC (Thu)
+                               by <b>sandeen</b> (guest, #42852)
+                              [<a href="/Articles/493317/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As the thread wore on, numbers were posted which show XFS has no serious performance degradation under the same workload.  At this point, blowing a security hole in ext4 and promoting the flag to the VFS level seems incredibly premature.<br>
+<p>
+I'd look into just what is making ext4 slow here but so far I can't reproduce a slowdown anything like what the patch submitter has seen...<br>
+<p>
+-Eric<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493854"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 23, 2012 1:21 UTC (Mon)
+                               by <b>szaka</b> (guest, #12740)
+                              [<a href="/Articles/493854/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The flag (with a better name) could be helpful for filesystems which can't fully support uninitialized allocated blocks efficiently. We are supporting several such interoperable filesystems (NTFS, exFAT, FAT) where changing the specification is not possible.<br>
+<p>
+There is real user need despite explaining potential security consequences. Typical usage scenarios are using a large file as a container for an application which tracks free/used blocks itself. Windows supports this feature by SetFileValidData() if extra privilege is granted.<br>
+<p>
+The performance gain can be huge on embedded using low-end storage and SoC. In one of our cases it took 5 days vs 12 minutes to fully setup a large file for use.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493854/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor493328"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2012 15:44 UTC (Thu)
+                               by <b>joey</b> (guest, #328)
+                              [<a href="/Articles/493328/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was just reading yesterday about a torrent program that used the equivilant option in Windows. So every partially downloaded torrent file exposes other "deleted" data. Ugh.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493328/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493396"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2012 20:51 UTC (Thu)
+                               by <b>intgr</b> (subscriber, #39733)
+                              [<a href="/Articles/493396/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; that used the equivilant option in Windows</font><br>
+<p>
+Are you saying that there's an equivalent to the new proposed FALLOC_FL_NO_HIDE_STALE flag too? I'd be surprised. Can you link to the discussion?<br>
+<p>
+(Maybe you're just confused. I'm sure there is a fallocate() equivalent feature in Windows -- but fallocate() doesn't leak any foreign file data, without this new proposed flag)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493396/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor493403"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2012 21:22 UTC (Thu)
+                               by <b>Fowl</b> (subscriber, #65667)
+                              [<a href="/Articles/493403/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>That would be the <a href="http://msdn.microsoft.com/en-us/library/windows/desktop/aa365544">SetFileValidData</a> function, which "is useful in very limited scenarios. "</p>
+
+<p>To use it requires the SE_MANAGE_VOLUME_NAME privilege (ie. raw disk access).<blockquote>"Applications should call SetFileValidData only on files that restrict access to those entities that have SE_MANAGE_VOLUME_NAME access. The application must ensure that the unwritten ranges of the file are never exposed, or security issues can result as follows."</blockquote></p>
+
+<p><small>[Something about giving just enough rope to hang yourself / trusting programmers to know what they're doing.]</small></p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/493403/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor495389"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Allocating uninitialized file blocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 5:50 UTC (Tue)
+                               by <b>butlerm</b> (subscriber, #13312)
+                              [<a href="/Articles/495389/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      It sounds like EXT4 and any other modern filesystems with this problem need a more robust form of <a href="http://xfs.org/docs/xfsdocs-xml-dev/XFS_User_Guide/tmp/en-US/html/ch02s07.html">unwritten extent</a> tracking similar to that used by XFS.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495389/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2012, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

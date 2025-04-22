@@ -1,0 +1,955 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>MCS locks and qspinlocks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/590243/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/589728/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/590243/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>MCS locks and qspinlocks</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>We're bad at marketing</b>
+<p>
+We can admit it, marketing is not our strong suit. Our strength is
+writing the kind of articles that developers, administrators, and
+free-software supporters depend on to know what is going on in the
+Linux world. Please <a href="/Promo/nsn-bad/subscribe">subscribe today</a> to help us keep doing that, and so
+we don’t have to get good at marketing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 11, 2014</br>
+           </div>
+Impressive amounts of effort have gone into optimizing the kernel's
+low-level locking mechanisms over the years, but that does not mean that
+there is no room for improving their performance further.  Some work
+that will be in the <strike>3.14</strike> 3.15 kernel, with more likely to
+come later, has the
+potential to speed up kernel 
+locking considerably, especially in situations where there are significant
+amounts of contention.
+<p>
+Conceptually, a spinlock is a simple mechanism.  The lock can be as small
+as a single bit; if that bit is clear, the lock is available.  A thread wanting
+to acquire the lock will attempt to set that bit with an atomic
+compare-and-swap instruction, "spinning" repeatedly if the lock is not
+available at the time.  Over the years, spinlocks have become more complex;
+<a href="/Articles/267968/">ticket spinlocks</a> added fairness to the
+mechanism in 2008, and 2013 saw the addition of better paravirtualization
+support, for example.
+<p>
+Spinlocks still suffer from a fundamental problem beyond the fact
+that simply spinning for a lock can be painful, though: every attempt to
+acquire a lock requires moving the cache line containing that lock to the
+local CPU.  For contended locks, this cache-line bouncing can hurt
+performance significantly.  So it's not surprising that developers have
+been working to reduce cache contention with spinlocks; <a
+href="/Articles/531254/">an attempt to add automatic backoff</a> to
+spinlocks in early 2013 was working toward that goal, for example, but this
+work was never merged.
+<p>
+<h4>MCS locks</h4>
+<p>
+More recently, Tim Chen put together a different approach based on a
+primitive called an "MCS lock" (described in <a
+href="https://web.archive.org/web/20140411142823/http://www.cise.ufl.edu/tr/DOC/REP-1992-71.pdf">this paper
+[PDF]</a>).  By expanding a spinlock into a per-CPU structure, an MCS lock
+is able to eliminate much of the cache-line bouncing experienced by simpler
+locks, especially in the contended case.
+<p>
+In <strike>3.14</strike> the tip tree for 3.15, an MCS lock is defined by
+an instance of this structure: 
+<p>
+<pre>
+    struct mcs_spinlock {
+	struct mcs_spinlock *next;
+	int locked; /* 1 if lock acquired */
+    };
+</pre>
+<p>
+If one is willing to put up with your editor's second-rate drawing skills,
+one could envision an unlocked MCS spinlock as follows:
+<p>
+<blockquote>
+<img src="https://static.lwn.net/images/2014/mcslock1.png" alt="[Unlocked MCS lock]"
+ border=0 width=612 height=102>
+</blockquote>
+<p>
+When a CPU comes along with a desire to acquire this lock, it will provide
+an <tt>mcs_spinlock</tt> structure of its own.  Using an unconditional
+atomic exchange operation, it stores the address of its own structure in
+the lock's <tt>next</tt> field and marks the lock as taken, yielding a
+situation that looks like this:
+<p>
+<blockquote>
+<img src="https://static.lwn.net/images/2014/mcslock2.png" alt="[Locked MCS lock]"
+ border=0 width=612 height=102>
+</blockquote>
+<p>
+The atomic exchange will return the previous value of the <tt>next</tt>
+pointer.  Since that pointer was null, the acquiring CPU knows that it was
+successful in acquiring the lock.
+Once that is done, the lock is busy, but there is no contention for it.  Should
+a second CPU come along and try to acquire the lock, it will start in the
+same way, storing a pointer to <i>its</i> <tt>mcs_spinlock</tt> structure
+in the <tt>next</tt> pointer of the main lock:
+<p>
+<blockquote>
+<img src="https://static.lwn.net/images/2014/mcslock3.png" alt="[Contending an MCS lock]"
+ border=0 width=612 height=102>
+</blockquote>
+<p>
+When the second CPU does this atomic swap on the main lock, it too will
+get back the previous contents of the <tt>next</tt> field — the pointer to
+the first CPU's <tt>mcs_spinlock</tt> structure.  The non-NULL value tells
+the second CPU that the lock is not available, while the specific pointer
+value says who is ahead in line for the lock.  The second CPU will respond
+to this situation by storing a pointer to its <tt>mcs_spinlock</tt>
+structure in the <tt>next</tt> field of CPU&nbsp;1's structure:
+<p>
+<blockquote>
+<img src="https://static.lwn.net/images/2014/mcslock4.png" alt="[Contending an MCS lock]"
+ border=0 width=612 height=102>
+</blockquote>
+<p>
+Note that the use of an atomic swap operation on the main lock means that
+<i>only</i> CPU&nbsp;2 can have a pointer to CPU&nbsp;1's
+<tt>mcs_spinlock</tt> structure.  So there is no need for atomic operations
+when making changes to that structure, though some careful programming is
+still needed to make sure that changes are visible to CPU&nbsp;1 at the
+right times.
+<p>
+Once this assignment is done, CPU 2 will spin on the <tt>locked</tt> value in <i>its own</i>
+<tt>mcs_spinlock</tt> structure rather than the value in the main lock.
+Its spinning will thus be entirely CPU-local, not touching the main lock
+at all.  This process can go on indefinitely as contention for the lock
+increases, with each CPU placing itself in line behind those that are
+already there, and each CPU spinning on its own copy of the lock.  The
+pointer in the "main" lock, thus, always indicates the tail of the queue of
+waiting CPUs.
+<p>
+When CPU 1 finally finishes with the lock, it will do a compare-and-swap
+operation on the main lock, trying to set the <tt>next</tt> pointer to NULL
+on the assumption that this pointer still points to its own structure.  If
+that operation succeeds, the lock was never contended and the job is done.
+If some other CPU has changed that pointer as shown above, though, the
+compare-and-swap 
+will fail.  In that case, CPU&nbsp;1 will not change the main lock at all;
+instead, it will change the <tt>locked</tt> value in CPU&nbsp;2's
+structure and remove itself from the situation:
+<p>
+<blockquote>
+<img src="https://static.lwn.net/images/2014/mcslock5.png" alt="[Transferred MCS lock]"
+ border=0 width=612 height=102>
+</blockquote>
+
+<p>
+Once its copy of <tt>locked</tt> changes, CPU 2 will break out of its spin
+and become the new owner of the lock.
+<p>
+An MCS lock, thus, is somewhat more complicated than a regular spinlock.
+But that added complexity removes much of the cache-line bouncing from the
+contended case; it also is entirely fair, passing the lock to each CPU in
+the order that the CPUs arrived.  
+<p>
+<h4>Qspinlocks</h4>
+<p>
+In the tip tree, MCS locks are used in the implementation of mutexes, but they do
+not replace the existing ticket spinlock implementation.  One reason for
+this is size: ticket spinlocks
+fit into a single 32-bit word, while MCS locks do not.  That turns out to
+be important: spinlocks are embedded into many kernel structures, some of
+which (notably <a href="/Articles/565097/"><tt>struct page</tt></a>)
+cannot tolerate an increase in size.  If the MCS lock technique is to be
+used throughout the kernel, some other approach will be needed.
+<p>
+The version of that approach which is likely to be merged can be seen in <a
+href="/Articles/590189/">the "qspinlock" patch series</a> from Peter
+Zijlstra which, 
+in turn, is based on <a href="/Articles/588426/">an implementation</a> by
+Waiman Long.  In this patch set, each CPU gets an array of four
+<tt>mcs_spinlock</tt> structures in a well-known location.  Four structures
+are needed because a CPU could be trying to acquire more than one spinlock
+at a time: imagine what happens if a hardware interrupt comes in while a
+thread is spinning on a lock, and the interrupt handler tries to take a
+lock of its own, for example.  The array of structures allows lock
+acquisition attempts from the normal, software interrupt, hardware
+interrupt, and non-maskable interrupt contexts to be kept apart.
+<p>
+The 32-bit qspinlock is divided into a number of fields:
+<p>
+<ul>
+<li> an integer counter to function like the <tt>locked</tt> field
+     described above,
+<li> a two-bit "index" field saying which entry in the per-CPU
+     <tt>mcs_spinlock</tt> array is used by the waiter at the tail of the list,
+<li> a single "pending" bit, and
+<li> an integer field to hold the CPU number indicating the tail of the
+     queue.
+</ul>
+<p>
+The last field is arguably the key: by storing a CPU number rather than a
+pointer, the qspinlock patch set allows all of the relevant information
+to be crammed into a single 32-bit word.  But there are a couple of other
+optimizations to be found in this patch set as well.
+<p>
+One has to do with the value used by each CPU for spinning.  When a CPU is
+next in line to acquire a lock, it will spin on the lock itself instead of
+spinning on its per-CPU structure.  In this way, the per-CPU structure's
+cache line need not be touched when the lock is released, removing one
+cache line miss from 
+the equation.  Any subsequent CPUs will spin on their own structures until
+they reach the head of the queue.
+<p>
+The "pending" bit extends that strategy a bit further.  Should a CPU find
+that a lock is busy but that no other CPUs are waiting, it will simply set
+the pending bit and not bother with its own <tt>mcs_spinlock</tt> structure
+at all.  The second CPU to come along will see the pending bit, begin the
+process of building the queue, and spin on its local copy of the
+<tt>locked</tt> field as usual.  Cache-line bouncing between waiters is
+still eliminated, but the first waiter is also able to avoid the cache-miss
+penalty associated with accessing its own <tt>mcs_spinlock</tt> array.
+<p>
+Performance-oriented patches should, of course, always be accompanied by
+benchmark results.  In this case, Waiman included <a
+href="/Articles/590268/">a set of AIM7 benchmark results</a> with his patch set
+(which did not include the pending-bit optimization). Some workloads
+regressed a little, but others shows improvements of 1-2% — a good result
+for a low-level locking improvement.  The disk benchmark runs, however,
+improved by as much as 116%; that benchmark suffers from especially strong
+contention for locks in the virtual filesystem layer and ext4 filesystem
+code.
+<p>
+The qspinlock patch can, thus, improve performance in situations where
+locks are highly contended, though, as Waiman noted in the patch posting,
+it is not meant to be an actual solution for contention problems.
+Importantly, qspinlocks also perform better in the uncontended case.
+Releasing a ticket spinlock requires a read-modify-write operation, while a
+qspinlock can be released with a simple write.  So, while the main
+performance benefits of qspinlocks are to be seen on large systems, most
+systems should see at least a small improvement.  That should be enough to
+get this code merged as soon as the 3.15 development cycle.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Spinlocks">Spinlocks</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/590243/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor590322"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2014 1:32 UTC (Wed)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/590322/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+According to the description, mcs_lock_t::locked seems to always be only 1 or 0, but it is described as a counter.  It seems, too, that locked is only ever updated by the holder of the lock.  Could it not be stolen from mcs_lock_t::next, resulting in fewer memory bus operations and a one-word pointer?<br>
+<p>
+Furthermore... why use MCS at all if qspinlocks are both smaller and faster?  Should all the MCS locks become qspinlocks, over time?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590322/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor590339"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2014 11:40 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/590339/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      The qspinlock implementation actually uses MCS locks - but only the four-element per-CPU array of them.  So the MCS locks won't go away.  That array would also be insufficient if one were to try to put qspinlocks into mutexes, since those can sleep and an arbitrary number of them can be acquired.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590339/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor591280"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 21, 2014 0:29 UTC (Fri)
+                               by <b>kevinm</b> (guest, #69913)
+                              [<a href="/Articles/591280/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Mutexes can't sleep <i>while holding a spinlock</i>, though.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/591280/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor591768"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2014 1:47 UTC (Tue)
+                               by <b>joern</b> (guest, #22392)
+                              [<a href="/Articles/591768/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The array is not for processes holding a lock, but for processes sleeping on a lock.  If it were for processes holding a lock, it wouldn't even be sufficient for regular spinlocks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/591768/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor591219"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 20, 2014 15:21 UTC (Thu)
+                               by <b>icefield</b> (guest, #82338)
+                              [<a href="/Articles/591219/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah that's a good point, who can please answer the question why we can't override mcs_lock_t::next for mcs_lock_t::locked?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/591219/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor590334"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2014 4:23 UTC (Wed)
+                               by <b>martinfick</b> (subscriber, #4455)
+                              [<a href="/Articles/590334/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hmm, it sounds like these locks can be preempted?  If so, doesn't that mean that a preempted task, which is next inline for the lock, could cause the lock to block even though tasks on other CPUs would be able to acquire the lock if it were a spinlock.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590334/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor590340"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2014 11:42 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/590340/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      They cannot be preempted by the scheduler, only by interrupts.  So they have to be protected against nested calls in interrupt handlers, but that is already true of spinlocks.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590340/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor590350"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2014 13:05 UTC (Wed)
+                               by <b>martinfick</b> (subscriber, #4455)
+                              [<a href="/Articles/590350/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+OK, but a spinlock can only block other CPUs once held, this kind of lock can block other CPUs before acquiring the lock simply by being next inline for the lock.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590350/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor590352"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2014 13:59 UTC (Wed)
+                               by <b>rriggs</b> (guest, #11598)
+                              [<a href="/Articles/590352/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not sure I understand your point.  Isn't the case for both that the current lock holder is blocking CPU cores, and the next lock holder will block CPU cores?  The only distinction here is that the next lock holder is known rather than random.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590352/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor590440"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2014 23:04 UTC (Wed)
+                               by <b>james</b> (subscriber, #1325)
+                              [<a href="/Articles/590440/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      If I'm reading this correctly (and it's quite possible I'm not), the scenario would be something like:
+<ul>
+<li>CPU1 obtains a lock;
+<li>CPU2 tries to get the same lock, fails, and becomes next in line;
+<li>CPU3 tries to get the same lock, fails, and becomes second in line;
+<li>CPU2 is pre-empted by an interrupt;
+<li>CPU1 releases the lock;
+</ul>
+Then CPU3 is still waiting for CPU2 to release the lock, which it won't do until it has returned from its interrupt handling and done whatever needed to be protected by the lock. With conventional spinlocks, CPU3 would have obtained the lock and could be doing something productive while CPU2 was still handling the interrupt.
+<p>
+What I'm not sure about is how often this situation will arise in practice. Obviously, you have to have a lock with at least two CPUs waiting for the situation to arise, and an interrupt being handled on the wrong CPU at just the wrong time. It looks like this is sufficiently infrequent that the performance hit when this happens is dwarfed by the performance benefits of the technique, but it would probably be a good idea to retry the benchmark on a machine subject to a network storm.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590440/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor590480"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2014 3:15 UTC (Thu)
+                               by <b>martinfick</b> (subscriber, #4455)
+                              [<a href="/Articles/590480/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It looks like this is sufficiently infrequent</font><br>
+<p>
+I wonder about that since these locks are meant for highly contentious locks!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590480/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor590549"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2014 14:30 UTC (Thu)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/590549/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And a corollary that on a computer, a one in a million chance race is going to happen all the time, frequent and infrequent have different meanings than colloquial use.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590549/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor590512"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2014 11:23 UTC (Thu)
+                               by <b>dvrabel</b> (subscriber, #9500)
+                              [<a href="/Articles/590512/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think ticket locks have the same behavior as you describe.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590512/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor590560"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2014 15:55 UTC (Thu)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/590560/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;    CPU1 obtains a lock;</font><br>
+<font class="QuotedText">&gt;    CPU2 tries to get the same lock, fails, and becomes next in line;</font><br>
+<font class="QuotedText">&gt;    CPU3 tries to get the same lock, fails, and becomes second in line;</font><br>
+<font class="QuotedText">&gt;    CPU2 is pre-empted by an interrupt;</font><br>
+<font class="QuotedText">&gt;    CPU1 releases the lock; </font><br>
+<p>
+Preemtion is disabled appropriately during spinlock acquiration IIRC.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590560/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor986977"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2024 12:53 UTC (Fri)
+                               by <b>301043030</b> (guest, #172920)
+                              [<a href="/Articles/986977/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+only process preemption is disabled, interruption is also valid.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986977/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor590498"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">MCS locks and qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2014 9:58 UTC (Thu)
+                               by <b>dgm</b> (subscriber, #49227)
+                              [<a href="/Articles/590498/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm feeling too lazy to find it out for myself: is it safe to give up waiting for the lock?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590498/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor590800"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">atomic != exchange</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 15, 2014 6:18 UTC (Sat)
+                               by <b>bnorris</b> (subscriber, #92090)
+                              [<a href="/Articles/590800/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; So there is no need for atomic operations when making changes to that structure</font><br>
+<p>
+s/atomic/atomic exchange/<br>
+<p>
+I believe you still need to use an atomic write operation, so that the CPU can read its own lock coherently; it just doesn't need to be an atomic exchange, since there are no other modifiers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590800/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor593574"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about nested qspinlocks?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2014 14:35 UTC (Mon)
+                               by <b>giltene</b> (guest, #67734)
+                              [<a href="/Articles/593574/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Limiting qspinlock to only 4 per-CPU slots assumes no logical nesting of the locks. While the 4 slots provide for concurrent use of locks in different interrupt contexts ("...normal, software interrupt, hardware interrupt, and non-maskable..."), nesting within the same context will still be a problem, as the same CPU would want to hold multiple qspinlocks at the same time. A good example of this need with regular ticketed spinlocks can be found in move_ptes (<a rel="nofollow" href="http://lxr.free-electrons.com/source/mm/mremap.c#L90">http://lxr.free-electrons.com/source/mm/mremap.c#L90</a>).<br>
+<p>
+This can probably be addressed by limiting the nesting level within each interrupt context to some reasonable but generous limit (4?) and providing more slots in each per-CPU mcs_spinlock array. Each CPU would probably need to keep a per-interrupt-context current_nesting_level to figure out the right slot to use and make sure no overflows occur. <br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/593574/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor593575"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about nested qspinlocks?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2014 15:31 UTC (Mon)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/593575/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Remember that the per-CPU array is only used during the lock <i>acquisition</i> process.  When nested spinlocks are held, all but (perhaps) the last are already acquired.  Since the CPU is no longer trying to acquire them, it need not place an entry into the queue and, thus, does not need to use an element from the per-CPU array.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/593575/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor609120"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about nested qspinlocks?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2014 13:44 UTC (Thu)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/609120/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why is the number 4 correct?<br>
+<p>
+Process context, software interrupt, hardware interrupt, kprobe breakpoint, krpobe, NMI, MCE.  If this can happen, that's seven.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/609120/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor794233"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about nested qspinlocks?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 20, 2019 17:36 UTC (Sat)
+                               by <b>firolwn</b> (guest, #96711)
+                              [<a href="/Articles/794233/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+According to <a href="https://lkml.org/lkml/2019/1/10/799">https://lkml.org/lkml/2019/1/10/799</a>, NMI and MCE should never use spinlock.<br>
+<p>
+There might be a problem in following scenario:<br>
+Process context, soft interrupt, hardware interrupt, page fault(e.g. vmalloc), kprobe. <br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794233/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor794234"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about nested qspinlocks?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 20, 2019 17:45 UTC (Sat)
+                               by <b>firolwn</b> (guest, #96711)
+                              [<a href="/Articles/794234/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+vmalloc isn't correct. Should be some invalid address in kernel space which triggered a page fault.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794234/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor852696"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Link to article about MCS locks no longer works</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 15, 2021 10:17 UTC (Thu)
+                               by <b>jnareb</b> (subscriber, #46500)
+                              [<a href="/Articles/852696/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The provided link to the article about MCS locks, namely <a href="https://www.cise.ufl.edu/tr/DOC/REP-1992-71.pdf">https://www.cise.ufl.edu/tr/DOC/REP-1992-71.pdf</a> , no longer works.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852696/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor852849"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Link to article about MCS locks no longer works</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2021 1:33 UTC (Fri)
+                               by <b>jake</b> (editor, #205)
+                              [<a href="/Articles/852849/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks.  Another reader pointed us to the archive.org link: <a href="https://web.archive.org/web/20140411142823/http://www.cise.ufl.edu/tr/DOC/REP-1992-71.pdf">https://web.archive.org/web/20140411142823/http://www.cis...</a> ... I have updated the article.<br>
+<p>
+jake<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852849/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

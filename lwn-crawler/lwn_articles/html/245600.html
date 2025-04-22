@@ -1,0 +1,543 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Smarter  write throttling [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/245600/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/244842/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/245600/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Smarter  write throttling</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 14, 2007</br>
+           </div>
+Whenever a process performs a normal, buffered <tt>write()</tt> to a file,
+it ends up creating one or more dirty pages in memory.  Those pages must
+eventually be written to disk.  Until the data moves to persistent storage,
+the pages of memory it occupies cannot be used for any other purpose, even
+if the original writing process, as is often the case, no longer needs
+them.  It is important to prevent dirty pages from filling too much of the
+system's memory; should the dirty pages take over, the system will find
+itself under severe memory pressure, and may not even have enough memory to
+perform the necessary writes and free more pages.  Avoiding this situation
+is not entirely easy, though.
+<p>
+
+As a general rule, software can create dirty pages more quickly than
+storage devices can absorb them.  So various mechanisms must be put in
+place to keep the number of dirty pages at a manageable level.  One of
+those mechanisms is a simple form of write throttling.  Whenever a process
+dirties some pages, the kernel checks to see if the total number of dirty
+pages in the system has gotten too high.  If so, the offending process is forced to do
+some community service by writing pages to disk for a while.  Throttling
+things in this way has two useful effects: dirty pages get written to disk
+(and thus cleaned), and the process stops making more dirty pages for a
+little while.
+<p>
+
+This mechanism is not perfect, however.  The process which gets snared by
+the global dirty pages threshold may not be the one which actually dirtied
+most of those pages; in this case, the innocent process gets put to work
+while the real culprit continues making messes.  If the bulk of the dirty
+pages must all be written to a single device, it might not be beneficial to
+throttle processes working with files on other disks - the result
+could be that traffic for one disk essentially starves the others which
+could, otherwise, be performing useful work.  Overall, the use of a single
+global threshold can lead to significant starvation of both processes and
+devices.
+<p>
+
+It can get worse than that, even.  Consider what happens when block devices
+are stacked - a simple LVM or MD device built on top of one or more
+physical drives, for example.  A lot of I/O through the LVM level could
+create large numbers of dirty pages destined for the physical device.
+Should things hit the dirty thresholds at the LVM level, however, the
+process could block before the physical drive starts writeback.  In the
+worst case, the end result here is a hard deadlock of the system - and that
+is not generally the sort of reliability that users expect of their
+systems.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+
+Peter Zijlstra has been working on a solution in the form of the <a
+href="http://lwn.net/Articles/244443/">per-device write throttling patch
+set</a>.  The core idea is quite simple: rather than use a single, global
+dirty threshold, each backing device gets its own threshold.  Whenever
+pages are dirtied, the number of dirty pages which are destined for the
+same device is examined, and the process is throttled if its specific
+device has too many dirty pages outstanding.  No single device, then, is
+allowed to be the destination for too large a proportion of the dirty
+pages.
+<p>
+
+Determining what "too large" is can be a bit of a challenge, though.  One
+could just divide the global limit equally among all block devices on the
+system, but the end result would be far from optimal.  Some devices may
+have a great deal of activity on them at any given time, while others are
+idle.  One device might be a local, high-speed disk, while another is
+NFS-mounted over a GPRS link.  In either case, one can easily argue that
+the system will perform better if the faster, more heavily-used devices get
+a larger share of memory than slow, idle devices.
+<p>
+
+To make things work that way, Peter has created a <a
+href="/Articles/245603/">"floating proportions" library</a>.  In an
+efficient, mostly per-CPU manner, this library can track events by source
+and answer questions about what percentage of the total is coming from each
+source.  In the writeback throttling patch, this library is used to count
+the number of page writeback <i>completions</i> coming from each device.
+So devices which are able to complete writeback more quickly will get a
+larger portion of the dirty-page quota.  Devices which are generally more
+active will also have a higher threshold.
+<p>
+
+The patch as described so far still does not solve the problem of one user
+filling memory with dirty pages to the exclusion of others - especially if
+users are contending for the bandwidth of a single device.  There is
+another part of the patch, however, which tries to address this issue.
+A different set of proportion counters is used to track how many pages are
+being dirtied by each task.  When a page is dirtied and the system goes to
+calculate the dirty threshold for the associated device, that threshold is
+reduced proportionately to the task's contribution to the pile of dirty
+pages.  So a process which is producing large numbers of dirty pages will
+be throttled sooner than other processes which are more restrained.
+
+<p>
+
+This patch is in its eighth revision, and there has not been a lot of
+criticism this time around.  Linus's <a
+href="/Articles/245610/">response</a> was:
+<p>
+<div class="BigQuote">
+	Ok, the patches certainly look pretty enough, and you fixed the
+	only thing I complained about last time (naming), so as far as I'm
+	concerned it's now just a matter of whether it *works* or not. I
+	guess being in -mm will help somewhat, but it would be good to have
+	people with several disks etc actively test this out.
+</div>
+<p>
+
+The number of reports so far has been small, but some testers have said
+that this patch makes their systems work better.  It was recently removed
+from -mm "due to crashiness," though, so there are some nagging issues to
+be taken care of yet.  In the longer term, the chances of it getting in
+could be said to be fairly good - but, with memory management patches like
+this, one never knows for sure.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Writeout_throttling">Memory management/Writeout throttling</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Write_throttling">Write throttling</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/245600/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor245734"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Smarter  write throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2007 8:48 UTC (Thu)
+                               by <b>edschofield</b> (guest, #39993)
+                              [<a href="/Articles/245734/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Why wouldn't the I/O scheduler be a good place to perform write throttling?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245734/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245762"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I/O scheduler</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2007 12:51 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/245762/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Because there is a gap between when a page is dirtied and when it gets to the I/O scheduler.  Pages are not scheduled for writeback immediately upon dirtying - that's the page cache in action.  So, by the time the I/O scheduler gets involved, it's too late to keep more pages from being dirtied.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245762/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor245940"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Smarter  write throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2007 17:17 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/245940/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+A lot of I/O through the LVM level could create large numbers of dirty pages destined for the physical device. Should things hit the dirty thresholds at the LVM level, however, the process could block before the physical drive starts writeback. In the worst case, the end result here is a hard deadlock of the system
+</blockquote>
+<p>
+I don't see any deadlock in this description, but maybe I'm supposed to know something more about how LVM works.  (It doesn't make sense to me, for example, that a physical drive starts writeback; I expect a physical drive to be the <em>target</em> of a writeback).
+<p>
+But I've seen the pageout-based memory deadlock plenty of times in action when a process that has to move in order for memory to get clean (maybe it holds a lock for some dirty file) blocks on a memory allocation.  At least at one time, these were possible in Linux in various ways, network-based block devices and filesystems being the worst offenders, and people addressed it with tuning policies that sought to make it unlikely that the amount of clean allocatable memory ever shrank to zero.
+<p>
+"Throttling" usually refers to that sort of tuning -- a more or less arbitrary limit placed on how fast something can go.  I hope that's not what this is about, because it is possible actually to fix deadlocks -- make them mathematically impossible while still making the full resources of the system available to be apportioned any way you like.  It's not easy, but the techniques are well known (never wait for a Level N resource while holding a Level N+1 resource; have pools of memory at various levels).
+<p>
+I hate throttling.  Throttling is waiting for something artificial.  In a well-designed system, you can wait for real resource and never suffer deadlock or unfairness.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245940/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor246056"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Smarter  write throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2007 0:46 UTC (Sun)
+                               by <b>i3839</b> (guest, #31386)
+                              [<a href="/Articles/246056/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Looking at it like a feedback system, the current negative feedback that limits writing at all is the amount of memory (or part of it thanks to tunables, but in the end it's memory that limits it). Practically this means you can have huge number of dirty pages outstanding, all waiting on one slow device.<br>
+<p>
+Now combine the facts that you can't get rid of dirty memory quickly with that they probably aren't used anymore (rewrite doesn't happen that often I think), and you've just managed to throw away all free memory, slowing everything down. So basically you're using most of your memory for buffering writes, while the write speed doesn't increase significantly after a certain buffer size.<br>
+<p>
+What is throttled here is the speed of dirtying pages, not the speed of writeout, to keep the number of dirty pages limited. (But although the dirtying is throttled, the average should in both cases be the write speed of the device, so perhaps "throttling" isn't quite the right word).<br>
+<p>
+The deadlock mentioned is AFAIK the situation where the system is under heavy memory pressure and wants to free some memory, which it tries to do by writing out dirty pages, but doing that might require allocating some memory, which can't be done because that's what lacking, hence a deadlock. But I don't know if that's the mentioned LVM example, or if that's another case.<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/246056/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor246060"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Smarter  write throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2007 1:48 UTC (Sun)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/246060/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+What is throttled here is the speed of dirtying pages,
+</blockquote>
+<p>
+Actually, nothing is throttled here.  Rather, the amount of memory made available for writebehind buffering is restricted, so folks have to wait for it.  Tightening resource availability slows down users of resources, like throttling would, but it's a fundamentally different concept.  Resource restriction pushes back from the actual source of the problem (scarce memory), whereas throttling makes the requester of resource just ask for less, based on some higher level determination that the resource manager would give him too much.
+<p>
+I think the article is really about smarter memory allocation for writebehind data, not smarter write throttling.
+<p>
+(To understand the essence of throttling, I think it's good to look at the origin of the word.  It means to choke, as in squeezing a tube (sometimes a person's throat) to reduce flow through it.  The throttle of a classic gas engine prevents the fuel system from delivering fuel to the engine even though the engine is able to burn it).
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/246060/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor246058"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Streamed writes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2007 0:56 UTC (Sun)
+                               by <b>i3839</b> (guest, #31386)
+                              [<a href="/Articles/246058/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      What would be good to have is something similar as read ahead, but for writes and opposite: When streaming writing is detected the process should be blocked aggressively so that it has very few dirty pages outstanding, just enough to have near optimal write speed. Such streamed dirty pages could also be moved to the (head of) LRU list to get them quicker out of page cache, after they're written.<br>
+<p>
+Pity I don't have the time to implement it now. :-(<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/246058/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor252620"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Device-level IO blocking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2007 9:11 UTC (Tue)
+                               by <b>Jel</b> (guest, #22988)
+                              [<a href="/Articles/252620/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Device-level IO blocking doesn't seem granular enough.  Isn't there some <br>
+way to manage disk writes with awareness of platters/heads and access <br>
+times, so that you essentially gain the performance benefits of RAID?<br>
+<p>
+That would be a much nicer layer to queue IO at.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/252620/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor252685"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Device-level IO blocking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2007 17:30 UTC (Tue)
+                               by <b>njs</b> (guest, #40338)
+                              [<a href="/Articles/252685/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      I doubt that would make much difference -- the goal is that the rate at which writes are queued should match the rate at which writes are completed.  Since there is a buffer, these rates don't have to match in fine detail; they only have to match on average.<br>
+<p>
+Even over long time periods, different devices will be more or less fast; but the differences within a device tend (I believe) to wash out over any time period longer than a few hundred milliseconds.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/252685/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor252628"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Smarter  write throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2007 11:13 UTC (Tue)
+                               by <b>gat3way</b> (guest, #47864)
+                              [<a href="/Articles/252628/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Man, I just wonder how much write I/O you should have on a modern-day system with let's say 2GB of RAM, so that the dirty cache would cause a significant memory pressure? I mean, before pdflush wakes up and writes them back???<br>
+<p>
+On my desktop system with 1 GB RAM, apache server with a PHP application for network monitoring that does lots of mysql INSERTs, 2 testing tomcat5 instances, KDE, evolution and firefox running, according to /proc/meminfo, the memory occupied by dirty pages rarely exceed 10MB...<br>
+<p>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/252628/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor257535"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Smarter  write throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 7, 2007 13:48 UTC (Wed)
+                               by <b>mangoo</b> (guest, #32602)
+                              [<a href="/Articles/257535/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+This patch is more about servers than desktops.
+
+This is a server with 1700 MB RAM, and it does quite a bit of IO:
+
+# while true; do grep Dirty /proc/meminfo ; sleep 2s ; done
+Dirty:          172404 kB
+Dirty:          173100 kB
+Dirty:          173332 kB
+Dirty:          173260 kB
+Dirty:          173692 kB
+Dirty:          173684 kB
+Dirty:          173724 kB
+Dirty:          174256 kB
+Dirty:          174772 kB
+Dirty:          175120 kB
+(...)
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/257535/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor264169"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Smarter  write throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2008 12:00 UTC (Tue)
+                               by <b>richlv</b> (guest, #49844)
+                              [<a href="/Articles/264169/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+wouldn't this also be significantly about desktops ?
+it seems the grandparent was talking about local disks only, even though article explicitly
+mentions other use cases like nfs over gprs :) ).
+
+desktops tend to have all kinds of relatively slow things connected to them - usb drives,
+cameras, portable players, all kinds of slow network stuff...
+if i understood the idea correctly, these could theoretically block/limit local hdd, which
+would otherwise be the fastest device in an average desktop.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/264169/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2007, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

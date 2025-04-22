@@ -1,0 +1,388 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Deferred scheduling for user-space critical sections [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/948870/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/948895/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/948870/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Deferred scheduling for user-space critical sections</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ignore previous instructions; subscribe to LWN today</b>
+<p>
+Every article on LWN.net is written by humans, for humans. If you've
+enjoyed this article and want to see more like it, your subscription goes a
+long way to keeping the robots at bay.  We are offering <a href="https://lwn.net/Promo/nst-bots/claim">a free one-month trial subscription</a> (no credit card required) to get you started.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 27, 2023</br>
+           </div>
+User-space developers working with highly threaded applications would often
+like to be able to use spinlocks to protect shared data structures from
+concurrent access.  There is a fundamental problem with user-space
+spinlocks, though: there is no way to prevent a thread from being
+preempted.  Various ways of working around this problem have been explored,
+but <a
+href="/ml/linux-kernel/20231025235413.597287e1@gandalf.local.home/">this
+patch</a> from Steven Rostedt questions the premise on which much of that
+work is based: what if it <i>were</i> possible to prevent preemption, for a
+short period at least?
+<p>
+Spinlocks are fast when there is no contention, and they can be acquired
+with no help from the kernel at all.  The contended case is more
+problematic, though.  A normal spinlock implementation would "spin" —
+repeatedly poll the state of the lock until it becomes available — in this
+case.  But if the holder of the lock has been preempted and is not running,
+that spinning could go on indefinitely, wasting CPU time.  Worse, the
+spinning thread might be the one that preempted the lock holder; in that
+case, spinning actively prevents the lock from being released.  Either way,
+spinning on a lock held by a thread that is not running can ruin the
+performance of a system.
+<p>
+When using the kernel's futex mechanism, a thread waiting on a lock will
+call into the kernel and go to sleep until the lock is released; this
+works, but the cost of the system call can be prohibitive, even on Linux,
+where system calls are relatively fast.  Work is underway on <a
+href="/Articles/944895/">adaptive spinning</a>, where a thread will only
+spin on a lock if the lock holder is currently running; that should make
+spinlocks work purely in user space much of the time.  But a preempted lock
+holder will still force a call into the kernel and gum up the works in
+general.  There would be value in letting lock holders run until they
+release their locks (as is done in most kernel configurations), avoiding
+the problem entirely, but letting unprivileged threads override the
+scheduler can create a whole range of problems of its own.
+<p>
+Rostedt thinks he has a way to allow a thread to request a bit more CPU
+time to complete a critical section, though, based on the <a
+href="/Articles/945422/">lazy-preemption idea</a> currently being discussed
+in the kernel community.  Like the adaptive-spinning work, it is based on
+the <a href="/Articles/697979/">restartable sequences</a> feature, which
+is seemingly evolving into a mechanism for low-cost communication with the
+scheduler.
+<p>
+Rostedt's patch adds a new field, <tt>cr_flags</tt>, to the <tt>rseq</tt>
+structure shared between user space and the kernel.  If a running thread
+sets the lowest-order bit (named
+<tt>RSEQ_CR_FLAG_IN_CRITICAL_SECTION</tt>), it indicates that the thread is
+currently running inside a critical section and would appreciate the
+opportunity to run uninterrupted for a little bit longer.  The scheduler,
+before preempting a thread, will check that flag; if it is set, the
+scheduler will defer the preemption of that thread for a short
+period, much in the way that lazy preemption defers it in the kernel.  That
+deferral is not guaranteed; if a realtime task needs to run, for example,
+it will get the CPU regardless of the setting of that bit.  But in the
+absence of such tasks, the kernel will let a thread in a critical section
+run.
+<p>
+If, though, the kernel defers preemption in this way, it will set the
+<tt>RSEQ_CR_FLAG_KERNEL_REQUEST_SCHED</tt> bit in <tt>cr_flags</tt>.  When
+the thread exits its critical section, it should check that flag and, if
+the flag is set, the thread should make a system call to let the kernel
+switch to the task it really wanted to be running.  If the thread is still
+running when the next timer tick happens, it will be preempted regardless.
+<p>
+This feature might seem like a way for a malicious thread to get more than
+its share of the available CPU time.  It could simply keep the
+critical-section bit set all the time and benefit from as much preemption
+deferral as it can get.  The <a href="/Articles/925371/">EEVDF
+scheduler</a> that will be featured in the 6.6 kernel release, though, will
+note that a thread has gotten more than its share of CPU time and penalize
+it thereafter.  So it should not be possible to game this mechanism to get
+more time overall and, with luck, there will not even be a need to add a
+way to detect threads that are attempting to abuse deferral in this way.
+<p>
+Deferred preemption, should it be merged, will not eliminate the need for
+adaptive spinning (or something like it); a lock-holding thread can still
+be preempted.  But it should improve the performance of spinlock-using
+applications, perhaps significantly.  When a lock-holding thread is
+preempted, any other thread needing that lock will be blocked as well,
+increasing the cost of that preemption significantly.  By shifting
+preemption to times when it won't hurt other threads, this feature can
+avoid that penalty.  Rostedt ran a simple benchmark that would appear to
+prove that point: "<q>It was able to get into the critical section almost 1
+million times more in those 5 seconds! That's a 23% improvement!</q>".
+He suggested that deferred preemption might be useful for the
+implementation of spinlocks in guest kernels as well.
+<p>
+Whether this feature will be merged is an open question, though; scheduler
+maintainer Peter Zijlstra <a
+href="/ml/linux-kernel/20231025102952.GG37471@noisy.programming.kicks-ass.net/">is
+not enthusiastic</a> about it.  He worries that no extension will be long
+enough, that deferred preemption might cause latency problems, that the
+mechanism still isn't reliable (applications can't count on preemption
+being deferred), and that the cost of using system calls for
+contended locks has been exaggerated.  Rostedt <a
+href="/ml/linux-kernel/20231025103105.5ec64b89@gandalf.local.home/">answered</a>
+that the interference with the scheduler's decisions should be minimal, and
+that real-world experience says that system calls are still too expensive
+to use in such situations.  The extra time taken by a task when preemption
+is deferred, he <a
+href="/ml/linux-kernel/20231025131731.48461873@gandalf.local.home/">said</a>,
+is no worse than what might happen if it makes a long-running system call.
+<p>
+Whether this feature, or something evolved from it, will make it into the
+mainline is something that only time will tell.  It has the potential to
+significantly improve the performance of certain classes of applications
+where performance matters a lot.  More widespread testing would certainly
+be needed, though, to demonstrate that it cannot be used to ruin
+performance on other systems.  The patch is relatively small, but the
+discussions around it may go on for some time yet.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Scheduler">Scheduler</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Spinlocks-User-space">Spinlocks/User-space</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/948870/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor949155"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferred scheduling for user-space critical sections</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 28, 2023 19:33 UTC (Sat)
+                               by <b>nevets</b> (subscriber, #11875)
+                              [<a href="/Articles/949155/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Note, Mathieu Desnoyers recommended switching the bits around so that bit 0 is for the kernel to tell user space to schedule, and then bits 1-31 can be used as a counter for nested locking. The kernel will give the extra time slice if any of those bits are set.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/949155/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor949157"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferred scheduling for user-space critical sections</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 28, 2023 21:21 UTC (Sat)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/949157/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On a similar note, it might be interesting if a thread could 'lock its CPU'.  A thread that did this could still be preempted, but if it was, no other thread in the same process could be scheduled on that CPU.  If the scheduler would want to schedule another thread, it would schedule the lock owner instead.<br>
+<p>
+Then userland programs could write short critical sections that access CPU-local data – the same idea as restartable sequences, but without the restarting part.  Not having to support restarting would allow the critical sections to be written in C instead of assembly, and generally make the scheme more widely applicable.<br>
+<p>
+But what if the thread was preempted and, by the time it could be scheduled again, its original CPU was busy?  Well… perhaps the CPU number could be replaced with a more abstract index that the kernel could migrate across physical CPUs if needed.  The number of possible indexes would still be the same as the number of CPUs.  After all, "CPU-local data" in userland usually doesn't need to literally be CPU-local.  It's enough if (1) the number of slots is bounded, (2) 'locking' a slot is cheap, and (3) slots *usually* preserve NUMA locality (which would be true if they're rarely migrated across CPUs).<br>
+<p>
+Well, it's just an idea.  I'm sure someone has thought of this before and there's a good reason it wouldn't work well.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/949157/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor949203"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferred scheduling for user-space critical sections</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 30, 2023 12:28 UTC (Mon)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/949203/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Being able to arbitrarily freeze one's own scheduling for as long you'd like sounds like something that would make a lot of security bugs a lot easier to exploit, at least. (There was a similar thing a while back where userfaultfd() was used for that purpose, and I don't think you want to introduce more such primitives.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/949203/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor950994"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferred scheduling for user-space critical sections</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2023 13:40 UTC (Fri)
+                               by <b>saagarjha</b> (guest, #167945)
+                              [<a href="/Articles/950994/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+userfaultfd just happened to be a convenient target for blocking scheduling, though. While less clean you can still alter scheduling by, say, corrupting a lock and ensuring it can never be acquired by the thread you want to stall.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/950994/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor954476"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferred scheduling for user-space critical sections</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 11, 2023 15:50 UTC (Mon)
+                               by <b>LWN_Sub</b> (guest, #163392)
+                              [<a href="/Articles/954476/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't think that the defense mechanism provided by EEVDF scheduler can relieve the consequence brought by deferred scheduling. A single malicious process, which forks itself again and again, can occupy the CPU endlessly by making use of the extra time providied by deferred scheduling. And I don't think the EEVDF scheduler can detect this kind of attack.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/954476/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor954525"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferred scheduling for user-space critical sections</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 11, 2023 19:37 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/954525/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Does it respect cgroups? Ideally a malicious process should be confined in its own cgroup tree, that it can't easily escape.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/954525/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

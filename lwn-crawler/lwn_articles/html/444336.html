@@ -1,0 +1,1676 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The problem with prefetch [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/444336/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/443692/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/444336/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The problem with prefetch</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 24, 2011</br>
+           </div>
+Over time, software developers tend to learn that micro-optimization
+efforts are generally not worthwhile, especially in the absence of hard
+data pointing out a specific problem.  Performance problems are often not
+where we think they are, so undirected attempts to tweak things to make
+them go faster can be entirely ineffective.  Or, indeed, they can make
+things worse.  That is a lesson that the kernel developers have just
+relearned.
+<p>
+At the kernel level, performance often comes down to cache behavior.
+Memory references which must actually be satisfied by memory are extremely
+slow; good performance requires that needed data be in a CPU cache much of
+the time.  The kernel goes out of its way to use cache-hot memory when
+possible; there has also been some significant work put into tasks like
+reordering structures so that fields that are commonly accessed together
+are found in the same cache line.  As a general rule, these optimizations
+have helped performance in measurable ways.
+<p>
+Cache misses are often unavoidable, but it is sometimes possible to attempt
+to reduce their cost.  If the kernel knows that it will be accessing memory
+at a particular location in the near future, it can use a CPU-specific
+prefetch instruction to begin the process of bringing the data into cache.
+This instruction is made available to kernel code via the generic
+<tt>prefetch()</tt> function; developers have made heavy use of it.
+Consider, for example, this commonly-used macro from
+<tt>&lt;linux/list.h&gt;</tt>:
+<p>
+<pre>
+    #define list_for_each(pos, head) \
+	for (pos = (head)-&gt;next; prefetch(pos-&gt;next), pos != (head); \
+            pos = pos-&gt;next)
+</pre>
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+This macro (in a number of variants) is used to traverse a linked list.
+The idea behind the <tt>prefetch()</tt> call here is to begin the process
+of fetching the next entry in the list while the current entry is being
+processed.  Hopefully by the time the next loop iteration starts, the data
+will have arrived - or, at least, it will be in transit.  Linked lists are
+known to be cache-unfriendly data structures, so it makes sense that this
+type of optimization can help to speed things up.
+<p>
+Except that it doesn't - at least, not on x86 processors.  
+<p>
+Andi Kleen may have been the first to question this optimization when he <a
+href="/Articles/404103/">tried to remove the prefetches from 
+list operations</a> last September.  His patch generated little discussion,
+though, and apparently fell through the cracks.  Recently, Linus
+<a href="/Articles/444344/">did some profiling</a> on one of his favorite
+workloads (kernel builds) and found that the prefetch instructions were at
+the top of the ranking.  Performing the prefetching cost time, and that
+time was not being repaid through better cache behavior; simply removing
+the <tt>prefetch()</tt> calls made the build go faster.
+<p>
+Ingo Molnar, being Ingo, <a href="/Articles/444346/">jumped in</a> and did
+a week's worth of research in an hour or so.  Using perf and a slightly
+tweaked kernel, he was able to verify that using the prefetch instructions
+caused a performance loss of about 0.5%.  That is not a headline-inspiring
+performance regression, certainly, but this is an optimization which was
+supposed to make things go faster.  Clearly something is not working the
+way that people thought it was.
+<p>
+Linus pointed out one problem at the outset: his test involved a lot of
+traversals of singly-linked <tt>hlist</tt> hash table lists.  Those lists
+tend to be short, so there is not much scope for prefetching; in fact, much
+of the time, the
+only prefetch attempted used the null pointer that indicates the end
+of the list.  Prefetching with a null pointer seems silly, but it's also costly:
+evidently every such prefetch on x86 machines (and, seemingly, ARM as well)
+causes a translation lookaside buffer miss and a pipeline stall.  Ingo
+measured this effect and came to the conclusion that each null prefetch
+cost about 20 processor cycles.
+<p>
+Clearly, null prefetches are a bad idea.  It would be nice if the CPU
+would simply ignore attempts to prefetch using a null pointer, but that's
+not how 
+things are, so, as is often the case, one ends up trying to solve the
+problem in software instead.  Ingo 
+did some testing with a version of <tt>prefetch()</tt> which would only
+issue prefetch instructions for non-null pointers; that version did,
+indeed, perform better.  But it still performed measurably worse than
+simply skipping the prefetching altogether.
+<p>
+CPU designers are well aware of the cost of waiting for memory; they have
+put a great deal of effort into minimizing that cost whenever possible.
+Among other things, contemporary CPUs have their own memory prefetch units
+which attempt to predict which memory will be wanted next and start the
+process of retrieving it early.  One thing Ingo noticed in his tests is
+that, even without any software prefetch operations, the number of prefetch
+operations run by the CPU was about the same.  So the hardware prefetcher
+was busy during this time - and it was doing a better job than the software
+at deciding what to fetch.  Throwing explicit prefetch operations into the
+mix, it seems, just had the effect of interfering with what the hardware
+was trying to do.  
+<p>
+Ingo summarized his results this way:
+<p>
+<div class="BigQuote">
+	So the conclusion is: prefetches are absolutely toxic, even if the
+	NULL ones are excluded.
+</div>
+<p>
+One immediate outcome from this work is that, for 2.6.40 (or whatever it
+ends up being called), the <tt>prefetch()</tt> calls have been removed from
+linked list, hlist, and sk_buff list traversal operations - just like Andi
+Kleen tried to do in September.  Chances are
+good that other prefetch operations will be removed as well.  There will
+still be a place for <tt>prefetch()</tt> in the kernel, but only in
+specific situations where it can be clearly shown to help performance.  As
+with other low-level optimizations (<tt>likely()</tt> comes to mind),
+tossing in a prefetch because it seems like it might help is often not the
+right thing to do.
+<p>
+One other lesson to be found in this experience is that numbers matter.
+Andi was right when he wanted to remove these operations, but he did not
+succeed in getting his patch merged.  One could come up with a number of
+reasons why things went differently this time, starting with the fact that
+Linus took an interest in the problem.  But it's also true that
+performance-oriented patches really need to come with numbers to show that
+they are achieving the desired effect; had Andi taken the time to quantify
+the impact of his change, he would have had a stronger case for merging
+it.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Prefetch">Prefetch</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/444336/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor444482"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 15:53 UTC (Tue)
+                               by <b>MattBBaker</b> (guest, #28651)
+                              [<a href="/Articles/444482/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was under the impression that having a software prefetch instruction in the pipe would cause the hardware prefetcher to be disabled. On an x86 anyways. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444482/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor444487"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">prefetch and buffer bloat</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 16:15 UTC (Tue)
+                               by <b>grunch</b> (subscriber, #16603)
+                              [<a href="/Articles/444487/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This seems like a microscopic analog to the buffer bloat situation: trying to improve performance in a way that ultimately negates improvements the underlying handlers (hardware in this case, TCP in the case of buffer bloat) can already handle.<br>
+<p>
+I wonder if it's a similar cause.<br>
+<p>
+Thanks for the details Jonathan!<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444487/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444491"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">prefetch and buffer bloat</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 16:22 UTC (Tue)
+                               by <b>martinfick</b> (subscriber, #4455)
+                              [<a href="/Articles/444491/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not really.  The buffer bloat problem is due to the tradeoff between a marketing performance improvement in throughput versus latency which is rarely marketed or even considered (until now).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444491/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444505"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">prefetch and buffer bloat</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 16:50 UTC (Tue)
+                               by <b>nye</b> (subscriber, #51576)
+                              [<a href="/Articles/444505/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think that's an overly cynical viewpoint. It's likely that the great majority of cases of too large buffers are simply due to developers thinking "I don't know what's an appropriate value; let's just choose something big because it can't hurt and might help sometimes".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444505/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444512"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">prefetch and buffer bloat</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 17:11 UTC (Tue)
+                               by <b>martinfick</b> (subscriber, #4455)
+                              [<a href="/Articles/444512/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+While the marketing part might be cynical, I believe the tradeoff is important to recognize.  In the case of bad prefetch, there is no tradeoff that I can see, it simply degrades the performance.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444512/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor445940"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">prefetch and buffer bloat</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2011 21:54 UTC (Thu)
+                               by <b>jch</b> (guest, #51929)
+                              [<a href="/Articles/445940/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sorry if this is off topic for this discussion, but bufferbloat is not just a political issue -- it's a difficult technical one.  Just reducing the size of buffers won't do, since the right amount of buffering depends on a lot of factors such as throughput, RTT, the transport- and application-layer protocol being used, etc.<br>
+<p>
+Bufferbloat is not about reducing the amount of buffers in routers; it is about designing algorithms to make sure that routers only use as much of their buffers as necessary, and getting the router vendors to deploy such algorithms.<br>
+<p>
+--jch<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/445940/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor444518"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">prefetch and buffer bloat</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 17:27 UTC (Tue)
+                               by <b>nicooo</b> (guest, #69134)
+                              [<a href="/Articles/444518/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I doubt it's a marketing issue. Having their current clients telling their potential clients that the service sucks can't be good for business.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444518/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444566"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">prefetch and buffer bloat</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 22:58 UTC (Tue)
+                               by <b>Lennie</b> (subscriber, #49641)
+                              [<a href="/Articles/444566/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem is with the numbers that come out of the tests the manufactures do to show how great their hardware performs. Those get better with bigger buffers.<br>
+<p>
+So again you have manufactures doing non-real-world test (which might have been a good test a long time ago) for marketing purposes and optimising for that case.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444566/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor445421"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">prefetch and buffer bloat</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2011 20:43 UTC (Tue)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/445421/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The problem is with the numbers that come out of the tests the manufactures do to show how great their hardware performs. Those get better with bigger buffers.</font><br>
+<p>
+... up to a size after which throughput does not get better. Yet we can sometimes see buffer sizes way past this point (e.g. 1 second), which proves that some manufacturers do not bother trying to optimize anything at all.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/445421/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor445429"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">prefetch and buffer bloat</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2011 21:05 UTC (Tue)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/445429/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+something to remember is that memory comes in standard sizes. it's not always possible/reasonable to put less ram in the device.<br>
+<p>
+since they have the ram anyway, and buffers that are too small can cause problems. the logic then follows 'why not just use the ram in the device as a buffer'<br>
+<p>
+this causes other problems, but these other problems were not well described until recently.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/445429/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor444522"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">prefetch and buffer bloat</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 17:53 UTC (Tue)
+                               by <b>clugstj</b> (subscriber, #4020)
+                              [<a href="/Articles/444522/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, it is marketing - whether from the marketing department or development engineering.  You can't sell someone a faster ethernet card unless you can demonstrate higher throughput with no dropped packets, and the easiest way to do that is to increase the number of buffers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444522/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor444523"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch on Old Processors (e.g. P3s)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 18:13 UTC (Tue)
+                               by <b>ds2horner</b> (subscriber, #13438)
+                              [<a href="/Articles/444523/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Even on old Pentium IIIs removing the prefetch on the hash list is likely a win, however for these old machines that many users still have a need to continue to use there are likely few who will make the effort to determine if the prefetch is still a win for this old hardware.<br>
+<p>
+Lack of hardware support for providing the metrics (like the counters used for the new hardware), and the long kernel compile times make it quite unlikely that those who would benefit from using prefetch will be able to provide the compelling statistics sufficient to have x86 family specific prefetch optimizations retained in the kernel.<br>
+<p>
+And the majority of kernel developers with their powerful hardware have moved on...<br>
+<p>
+I do appreciate that there are some (I did not record or remember names) who do regression testing on the old hardware. Perhaps one of these heroes will pick up the challenge.<br>
+<p>
+As much as software prefetch has now fallen out of favour, I (perhaps naively) expected that, in the Pentium IIIs era, tests were run that demonstrated an improvement on that hardware.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444523/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444547"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">hopefully Andi Kleen's approach will be accepted now. </h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 21:37 UTC (Tue)
+                               by <b>ds2horner</b> (subscriber, #13438)
+                              [<a href="/Articles/444547/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I reread the article on Andi Kleen's patch.<br>
+<p>
+His approach would leave the optimizations in place for those CPUs that could benefit; so K7 and others would have the option.<br>
+<p>
+Thanks for the foresight Andi.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444547/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor444527"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 19:07 UTC (Tue)
+                               by <b>alvieboy</b> (guest, #51617)
+                              [<a href="/Articles/444527/">Link</a>] (12 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Truth is we don't have faster computers due to economical reasons. If we did have proper RAM (SRAM) we would not need cache mostly (unless to use as FIFO, due to signal propagation delays).<br>
+<p>
+Cache is a very complex thing - actually cache + MMU + branchpredictor + multimaster buses will eventually eat most of your chip, space-wise.<br>
+<p>
+Now, to the subject:<br>
+<p>
+Prefetching is useful when you actually know you'll be doing sequential accesses (still only if you do it on background). This is almost never true for the data cache, unless you're doing block copies. Unfortunately the way DMA engines are designed do not allow for easy off-processor copies, because set-up, check-end and tear down of the DMA engine cost too much (DMA can also work memory &lt;-&gt; memory, not only device &lt;-&gt; memory). Now, the cache controller cannot (not that I know of) fetch a cache line while other line is being fetched (DDR does not have multiple ports, and I don't think you can invalidate a cache line while it's being fetched). This means that you have to trust logic inside your cache manager, and *eventually* give it some hints of what you are trying to do. Technically speaking these "hints" may exist on some buses, like AMBA and Wishbone, so that latencies are mitigated by sequentially transferring large chunks. I don't know x86 internals enough to say if CPU&lt;-&gt;cache has also a similar approach.<br>
+<p>
+The biggest problem is the pipeline stalls while cache is filling up/writing back. I believe you can still use the pipeline + units while cache is being filled up, but again this is so slow (latency and speed-wise) compared to the processor speed that you'll eventually will need to access memory again, thus halting the processing.<br>
+<p>
+CPU Chips could be 4x smaller if we had proper RAM (faster and multiport). This is the truth. Perhaps multidimensional chips will bring us this, but I sincerely doubt it.<br>
+<p>
+Alvie<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444527/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444541"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 21:11 UTC (Tue)
+                               by <b>dgm</b> (subscriber, #49227)
+                              [<a href="/Articles/444541/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Correct me if I'm wrong, but I think that fast SRAM is not only expensive, but also has to be very close to the processor core (ideally on the same die) to be effective. <br>
+Expensive and fast RAM close to the processor... hummm... isn't that the cache?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444541/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor444544"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 21:25 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/444544/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+SRAM is not only expensive, it's also quite power-intensive. You'd have to cool it with liquid nitrogen.<br>
+<p>
+That's why it's not used even on supercomputers. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444544/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444569"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 23:48 UTC (Tue)
+                               by <b>pphaneuf</b> (guest, #23480)
+                              [<a href="/Articles/444569/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>The NEC SX-4 had <em>16 gigabytes of SRAM</em> as its <em>main memory</em>. It didn't really have any CPU cache (only something like 32KB of instruction cache). That was a nice way of not having to deal with cache coherence issues in an SMP system.
+
+<p>It also had a 256 <em>bytes</em> wide memory bus (compared to the typical 64 <em>bits</em>).
+
+<p>Serious hardware, that. <tt>:-)</tt>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444569/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444622"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 10:03 UTC (Wed)
+                               by <b>kruemelmo</b> (guest, #8279)
+                              [<a href="/Articles/444622/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Now tell us something about power consumption as well please.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444622/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444628"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 10:23 UTC (Wed)
+                               by <b>dgm</b> (subscriber, #49227)
+                              [<a href="/Articles/444628/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And some performance numbers would also be appreciated.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444628/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor444638"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 11:36 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/444638/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="http://www.ai.mit.edu/projects/aries/papers/vector/hammond.pdf">http://www.ai.mit.edu/projects/aries/papers/vector/hammon...</a> <br>
+<p>
+Power consumption is 123KVA for 32-core version, performance is around 2GFLOPS per core for vector operations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444638/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444761"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 19:50 UTC (Wed)
+                               by <b>wazoox</b> (subscriber, #69624)
+                              [<a href="/Articles/444761/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Impressive machine, not even puny by today's standard...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444761/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor444784"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 22:05 UTC (Wed)
+                               by <b>pphaneuf</b> (guest, #23480)
+                              [<a href="/Articles/444784/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>Yeah, I don't know about the power consumption, but while it would put out a good deal of heat, the SX-4 was the first of the SX series to be air-cooled. I'm not sure if the SX-3 used SRAM or DRAM (it was before my time), but that one was water-cooled.
+
+<p>While the vector performance was amazing, it was pretty sluggish for scalar stuff, so we didn't even use it for compiling, it was too slow.
+
+<p>Not saying that this is the end-all, be-all (the SX-5 traded in the SRAM for DRAM, and in exchange got 128 gigabytes of it, which was a whole lot in 1999 or 2000!), but just pointing out that it's been used on supercomputers (and I've used them), and it didn't require liquid nitrogen.
+
+<p>Here is <a href="http://www.flickr.com/photos/pphaneuf/88477734/">a photo</a> of one of the four SX-5 I helped look after.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444784/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor444641"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 11:49 UTC (Wed)
+                               by <b>nye</b> (subscriber, #51576)
+                              [<a href="/Articles/444641/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;SRAM is not only expensive, it's also quite power-intensive. You'd have to cool it with liquid nitrogen</font><br>
+<p>
+Wikipedia says "SRAM is more expensive, but faster and significantly less power hungry (especially idle) than DRAM. It is therefore used where either bandwidth or low power, or both, are principal considerations". This is also what they taught in my degree course; are you certain you're not confused?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444641/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444644"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 12:58 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/444644/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No. SRAM uses 6 transistors, and in idle mode continuously seeps energy. That's OK if you have a small cache buffer but when you have gigabytes of SRAM it adds up very quickly.<br>
+<p>
+DRAM uses capacitors and only needs to be refreshed from time to time.<br>
+<p>
+Our embedded guys tell me that SRAM also is quite power-hungry during reads and writes, so high-frequency SRAMs consume significantly more power than DRAM. Sometimes very significantly more power.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444644/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444650"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 13:49 UTC (Wed)
+                               by <b>nye</b> (subscriber, #51576)
+                              [<a href="/Articles/444650/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;No. SRAM uses 6 transistors, and in idle mode continuously seeps energy. That's OK if you have a small cache buffer but when you have gigabytes of SRAM it adds up very quickly.</font><br>
+<p>
+<font class="QuotedText">&gt; DRAM uses capacitors and only needs to be refreshed from time to time.</font><br>
+<p>
+All of the resources I can find describing SRAM state that the power used continuously while idle is trivial compared to the power needed to constantly refresh DRAM, and hence it's only during heavy utilisation that its power consumption can get *up to* that of DRAM.<br>
+<p>
+<font class="QuotedText">&gt;Our embedded guys tell me that SRAM also is quite power-hungry during reads and writes, so high-frequency SRAMs consume significantly more power than DRAM. Sometimes very significantly more power</font><br>
+<p>
+I'm sure what you're saying is true in your case, but how do you reconcile that with the fact that every other comparison between the two disagrees?<br>
+<p>
+The only idea I can come up with is that you're comparing SRAM running *much faster* than DRAM so it's an apples-to-oranges comparison(?)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444650/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor444697"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 16:38 UTC (Wed)
+                               by <b>bronson</b> (subscriber, #4806)
+                              [<a href="/Articles/444697/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; SRAM uses 6 transistors</font><br>
+<p>
+Yep.<br>
+<p>
+<font class="QuotedText">&gt; and in idle mode continuously seeps energy</font><br>
+<p>
+Not if made out of CMOS (and these days everything is CMOS).  At steady state the only power loss in SRAM is gate and substrate leakage.  Negligible.<br>
+<p>
+<font class="QuotedText">&gt; DRAM uses capacitors and only needs to be refreshed from time to time.</font><br>
+<p>
+Yeah, 50 times a second.  It adds up to quite a bit of power.  Plus DRAMs have all the substrate leakage of the SRAM.<br>
+<p>
+I'm pretty sure you're comparing supercomputer SRAMs from the early 80s, clocked to the limits of their lives, with low power modern DRAMs.  If you compare equivalent parts you'll see that DRAMs are smaller but burn a lot more power.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444697/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor444543"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 21:18 UTC (Tue)
+                               by <b>oak</b> (guest, #2786)
+                              [<a href="/Articles/444543/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"As with other low-level optimizations (likely() comes to mind)"<br>
+<p>
+-&gt; Is there an article about downsides of likely() usage?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444543/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444550"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">likely()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 21:55 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/444550/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      A quick look in the <a rel="nofollow" href="/Kernel/Index/">LWN kernel index</a> turns up 
+
+<a rel="nofollow" href="/Articles/70473/">an article from 2004</a>, 
+<a rel="nofollow" href="/Articles/182369/">an article from 2006</a>, and <a rel="nofollow" href="/Articles/420019/">one from last December</a>.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444550/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444646"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">likely()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 13:10 UTC (Wed)
+                               by <b>oak</b> (guest, #2786)
+                              [<a href="/Articles/444646/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks!  So the issue with likely() was just people putting them to wrong places instead of un/likely() itself potentially slowing (things down that was half the issue with the explicit prefetch usage).<br>
+<p>
+I typically use unlikely() in my code just to annotate ifs in error check&amp;logging macros.  If errors aren't unlikely, I think the performance of un/likely() is the least of my issues...<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444646/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444684"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">likely()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 15:30 UTC (Wed)
+                               by <b>SLi</b> (subscriber, #53131)
+                              [<a href="/Articles/444684/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have also seen in user-space code that using the GCC equivalent of likely() in branches where I knew by profiling were much more likely to be either taken or not taken actually slows down the code. I don't quite understand the reason for this. Then in other cases it does indeed cause a speedup. When fine-tuning performance I have had to try it branch by branch to get the best results, and even then I'm not sure it generalizes to other processor models.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444684/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor445277"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">likely()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2011 15:21 UTC (Mon)
+                               by <b>berkus</b> (guest, #74327)
+                              [<a href="/Articles/445277/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+-fprofile-arcs first!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/445277/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor445453"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">likely()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2011 4:20 UTC (Wed)
+                               by <b>AdamRichter</b> (guest, #11129)
+                              [<a href="/Articles/445453/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sometimes you want to minimize latency for the less commonly used but more important branch, such as in almost any polling loop.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/445453/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor444546"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with branch prediction</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2011 21:43 UTC (Tue)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/444546/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I saw a similar issue with prefetch and branch prediction back when I was doing a lot of SPARC work.  <br>
+<p>
+Branch prediction gave us a bit of extra performance with a few code bases, but the older and better the code, they less we saw.  My favorite example is Samba, so a Smarter Colleague[tm] and I looked at what was actually happening.  Turns out most branches were around either short runs of legitimately conditional code or debug macros. In those cases it didn't matter if we set the prediction to correctly predict we'd branch around. The branch was very often far enough we hit a different i-cache line. Since we didn't have a way of hinting what line we'd hit, we'd slow down whenever it wasn't trivial-to-predict straight-line code.<br>
+<p>
+The better and older the code, the less we would get the next i-cache line sitting waiting for us, and the slower we'd run. Grungy straight-line FORTRAN benefited fine.<br>
+<p>
+I don't recollect ever seeing an actual  slowdown, but we rarely could see the predicted benefits from branch prediction.<br>
+<p>
+I'd venture as much as a five cent bet we'll see the same with the intel architecture.<br>
+<p>
+--dave<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444546/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444609"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I think it's about some particular case of branch prediction...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 6:10 UTC (Wed)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/444609/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      To fill the pipeline on contemporary CPU you need 30-50 instructions in flight. Without branch prediction it's just impossible to do. If you disable branch prediction on contemporary CPU the slowdown is crippling. Sadly only Intel engineers can give you numbers (because there are no way to disable it on retail CPU) - and they are not telling.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444609/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444632"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I think it's about some particular case of branch prediction...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 10:58 UTC (Wed)
+                               by <b>mingo</b> (guest, #31122)
+                              [<a href="/Articles/444632/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<p>
+It's relatively easy to measure the cost of branch misses in certain cases, such as using 'perf stat --repeat N' (the branch miss rate will be measured by default) and a testcase that uses a pseudo-RNG so it can run the same workload random and non-random and comparing the two.<br>
+<p>
+And yes, missing branches is crippling to performance: a 3% branch miss rate can cause a 5% total execution slowdown and a 20% percent miss rate can already double the runtime of a workload. (!)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444632/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor444612"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with outguessing the CPU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 7:16 UTC (Wed)
+                               by <b>alex</b> (subscriber, #1355)
+                              [<a href="/Articles/444612/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have seen prefetch help on some architectures. When doing DBT stuff we would often look for places we could arrange the code to make it as efficient as possible. In the case of Itanium prefetch was a definite win as the architecture was structured to leave the hard stuff to the compiler. On x86 our experiments with instruction re-ordering and prefetch generally didn't yield much at all. The main difference being the x86 expends an awful lot of silicon in logic that attempts to predict all this behaviour for you. It's pretty good at it's job as well given how hard it was for us to squeeze extra out despite having a much better view of how the code was running than a compiler usually has.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444612/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor445213"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with branch prediction</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 29, 2011 21:50 UTC (Sun)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/445213/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+Turns out most branches were around either short runs of legitimately conditional code or debug macros. In those cases it didn't matter if we set the prediction to correctly predict we'd branch around. 
+</blockquote>
+<p>
+Why not?  I can see there might not be any prefetching advantage because you're branching to something that is already in cache, but you can still do a lot of other execution of the instructions while still working on a prior one.
+<blockquote>
+The branch was very often far enough we hit a different i-cache line. Since we didn't have a way of hinting what line we'd hit, ...
+</blockquote>
+<p>
+The line you'd hit is completely determined by the target in the branch instruction, isn't it?
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/445213/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor444610"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 6:16 UTC (Wed)
+                               by <b>bronson</b> (subscriber, #4806)
+                              [<a href="/Articles/444610/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Reminds me of the register keyword.  For a few years programmers put 'register' on just about any int that was used more than once...  Turns out that in almost every case that was slowing things down.  Compilers tend to chose better register variables than programmers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444610/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444779"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 21:18 UTC (Wed)
+                               by <b>vonbrand</b> (subscriber, #4458)
+                              [<a href="/Articles/444779/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+Somebody told me there are three kinds of C compilers: Dumb ones (they just disregard <code>register</code>), smart ones (they heed <code>register</code> if possible) and very smart ones (they asign registers better than whatever the programmer could hint at, and just overlook <code>register</code>). Current compilers are mostly in the third group.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444779/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor445799"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2011 13:17 UTC (Thu)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/445799/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I find a _reasonable_ use of "register" still useful for programmer to programmer communication anyway. It seldom hurts to express a (good) intent.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/445799/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor446418"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2011 12:04 UTC (Tue)
+                               by <b>etienne</b> (guest, #25256)
+                              [<a href="/Articles/446418/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Using "register" also means that the address of that number shall not be taken, so should have consequences on aliasing optimisation (you have a warning if modifying that code and take address of that variable, maybe this would have big difference in execution speed).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/446418/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor444645"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 13:00 UTC (Wed)
+                               by <b>rilder</b> (guest, #59804)
+                              [<a href="/Articles/444645/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Fair enough. However, I have a question regarding this. The whole change depends on hardware branch predictors which are not constant across hardware. I am not sure how well the branch predictors were pre-Nehalem/pre-Sandybridge, so if new kernels are used on  slightly older hardware, won't they suffer from lack of both software/hardware prefetch hints ?  I guess they could have made this a CONFIG_xxx option but may be that was infeasible/cluttering the code further.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444645/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor444692"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Yes, will older processors be further penalized?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 16:26 UTC (Wed)
+                               by <b>ds2horner</b> (subscriber, #13438)
+                              [<a href="/Articles/444692/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe your question more succinct than my attempt to raise the issue ( above).<br>
+<p>
+In Andi Kleen's patch (LWN article linked to in the main article), he attempted to have the prefetch remain for list processing on CPUs (namely the K7 family) that would benefit from it.<br>
+<p>
+His approach was to change the prefetch calls to list_prefetch calls and make the list_prefetch a no-op on most rchitectures (and mapping to prefetch via CONFIG_LIST_PREFETCH for MK7 only (presumably with more to be added if they would benefit).<br>
+<p>
+But my main question was, other than the K7 where there is historical "evidence" that this CPU benefited, who would now do the justification for other older processors (like the P3s)?<br>
+   <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444692/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor444740"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 17:57 UTC (Wed)
+                               by <b>branden</b> (guest, #7029)
+                              [<a href="/Articles/444740/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; One immediate outcome from this work is that, for 2.6.40 (or whatever it ends up being called), the prefetch() calls have been removed from linked list, hlist, and sk_buff list traversal operations - just like Andi Kleen tried to do in September.</font><br>
+<p>
+"Sometimes, getting your patch in is just a matter of waiting for somebody else to reimplement it." -- Jonathan Corbet, <a href="https://lwn.net/Articles/51615/">https://lwn.net/Articles/51615/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444740/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor444789"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2011 23:13 UTC (Wed)
+                               by <b>dashesy</b> (guest, #74652)
+                              [<a href="/Articles/444789/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I started reading kernel code from the "list.h", where I saw some beautiful code, and constructs (i.e. container_of), and also the prefetch mechanism. <br>
+So it was useful for me at least :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444789/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor444792"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2011 0:49 UTC (Thu)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/444792/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>I think I am seeing a common thread between this article and the recent <a href="http://lwn.net/Articles/444045/">undefined behavior</a> article.</p>
+
+<p>The other article: the compiler will do things you did not expect.</p>
+
+<p>This article: the <em>hardware</em> will do things you did not expect.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444792/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor444795"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">HW prefetcher is smarter than you think</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2011 1:22 UTC (Thu)
+                               by <b>csd</b> (subscriber, #66784)
+                              [<a href="/Articles/444795/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Kudos to the HW designers. A few years back when the first Opterons came out, I did a lot of perf comparisons of code using 'prefetch' vs not using it, using various strides of walks forwards and backwards in arrays. If I recall the results correctly, only backwards walks with varying offsets would benefit from a 'prefetch' being added (not greatly though), while in all other cases having manual prefetch either made no difference or was slower than the leave-it-to-hardware-prefetch case.<br>
+ Needless to say, we discarded any notion of using prefetch at the time.<br>
+<p>
+ <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444795/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor444799"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2011 2:26 UTC (Thu)
+                               by <b>darthscsi</b> (guest, #8111)
+                              [<a href="/Articles/444799/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Prefetch helps mainly if you can issue far enough in advance of a reference that the reference sees a noticeable reduction in miss penalty (Likewise, prefetching likely hits wastes issue slots).  In this code, maybe 3 cpu cycles (generously, but could be measured) are spent between the prefetch and the reference. This is insignificant compared to an L2 cache miss.<br>
+<p>
+There is a large literature on how far in advance prefetches need to be to do any good.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444799/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor444909"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2011 16:38 UTC (Thu)
+                               by <b>RogerOdle</b> (subscriber, #60791)
+                              [<a href="/Articles/444909/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is there information about why this is happening?  I do a lot of embedded work and cache control is a big deal.  Are there any metrics showing the rates of cache stalls and how these are effecting the measurements?<br>
+<p>
+I have not used Linux extensively in embedded in the past but the recent changes in the 2.6.39 kernel that bring more real time support make linux even more attractive in this area.  One thing that commercial RTOS's allow is for applications to lock portions of the cache to hold highly reused code like DSP algorithms.  I have not looked into how this is done in Linux or if it can be done at all.  But partitioning control of the cache is an important feature in a small set of performance sensitive applications.<br>
+<p>
+It has not been possible to use Linux for some of the applications I have been involved with in the past because of latency issues but Linux is constantly changing and 2.6.39 opens up possibilities that were out of reach before.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/444909/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor446230"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2011 6:52 UTC (Mon)
+                               by <b>hyoshiok</b> (guest, #75469)
+                              [<a href="/Articles/446230/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+prefetch makes cache pollution. it is well known issue.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/446230/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor447847"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem with prefetch</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 16, 2011 8:32 UTC (Thu)
+                               by <b>tcucinotta</b> (guest, #69261)
+                              [<a href="/Articles/447847/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Ingo summarized his results this way:</font><br>
+<font class="QuotedText">&gt; </font><br>
+<font class="QuotedText">&gt; So the conclusion is: prefetches are absolutely toxic,</font><br>
+<font class="QuotedText">&gt; even if the NULL ones are excluded. </font><br>
+<p>
+If I understand well, the main source of the "toxicity" here is the lists being (most of the cases very) short in the case of their usage within hash tables. So, if one wanted to keep some highly reusable/useful helper macro(s) to iterate items, perhaps it could be worth to have 2 versions of them, one for likely long lists, the other one for likely short lists.<br>
+However, I also suspect that, whilst for relatively "empty" hash tables those lists will likely contain only 1 item, for highly "full" tables those lists can easily become more and more crowded, so the developer's hint (likely short vs likely long) would easily be workload/scenario-dependent.<br>
+So, the final question would be whether there's a scenario to be considered "more likely" (or worth to be optimized) by developers than others.<br>
+Just my 2 cents.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/447847/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor727594"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">You just need to know and remember in your local brain cache this prefetch problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 12, 2017 10:16 UTC (Wed)
+                               by <b>kazan417</b> (guest, #117591)
+                              [<a href="/Articles/727594/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for sharing this useful information!<br>
+Again unobvious tecchnology behavior, which you just need to know and remember in your local brain cache.<br>
+And we have many of them(unobvious behavior) every day in modern technology, because now they are super complex<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727594/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2011, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,660 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Using RCU for linked lists — a case study [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/610972/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/610882/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/610972/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Using RCU for linked lists — a case study</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="GAByline">
+           <p>September 10, 2014</p>
+           <p>This article was contributed by Neil&nbsp;Brown</p>
+           </div>
+<p>One of the interesting side issues that came up while I was <a href="/Articles/606925/">exploring
+cgroups</a> recently was the list management for the <a href="http://lxr.free-electrons.com/source/include/linux/sched.h?v=3.16#L1224"><code>task_struct</code> data
+structure</a> that is used to represent each thread running in a Linux
+system.  As noted at the time, some read-side accesses to this list
+are managed using RCU, while others are protected by the
+<code>tasklist_lock</code> read/write spinlock (updates always use the
+spinlock).
+  A journey to try to understand the history and context for this inconsistency
+  led to both a set of unaddressed opportunities for broader use of RCU, and
+  a set of patterns that are useful to both guide and describe that use.
+  This is the story of that journey.
+</p>
+<p>Some highlights from the history of these task lists, and the <tt>tasklist_lock</tt>,
+include:</p>
+
+<ul class="spacylist">
+
+<li>the <a
+  href="http://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=e56d090310d7625ecb43a1eeebd479f04affb48b">first
+  step</a> toward RCU management, which appeared in the
+  mainline kernel over eight years ago,</li>
+
+<li>a <a href="http://thread.gmane.org/gmane.linux.kernel/917520">discussion</a> concerning the unfairness of read/write spinlocks in
+  Linux and the problems that causes for task list management, in which
+  Linus Torvalds both <a href="http://article.gmane.org/gmane.linux.kernel/920564">suggested</a> that the read side should be changed
+  entirely to use RCU and also <a
+  href="http://article.gmane.org/gmane.linux.kernel/920718">warned against
+  it</a>, saying: "<q>The biggest problem is that there will almost inevitably be things
+that get missed, and any races exposed by lacking locking will be
+<em>very</em> hard to debug and trigger.</q>"
+
+<li>the recent introduction of <a href="/Articles/579729/">qrw_locks</a> that, for x86 in
+  Linux 3.16 and presumably for other architectures in due course,
+  resolves the fairness issues with standard read/write locks while
+  neatly sidestepping the <a
+  href="http://article.gmane.org/gmane.linux.kernel/920044">problems</a>
+  that the discussion
+  foresaw with fairness (fair read/write locks could cause deadlocks in
+  interrupts, so qrw_lock are simply not fair when used in interrupt
+  handlers).</li>
+
+<li>Linus <a
+href="http://www.youtube.com/watch?v=8myENKt8bD0#t=1640">nominating [YouTube]</a> the <tt>tasklist_lock</tt> as something he would like to
+get rid of at the Linux kernel developer panel at LinuxCon North America 2014.
+</ul>
+
+<p>For me the most interesting piece of history comes from even longer
+ago than these: in 2004, slightly over ten years ago, Paul McKenney's
+<a href="http://digitalcommons.ohsu.edu/etd/120/">doctoral dissertation</a>
+  was published, which presented a sound basis and
+context for RCU.  That work cited <code>tasklist_lock</code> as an example use
+case of a pattern described as "Incremental use of RCU".  The
+increments have since continued, though slowly.</p>
+
+<p>A major contribution of Paul's dissertation (noted at end of page 96)
+was to identify several design patterns, and particularly
+"transformational design patterns", that can lead to effective use of
+RCU.  As some of the lists of tasks are still not managed using RCU, it
+may be educational to review those patterns to see if the remainder
+can be "incrementally" "transformed".</p>
+
+<p>The transformation to RCU protection is largely the replacement of
+blocking synchronization, such as spinlocks, with non-blocking
+synchronization.  Non-blocking read access can cope with some
+concurrent changes to data structures, as we shall see, but not with
+larger "destructive" changes.  RCU makes non-blocking access possible
+by providing a means to defer destructive changes to data until no
+non-blocking code could possibly be accessing that data.  This is made
+quite explicit in the title of the dissertation:
+"<i>Exploiting deferred destruction: an analysis of read-copy-update
+techniques in operating system kernels</i>".
+
+<p>It is arguable that EDD (exploiting deferred destruction) might be a more useful name for the technique
+than RCU.  The various patterns show ways that a reader can cope with
+non-destructive concurrent updates.  A "copy" is sometimes used, but
+deferred destruction is always important.</p>
+
+<p>To see how various patterns can apply to task lists, I have divided the
+various lists of tasks into five groups that are based roughly on the sort of
+transformation required.  Each list can be identified either by the
+<code>list_head</code> or <code>hlist_node</code> in
+<code>task_struct</code> that is used to link
+tasks together, or by the <code>list_head</code> or <code>hlist_head</code> that forms the
+head of the list.  Usually I'll use the former, though sometimes the
+head has a name that is easier to work with.  These lists are all
+doubly-linked lists with both forward and backward pointers
+(i.e. <code>next</code> 
+and <code>prev</code>).</p>
+
+<h4>Group 1: No transformation</h4>
+
+<p>The first group includes the <code>cg_list</code> that lists tasks in a given
+<code>css_set</code> (for cgroups), <code>numa_entry</code> that the fair scheduler uses,
+and <code>rcu_node_entry</code> that is used internally by RCU.  Each of these
+lists has its own spinlock to provide exclusive access both for
+updates and for read access.  So these lists don't make use of RCU at
+all.</p>
+
+<p>In chapter 5 of his dissertation, Paul writes:
+"<q>Since RCU is not intended to replace all existing synchronization
+mechanisms, it is necessary to know when and how to use it.</q>" The
+"when" is generally for read-mostly data structures, which these 
+three lists appear not to be.  The remaining lists <em>are</em> read-mostly and
+for this reason are, or were, protected by the <code>tasklist_lock</code>
+reader/writer lock.  Converting them to use RCU is part of the pattern
+called "Reader-Writer-Lock/RCU Analogy", which is a meta-pattern that
+includes all the other patterns. 
+</p>
+
+<h4>Group 2: Simply defer the destruction</h4>
+
+<p>The pattern "RCU Existence Locks" simply guarantees a reader that the
+object it is accessing will continue to "exist" at least until the access
+is finished.  That is, the memory won't get used for some other purpose.
+So a spinlock inside the object will continue to behave like a
+spinlock, a counter like a counter and, importantly for linked lists,
+a <code>next</code> pointer will continue to point to the <code>next</code> item in the
+list, even if the object itself is removed from the list.  This
+guarantee is sufficient for it to be safe to walk a list concurrently
+with new elements being added, or old elements being removed.</p>
+
+<p>In <code>task_struct</code>, the <code>tasks</code> list and the <code>thread_node</code> list need
+just this behavior.  The former is a list of all processes
+(technically all tasks which are thread-group leaders) and the latter
+is the list of all threads in a given thread group.  In each case, a
+task is added at most once and is deleted only just before it is
+destroyed.</p>
+
+<p>Inserting into the list requires that the new <code>task_struct</code> be fully
+initialized, including the <code>next</code> pointer, before the head of the list
+is updated to point to the new structure.</p>
+
+<p><img alt="list insert" src="https://static.lwn.net/images/2014/list-rcu-add.png" /></p>
+
+<p>The deletion protocol requires that the <code>next</code> pointer in the previous
+element be moved past the item being deleted, and then for that item
+to continue to exit, with its <code>next</code> pointer intact, until the "grace
+period" (as the delay prior to destruction is called) has passed.</p>
+
+<p><img alt="list delete" src="https://static.lwn.net/images/2014/list-rcu-del.png" /></p>
+
+<p>The protocol for walking the list allows the <code>next</code> pointers to be
+followed in sequence and guarantees that you will always get back to
+the head of the list.  Other fields in each task must be treated with
+some caution.  It is certainly safe to look at any field, but the extent
+to which different values can be used depend on the protocols for the
+particular fields.  For example, the <code>-&gt;mm</code> field can only be
+<a href="http://lxr.free-electrons.com/source/mm/oom_kill.c?v=3.16#L94">safely used</a> if the per-thread <code>-&gt;alloc_lock</code> spinlock is taken first.  A
+significant reason for Linus's caution noted earlier is that the access
+protocol for several fields requires that <code>tasklist_lock</code> be held.
+All of these need to be carefully refined to some other sort of
+protection before <code>tasklist_lock</code> can be completely discarded.</p>
+
+<p>
+The incremental changes that have been happening to task lists since
+that first step eight years ago have been the refining of some of
+these access protocols to make them less dependent on <tt>tasklist_lock</tt>,
+such as the <a href="http://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=e73d84e33f15c099ed1df60437700093cb14e46e">changes to POSIX timers</a> last year.
+
+<h4>Group 3: Transform the way the list is walked</h4>
+
+<p>There is just one list in this third group: the <code>ptrace_entry</code>
+list for which the head is the <code>ptraced</code> field, also in <code>task_struct</code>.</p>
+<p>A process can use <a href="http://man7.org/linux/man-pages/man2/ptrace.2.html"><code>ptrace()</code></a> to monitor and manage other
+tasks, which is a feature particularly used by debuggers.  All of the
+tasks that are being traced by a given process are linked in the
+<code>ptrace_entry</code> list.  As a process can stop tracing a task at any
+time, and some other process could start tracing it, tasks can be
+added to and removed from these lists repeatedly, so the simple
+Existence Lock is not sufficient.  This is because it isn't practical
+to require a "grace period" before changing a traced process's <code>next</code> pointer.</p>
+
+<p>There is only one place where this list is traversed, so adding some
+extra care there can make it possible to walk the list with only RCU
+protection — no spinlock needed.  <a href="http://lxr.free-electrons.com/source/kernel/exit.c?v=3.16#L1426">That place</a> is the <a href="http://man7.org/linux/man-pages/man2/wait.2.html"><code>wait()</code></a>
+family of system calls.  When (any thread in) the tracing process
+calls <code>wait()</code> it will walk the <code>ptraced</code> lists for each thread in the
+process looking for traced tasks that need attention.  If another
+thread detaches a task just as this one is looking at it, confusion
+could ensue unless due care is taken.  In particular, the <code>next</code> link
+for the detached process would change and the process calling <code>wait()</code> might
+follow it onto a different list.  As the "end of list" is detected by
+finding a pointer back to the head of the list, the process walking
+this list might never find that head and so could seek forever.</p>
+
+<p><code>wait()</code> will normally walk down the list until it finds a task that
+needs attention and will then use a local spinlock or similar
+technique to get exclusive access so it can do whatever is required
+with the task.  Because this is really just a simple search, there is
+little cost in repeating the search from the beginning if anything
+peculiar happens.  This quite naturally leads to a simple and safe RCU
+protocol:</p>
+
+<ol class="spacylist">
+
+<li>When a task is detached from the tracing process, it must be
+   marked as "no longer being traced" <em>before</em> its <code>next</code> pointer is
+   changed.  <a href="http://lxr.free-electrons.com/source/kernel/ptrace.c?v=3.16#L49">The code</a> already does this by clearing a flag and
+   changing a <code>parent</code> pointer.</li>
+
+<li>When stepping through the <code>next</code> pointer from one task to
+   the next, 
+   the code needs to check that the first task is still being traced
+   by this process <em>after</em> loading the <code>next</code> pointer and <em>before</em>
+   making use of that pointer.  If the test succeeds, then the pointer
+   leads forward on the correct list and is safe to use.  If it fails,
+   then the pointer may lead elsewhere, and the search should start again
+   from the beginning.</li>
+</ol>
+
+<p>With these two conditions met, we are very nearly guaranteed that there
+can be no confusion.  The only remaining question mark concerns the
+possibility that a thread is detached and re-attached to the same
+process while some other thread is looking at it.  Depending on
+exactly where in the list the re-attachment happens, we could end up
+visiting some tasks twice, or some tasks not at all.  Clearly the
+former is preferred and the code already makes the correct choice.</p>
+
+<p>Two of Paul's patterns are seen here.  First, "Mark Obsolete
+Objects" is used to ensure a detached task can be recognized
+immediately.  The second is "Global Version Number", even though we
+aren't using a version number.</p>
+
+<p>The "Global Version Number" pattern contains two ideas: a version
+number that is incremented whenever something changes, and a retry in
+the read-side code whenever that change is seen.  
+A <a
+href="http://www2.rdrop.com/users/paulmck/techreports/survey.2012.09.17a.pdf">retrospective
+[PDF]</a> on
+RCU usage in Linux that was published in 2012 omits the "Global Version Number"
+pattern and instead includes "Retry Readers".  This emphasized that it
+is the retry, rather than the version number, that is the key idea.
+Using a version number is probably the 
+most general way to detect a change; <a href="http://lxr.free-electrons.com/source/fs/dcache.c?v=3.16#L2128"><code>d_lookup()</code></a> in the filename lookup code is
+an excellent example of that.  However, as we found with the
+<code>ptraced</code> lists, 
+it certainly isn't the only way.</p>
+
+<h4>Group 4: Transforming the update mechanism</h4>
+
+<p>Again we have only one list in this group, and it is strikingly similar
+to the <code>ptrace_entry</code> example.  It could be handled in exactly the same
+way and, while that would probably be the most pragmatic approach, it
+isn't necessarily the most educational.</p>
+
+<p>Each task has a list of child tasks; the head of the list is the
+<code>children</code> field of <code>task_struct</code> and the members are
+linked
+together through the <code>sibling</code> field.  This list <a href="http://lxr.free-electrons.com/source/kernel/exit.c?v=3.16#L1404">is used</a> by the
+<code>wait()</code> system call much like the <code>ptrace_entry</code>
+list was; it is also
+used by the <a href="http://lxr.free-electrons.com/source/mm/oom_kill.c?v=3.16#L444">OOM killer</a> and the <a href="http://lxr.free-electrons.com/source/kernel/exit.c?v=3.16#L316">"memory" control group
+subsystem</a> to find related processes.</p>
+<p>This list is distinctive in that the only time any tasks are moved
+from this list to another is a time when all of the tasks are moved to
+the same destination.  This happens when the parent process exits.  At
+that time, all the children are either discarded completely (which can
+be handled with only the Existence Locks pattern) or are moved to the
+<code>children</code> list for some ancestor, typically the init process.
+With two 
+simple changes, it can be safe to search a list with this property
+without ever having to restart from the beginning.</p>
+
+<p>The first change is to use an <a href="http://lxr.free-electrons.com/source/include/linux/list.h?v=3.16#L587"><code>hlist</code></a> (or "hash list")
+instead of a regular list.  With an <code>hlist</code>, the head only points to
+the first element, not to the final element as well, and the final
+element has a <code>NULL</code> next pointer rather than pointing back to the head.
+This second property is key: it means that the ends of all <tt>hlist</tt>s look
+the same.</p>
+
+<p>The second change is to splice the whole list of children of the dying
+process onto the head of the ancestor process, instead of moving them
+one by one.</p>
+
+<p><img alt="list splice" src="https://static.lwn.net/images/2014/list-rcu-splice.png" /></p>
+
+<p>Now any code that is walking the list of child processes may end up in
+the list of children of some other process, but it will not miss out
+on any of the children that it is looking for and it will not get
+confused about where the end of the list is.  Depending on exactly
+what each search is looking for, it may need to be careful not to "find"
+any child of the wrong parent, but that is quite trivial to do and not
+always even necessary.</p>
+
+<p>This transformation has no clear parallels in Paul's list of
+patterns.  That is probably because it is unusual for a list to both be
+used for 
+   sequential searches and be moved as a whole onto some other list.
+</p>
+
+<p>However, the idea of having an easily recognizable "end of list" marker
+has emerged clearly since those patterns were described and is
+realized more completely in the <a href="http://lxr.free-electrons.com/source/include/linux/list_nulls.h?v=3.16"><code>hlist_nulls</code></a> list package.
+These lists are quite similar to regular <code>hlist</code>s, except that the end
+of the list is not a NULL, but is some other value that could not
+possibly be a pointer — the least significant bit is always '1'.  When
+a search using these lists comes to the end of a list, it can test
+whether it is still on the same list it started on.  If it is, the
+search is complete.  If not, it may be appropriate to start again from
+the beginning.  These lists are used in the networking code, particularly in
+the netfilter <a href="http://lxr.free-electrons.com/source/net/netfilter/nf_conntrack_core.c?v=3.16#L431">connection tracking</a>.</p>
+
+<h4>Group 5: Transforming the data structures</h4>
+
+<p>The final group of task lists consists of two that we looked at
+in the cgroups series: the processes in a session and the processes in
+a process group.  These cannot be handled with only Existence Locks,
+as a task can be moved once from a session into a newly created
+session and a task can be moved repeatedly between process
+groups in the one session.</p>
+
+<p>Further, these lists cannot always be handled using "Retry Readers" because they aren't just used for searching.  Both
+lists are used to send a signal to each process on the list, the
+session list for <a href="http://lxr.free-electrons.com/source/drivers/tty/tty_io.c?v=3.16#L2900">Secure Attention Key handling</a>, and the process-group list for handling <a href="http://lxr.free-electrons.com/source/kernel/signal.c?v=3.16#L1304">control-C typed at a terminal</a> and a variety
+of similar needs.  In all cases, the signal must be sent
+exactly once to each process.  If a process in the group is forking,
+the signal must be delivered either to the parent before it forks, or
+to both the parent and the child after the fork.</p>
+
+<p>Paul's dissertation has a pattern that can be applied here:
+"Substitute Copy For Original".  As it is easy to insert a new item
+and to delete an old item we can effect a move by creating a copy of
+the item and inserting that in the new location.  This is not without
+a cost, of course: making a copy may not be cheap.
+
+<p>Making a copy of a <code>task_struct</code> is certainly not cheap, particularly
+as it is on so many lists and all of these linkages would need to be
+adjusted to point to the new <code>task_struct</code>.  This suggests a
+simplistic approach is out of the question.  However, there is a simple
+expedient that makes the problem a lot more tractable.  We can apply
+another pattern: "Impose Level of Indirection".  We can use a proxy.</p>
+
+<p>Rather than placing the full <code>task_struct</code> on the session and process-groups lists, we could place some other smaller structure on those
+lists and copy it whenever these lists need to be updated.  This
+structure would contain a pointer to the main <code>task_struct</code> which
+itself would point back to the proxy structure.  This may sound like a
+lot of extra complexity, but luck is on our side, as 
+a <a href="http://lxr.free-electrons.com/source/include/linux/pid.h?v=3.16#L13">suitable structure</a> already exists.</p>
+
+<p>For every <code>task_struct</code> there is already a <code>struct pid</code> that keeps
+track of the different process IDs that the task has in different
+namespaces.  <code>task_struct</code> already has a pointer to this and the
+<tt>struct pid</tt> points
+back to the <code>task_struct</code>.  Moving the session and process-group
+linkage out of <code>task_struct</code> and into <code>struct pid</code> would not be
+trivial, and it could have performance implications that would need to
+be carefully analyzed, but it is by no means impossible — it would be
+much cheaper than copying the whole task.</p>
+
+<p>There are a few places in the kernel that maintain pointers to
+<code>struct pid</code> for an extended period, particularly in <code>procfs</code> when a
+file in some process's directory is held open.  These would need care
+to check if the <code>pid</code> had been replaced and to find the new one but,
+again, this is a detailed but not a difficult process.  The "Mark Obsolete
+Objects" pattern would be used here.</p>
+
+<h4>Once and only once</h4>
+
+<p>There was a second challenge with these lists.  Not only do we need to
+be able to move tasks between lists, which appears achievable, but we
+also need to process every element in a list once and only once even
+in the presence of forking.</p>
+<p>There are two important moments in the sequence of forking a process.
+
+<a href="http://lxr.free-electrons.com/source/kernel/fork.c?v=3.16#L1438">One moment</a> is when the prospective parent checks if there are any
+signals pending.  If there are, it will abort the fork, handle the
+signals, and then try to fork again (all through the simple expedient
+of returning the error code <code>ERESTARTNOINTR</code>).  The <a href="http://lxr.free-electrons.com/source/kernel/fork.c?v=3.16#L1472">second moment</a>
+(currently 34 lines later) is when the new child becomes sufficiently
+visible in the session and process-group lists that it can receive a signal.</p>
+
+<p>If the signal delivery loop completes before the first of these, or starts
+after the second, everything works perfectly.  If any of the loop
+happens between them, the child could miss out, which is not
+acceptable.  When a spinlock is used, there is no "between".  From the
+perspective of any code that also takes the lock, both important
+moments are one moment and there is no problem.  When RCU is used,
+these are two very different moments.  In order to ensure there is no
+"between" there seems to be just one solution: have the first moment
+happen after the second.  This is a perfect example of the "Ordered
+Update With Ordered Read" pattern from Paul's dissertation.</p>
+
+<p>The "Ordered Update" requires the forking task to check for
+pending signals <em>after</em> the new child has been added to the session
+and process-group lists.  The "Ordered Read" requirement involves
+inserting the new child <em>after</em> the parent rather than at the start of
+the list.  As the list will be read in order, so this forces the
+signal delivery code to read the parent before the child.</p>
+
+<p>With that sequencing, any signal delivery thread that walks the list of
+tasks in order will either signal the parent before it checks for pending
+signals, or will also signal the child.</p>
+
+<p>Allowing the child to be visible on these lists immediately, before
+aborting the fork and discarding the child, does make the cleaning up a
+little bit more complex, but only a little.  The main requirement is
+that the "RCU Existence Locks" pattern is used, and that is quite
+straightforward.</p>
+
+<p>There are two other places where an operation is performed on every
+task in a process group: the <a href="http://lxr.free-electrons.com/source/kernel/sys.c?v=3.16#L163">setpriority()</a> system call and the
+<a
+href="http://lxr.free-electrons.com/source/block/ioprio.c?v=3.16#L61">ioprio_set()</a>
+system call.  Neither of these  are currently guaranteed to
+affect a new child that is in the process of being forked, so correct
+handling of those would be a bonus, and is left as an exercise for the
+reader.</p>
+
+<p>Some of the details may seem a little complex, and certainly some are
+completely missing, but the key point should be clear.  When using a
+spinlock, multiple events are effectively compressed into a single
+indivisible moment to avoid races.  With RCU, we cannot avoid having
+multiple events in separate moments, but if we carefully design the
+events and make them happen in the right order, we can often be just as
+effective at avoiding races without the costs of spinning around
+waiting for our turn.  Having a quiver of patterns to guide that
+design makes it quite manageable.</p>
+
+<h4>Of locks and patterns</h4>
+
+<p>In part, this survey has been about the <code>tasklist_lock</code> and how Linux
+could be less dependent on it.  In this, we have only scratched the surface,
+as we have only looked at the lists: <code>tasklist_lock</code> protects other
+parts of tasks as well.  It is encouraging to find that known patterns
+can address all the issues we looked at and it seems likely that if we
+examined every field, and the protections that a non-blocking reader
+might need, we would find that most, if not all, can be managed using
+patterns from this set.</p>
+
+<p>It seems that, at present, there is no pressing need to perform that
+examination, since <code>qrwlocks</code> have resolved the fairness issue with
+<code>tasklist_lock</code>.  While they are a clear improvement, any spinlock is
+still more expensive than none and, as the number of cores in our
+computers continues to increase, there may yet come a time when
+<code>tasklist_lock</code> becomes a bottleneck.</p>
+
+<p>This survey was also about patterns for providing safe
+synchronization.  While I was aware, at least generally, of each of
+these patterns, I did not know their names until finding and reading
+Paul's dissertation.  Having a list of known named patterns
+makes it much easier to discuss and analyze some of these issues.</p>
+
+<p>Patterns like this have some value when written down, but much more
+value when imprinted on people's brains.  They are now firmly in my
+brain and if they have left any impression on you, then maybe we will
+be a little more ready the next time a spinlock needs to be refined away.</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Read-copy-update">Read-copy-update</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Brown_Neil">Brown, Neil</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/610972/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor611533"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nice writeup!!!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2014 6:14 UTC (Thu)
+                               by <b>PaulMcKenney</b> (<b>&#x272D; supporter &#x272D;</b>, #9624)
+                              [<a href="/Articles/611533/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And excellent point about the lack of a pattern covering list splicing!<br>
+<p>
+An additional instance of this pattern may be found in Thomas Graf's implementation (<a href="https://lkml.org/lkml/2014/8/2/35">https://lkml.org/lkml/2014/8/2/35</a>) of Josh Triplett's resizeable hash tables (<a href="http://www.usenix.org/event/atc11/tech/final_files/Triplett.pdf">http://www.usenix.org/event/atc11/tech/final_files/Triple...</a>).<br>
+<p>
+It might take some thought to formulate a pattern for this, but in the meantime I do very much appreciate your calling my attention to it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/611533/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor611614"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Signals to groups of processes must be delivered atomically.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2014 18:36 UTC (Thu)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/611614/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Once and only once is insufficient to guarantee that a signal is delivered to all processes in a process group.<br>
+<p>
+Posix guarantees and reasonable user space programs require that there will be some moment in time where a signal is delivered to all target tasks.<br>
+<p>
+Copying of data structures seems insufficient for signal delivery, as that appears to allow a case when a process receives two signals when user space semantics require exactly one of the signals to be receved.  With the size of RCU grace periods I expect that would be easy to observe.<br>
+<p>
+So no.  I do not believe in the least you have shown that signal delivery can be converted to using RCU lists.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/611614/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor611677"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Signals to groups of processes must be delivered atomically.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2014 3:48 UTC (Fri)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/611677/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hi Eric,<br>
+ thanks for your observations.<br>
+<p>
+Can you provide a reference to that Posix guarantee of "some moment in time", or a discussion of it?  I cannot find anything and am not familiar with that guarantee.<br>
+<p>
+Your second point is, I think, about possible races between getpgid and signal delivery. Maybe you imagine a signal being delivered to two different process groups while a process is being moved from one to the other?  Certainly such races needed to be considered and the range of valid outcomes understood.  I see no reason to think it would be particularly difficult to ensure correct outcomes, but it probably wouldn't be trivial either.  Without concrete code it is, of course, not possible to be definite.<br>
+<p>
+Problems caused by long grace periods can sometimes be countered using "Mark Obsolete Objects".  That could apply here.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/611677/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

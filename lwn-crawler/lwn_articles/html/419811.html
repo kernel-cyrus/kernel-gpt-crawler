@@ -1,0 +1,518 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Dcache scalability and RCU-walk [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/419811/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/419307/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/419811/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Dcache scalability and RCU-walk</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Please consider subscribing to LWN</b>
+<p>
+Subscriptions are the lifeblood of LWN.net.  If you appreciate this
+content and would like to see more of it, your subscription will
+help to ensure that LWN continues to thrive.  Please visit
+<a href="/Promo/nst-nag1/subscribe">this page</a> to join up and keep LWN on
+the net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>December 14, 2010</br>
+           </div>
+The Linux directory entry ("dentry") cache is a key part of the kernel's
+filename lookup mechanism.  The dentry cache speeds the process of looking
+up files
+considerably.  On systems with large numbers of cores, though, the dentry
+cache has become a scalability problem for workloads which perform a lot of
+lookups.  Nick Piggin's <a href="/Articles/419637/">dcache scalability
+work</a> looks like it may be set to be merged for 2.6.38, but, according
+to Nick, this work "<q>has had nowhere near enough review</q>".  The
+code is complicated and tricky, which, certainly makes review harder.  Your
+editor, never afraid to make a total fool of himself, will now attempt to
+describe how this patch set works just in case it helps.
+<p>
+
+A dentry's core job is to represent a directory in the filesystem and to cache
+the mapping between a name found within that directory and its associated
+inode.  To that end, dentries are organized into a hierarchy which mirrors
+the on-disk hierarchy found in the filesystem.  Each dentry looks vaguely
+like this:
+<p>
+<blockquote>
+<img src="https://static.lwn.net/images/ns/kernel/dentry.png" alt="[dentry]" width=412
+height=243>
+</blockquote>
+<p>
+Every dentry keeps a list of children (names contained within the directory)
+which can be looked up by name; each dentry also points to the inode it
+represents, its parent dentry, and a number of other things.  Note that the
+real situation is a bit more complicated than shown here; children are kept
+in hashed lists for faster lookup, an inode with more than one link may
+have more than one dentry pointing to it, and so on.  But, in a conceptual
+sense, the above diagram shows what is going on.
+<p>
+When the VFS layer needs to turn a path provided by a program into a
+pointer to the associated inode, it will perform this lookup through the
+dentry cache.  The first step is to get to the starting point - which could
+be the root of the filesystem (for absolute paths), the current working
+directory (for relative paths), or a program-specified directory.  In the
+first two cases, the associated dentries can be found by way of the
+process's task structure.  The first component of the path is looked up in
+the starting dentry, yielding a pointer to the next dentry in the path;
+that process is repeated until the end of the path is reached.
+<p>
+It may be that some of the dentries in the path are not present in the
+cache; there is not enough room in memory to cache the entire filesystem
+hierarchy.  When that happens, the lookup code must ask the filesystem (by
+way of the parent's inode operations) to perform the lookup; a dentry
+structure can then be created with the result and inserted into the cache.
+Of course, a lookup will fail if the file (or a component in the path) does
+not exist; in that case, the VFS may insert a "negative dentry" into the
+cache to speed up future failed lookups.  That optimization is important -
+just run a simple command under <tt>strace</tt> to see how common failed
+lookups really are.
+<p>
+The dentry cache is a dynamic data structure; dentries will come and go
+frequently in response to filesystem changes  and the simple need to clean
+out old dentries on occasion.  Clearly, some sort of protocol is needed to
+prevent changes from colliding with each other; if one processor removes a
+dentry while another is using it to look up a name, good things will almost
+certainly not result.  Once upon a time, the global <tt>dcache_lock</tt>
+was used to protect the cache during lookup operations.  The global lock
+scaled poorly, so it has not been used for lookups for some time - though
+it still does protect many other things.
+<p>
+Current kernels use <a href="/Articles/418853/">read-copy-update</a> to
+manage the removal of dentries from the cache, so a lookup operation need
+not worry about a specific dentry going away as long as that operation does
+not block.  If a lookup has to call into the filesystem code, though,
+things might indeed block; to ensure that a dentry will stay around in this
+situation, a reference count is kept.  So, as a lookup works its way down
+the hierarchy, it will increment the reference count of every dentry it
+passes through.  Most of those references are eventually dropped, though
+the reference on the final dentry must be kept as long as the file is held
+open.
+<p>
+
+<span class="PullQuote">
+<span class="invisible">[PULL QUOTE: </span>
+Making path lookup truly scalable in a highly
+parallel situation requires making no changes to the dentry structures
+themselves.
+<span class="invisible"> END QUOTE]</span>
+</span>
+
+
+The core of Nick's patch set is a new lookup algorithm called "RCU-walk." 
+The key to RCU-walk is the idea that, on workloads where
+pathname lookup is likely to present scalability problems, the chances are
+good that most dentries will already be present in the cache.  One might
+think that the current algorithm would perform well in such situations, but
+there is a catch: the constant incrementing and decrementing of dentry
+reference counts creates a great deal of cacheline bouncing - enough to
+slow things considerably.  Making path lookup truly scalable in a highly
+parallel situation requires making no changes to the dentry structures
+themselves - turning the cache into a read-only data structure during the
+lookup process, essentially.
+<p>
+So, when the new code needs to perform a path lookup, it starts with an
+<tt>rcu_read_lock()</tt> call.  The dentry cache should then remain stable
+enough for the lookup to get to the end of the path and increment the
+reference count for the final dentry (only).  So lookups can be done
+without locks - and, crucially, without changing any information in the
+dentries passed through on the way.  That makes the lookup scalability
+problems go away.
+<p>
+Of course, there are a few catches.  The most obvious of these is the
+situation where one of the dentries in the path is not resident in the
+cache.  At that point, the RCU-walk process must stop; the code will
+attempt to obtain a reference on the final dentry it found, then return to
+the older, reference-count-based method ("ref-walk") for the rest of the
+lookup.  Sometimes, getting that mid-point reference will not be possible;
+that situation will force the lookup to restart from the beginning using
+ref-walk for the entire path.
+<p>
+More challenging, perhaps, is what happens if one of the dentries changes
+while the lookup is passing through.  By normal RCU standards, that should
+never happen; changing a structure requires making a copy and making the
+changes there.  The dentry cache bends those rules, though; RCU is mostly
+used to protect against dentry deletion there.  So, in particular, a rename
+can cause a dentry to change attributes - and hashed lookup lists - while
+another process is using it for a lookup.
+<p>
+Naturally, using a lock to protect against this possibility would wipe out
+any scalability gains that would otherwise come from all of this work.  So
+the RCU-walk code uses a <a href="/Articles/22818/">seqlock</a> instead.
+Seqlocks do not prevent concurrent changes, but they do allow code to
+detect when such a change has occurred.  Nick has added a seqlock to every
+dentry which must be incremented whenever the associated name, parent, or inode
+changes.  If the sequence number changes while a lookup is using a dentry, the
+lookup will be restarted (with the seqlock write-locked, to prevent heavy
+renaming from starving other operations indefinitely).  
+For more information on the rename problem and
+how it's handled, see <a href="/Articles/419826/">path-lookup.txt</a>,
+which is included in the patch set.
+<p>
+The use of RCU has one other implication which forces a significant
+change.  Directory permissions must be checked as part of every step in a
+lookup operation to ensure that users don't access parts of the filesystem
+which should not be available to them.  Permission checking is done by the
+filesystem, by way of the <tt>permission()</tt> inode operation.  If this
+checking is to happen safely during the RCU-walk process, the inode
+structure must not go away while the lookup is in progress.  So, in other
+words, inodes must now be freed with RCU rather than being released
+directly.  The change is relatively straightforward, but it requires
+tweaking every filesystem implementation in the tree, so the patch is
+large.  
+<p>
+A number of other filesystem callbacks (<tt>d_compare()</tt> and
+<tt>d_hash()</tt>, for example) have also had to be changed to support
+RCU-walk.  Anybody maintaining an out-of-tree filesystem will have some
+work to do if and when this patch set is merged.
+
+<p>
+While RCU-walk is perhaps the most significant change in this patch series,
+it's far from the only one.  Many of the other patches are aimed at the
+elimination of the global <tt>dcache_lock</tt> altogether.  There is a new
+<tt>dcache_hash_lock</tt> to protect hashing operations, 
+<tt>dcache_lru_lock</tt> for modifications to the dentry LRU list, and
+<tt>dcache_inode_lock</tt> to protect inode dentry lists.  The scope of the
+dentry <tt>d_lock</tt> spinlock has been expanded to cover changes to much
+of the structure; the reference count (formerly an <tt>atomic_t</tt>) is
+also covered by the lock now.  All told, it's a large set of patches making
+fundamental changes to some of the core VFS code.
+<p>
+Interestingly, Nick also changed the dentry <tt>d_validate()</tt> callback,
+which, he says, "<q>has been broken for a long time</q>".  That
+function depended on a truly scary routine called
+<tt>kmem_ptr_validate()</tt>, described this way:
+<p>
+<div class="BigQuote">
+	This verifies that the untrusted pointer looks sane; it is _not_ a
+	guarantee that the pointer is actually part of the slab cache in
+	question, but it at least validates that the pointer can be
+	dereferenced and looks half-way sane.
+</div>
+<p>
+It is hard to imagine that such a function could be put to any sort of safe
+use.  The only user in current kernels is <tt>d_validate()</tt>; Nick's
+patch fixes that usage and gets rid of the function.  It seems unlikely to
+be missed.
+<p>
+Given the complexity of this patch set, it is not surprising that reviews
+have been relatively scarce.  Review time for VFS-related patches has
+always been hard to come by, and these are trickier than most.  The ongoing
+name-calling match between Nick and Dave Chinner, who has also been working
+in this area, has not helped; neither has the fact that Al Viro appears to
+have gone into one of his quiet periods.  Given that Linus seems fairly
+well determined to merge this work, it would be good if at least some of
+the inevitable glitches could be found before the 2.6.38 merge window.
+Hopefully enough developers will find the time to review and/or test these
+patches to make some progress in that direction.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Dentry_cache">Dentry cache</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Virtual_filesystem_layer">Filesystems/Virtual filesystem layer</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Scalability">Scalability</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/419811/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor420084"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dcache scalability and RCU-walk</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2010 4:15 UTC (Thu)
+                               by <b>felixfix</b> (subscriber, #242)
+                              [<a href="/Articles/420084/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Quoth our editor ...<br>
+<p>
+Your editor, never afraid to make a total fool of himself,<br>
+<p>
+I would amend this to *try to make a fool* because not only have I never seen our editor make any kind of fool of himself, I do not think he is capable of being a total fool, except, well, when it comes to wanting to contribute so much by way of LWN.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/420084/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor420455"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dcache scalability and RCU-walk</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 19, 2010 22:05 UTC (Sun)
+                               by <b>jospoortvliet</b> (guest, #33164)
+                              [<a href="/Articles/420455/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+yes, he's a failure in that regard. Trying to make a fool of himself but rarely succeeding ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/420455/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor420102"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dcache scalability and RCU-walk</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2010 7:23 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/420102/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      For some reason, I envision the RCU walk on a dynamically changing filesystem as occasionally being a little like <A HREF="http://cache2.asset-cache.net/xc/sb10067886f-001.jpg?v=1&c=IWSAsset&k=2&d=6C4008C0FD9EB5A509E3E9208C4C3BDC58F9412BEA0E8009C0386D99622F98716529E79887609E4F">this</a>. 
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/420102/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor420153"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dcache scalability and RCU-walk</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2010 14:50 UTC (Thu)
+                               by <b>Nick</b> (guest, #15060)
+                              [<a href="/Articles/420153/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's pretty accurate! Sometimes the step crumbles before our hero gets to the next one. Sometimes the next step is missing completely.<br>
+<p>
+Fortunately there is a safety net at the bottom, and a less crumbly but slower staircase available.<br>
+<p>
+But actually operations that require a sequence count change are not so common, and path walks require sequence protection only briefly, so sequence count failure is quite rare. It's more common that the dentry is missing or some filesystem operation requires blocking, which can be handled more gracefully.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/420153/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor420163"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dcache scalability and RCU-walk</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2010 15:15 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/420163/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+that link doesn't work for me<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/420163/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor420166"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Dcache scalability and RCU-walk</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2010 15:33 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/420166/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <P>I was afraid that would happen.  Here, I <A HREF="http://spatula-city.org/~im14u2c/images/man_running_up_crumbling_stairs.jpg">re-hosted it.</A></P>
+ <P><SMALL>(Image is from Getty Images, FWIW, in case the watermark wasn't enough to clue you in.)</SMALL></P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/420166/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor420169"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why searches must start at the root or current directory</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2010 15:54 UTC (Thu)
+                               by <b>jhhaller</b> (guest, #56103)
+                              [<a href="/Articles/420169/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+While not directly related to the dcache scalability patch, one thing I have been curious is why there has never been an open relative to an open directory. It seems that would be useful for compiler type applications which have to search for files in several locations. The typical pattern is to prepend the search path to the file path and try to open. This causes the search path to have to be scanned multiple times just to get to the point of trying to open the file. If the open could be relative to a directory file descriptor, then the application could open every directory in the search path, and just open the file relative to each of those descriptors until the open succeeded. This would reduce the number of dentry cache looks which need to be done, for that specific workload.<br>
+<p>
+While I have no idea of the relative time savings this would provide, has there ever been a proposal to have such an alternate open call, or done any prototyping?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/420169/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor420174"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why searches must start at the root or current directory</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2010 16:18 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/420174/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Try "man openat" then ask your question again :)
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/420174/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2010, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

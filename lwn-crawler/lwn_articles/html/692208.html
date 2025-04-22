@@ -1,0 +1,641 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Virtually mapped kernel stacks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/692208/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/691664/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/692208/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Virtually mapped kernel stacks</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>We're bad at marketing</b>
+<p>
+We can admit it, marketing is not our strong suit. Our strength is
+writing the kind of articles that developers, administrators, and
+free-software supporters depend on to know what is going on in the
+Linux world. Please <a href="/Promo/nsn-bad/subscribe">subscribe today</a> to help us keep doing that, and so
+we don’t have to get good at marketing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 22, 2016</br>
+           </div>
+The kernel stack in Linux is arguably a weak point in the system's design:
+it is small enough that kernel developers must constantly be aware of what
+they put on the stack to avoid overflows.  But those overflows happen
+anyway, even in the absence of an attacker who is trying to force the
+issue — and, as Jann Horn recently <a
+href="https://googleprojectzero.blogspot.com/2016/06/exploiting-recursion-in-linux-kernel_20.html">demonstrated</a>,
+there are reasons why attackers might want to force a stack overflow.  When an
+overflow does occur, the kernel is poorly placed to even detect the
+problem, much less act on it.  The stack has
+changed little over the lifetime of the kernel, but some recent work has
+the potential to, finally, make the kernel stack much more robust.
+<p>
+<h4>How current kernels stack up</h4>
+<p>
+Each process has its own stack for use when it is running in the kernel; in
+current kernels, that stack is sized at either 8KB or (on 64-bit systems)
+16KB of memory.  The stack lives in directly-mapped kernel memory, so it
+must be physically contiguous.  That requirement alone can be problematic
+since, as memory gets fragmented, finding two or four physically contiguous
+pages can become difficult.  The use of directly mapped memory also rules
+out the use of guard pages — non-accessible pages that would trap an
+overflow of the stack — because adding a guard page would require wasting
+an actual page of memory.
+<p>
+As a result, there is no immediate indication if the kernel stack has
+overflowed.  Instead, a stack that grows too large simply overwrites
+whatever memory is located just below the allocated range (below because
+stacks grow downward on most architectures).  There are options to detect
+overflows by putting canaries on the stack, and development options can
+track stack usage.  But if a stack overflow is
+detected at all on a production system, it is often well after the actual
+event and after an unknown amount of damage has been done.
+<p>
+For added fun, there is also a crucial data structure — the <a
+href="https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/thread_info.h#n45"><tt>thread_info</tt>
+structure</a> — placed at the bottom of the stack area.  So if the kernel
+stack overflows, the <tt>thread_info</tt>, which provides access to almost
+everything the kernel knows about the running process, will be overwritten
+first.  Needless to say, that makes stack overruns even more interesting to
+attackers; it's hard to know what will be placed below the stack in memory,
+but the <tt>thread_info</tt> structure is a known quantity.
+<p>
+It is not surprising, then, that kernel developers work hard to avoid stack
+overflows.  On-stack allocations (usually in the form of automatic
+variables) are examined closely, and, as a general rule, recursion is not
+allowed.  But surprises can come in a number of forms, from a careless
+variable declaration to unexpectedly deep call chains.  The storage
+subsystem, where filesystems, storage technologies, and networking code can
+be stacked up to arbitrary depths, is particularly prone to such problems.
+This sort of surprise led to <a
+href="https://git.kernel.org/linus/6538b8ea886e472f4431db8ca1d60478f838d14b">the
+expansion of the x86-64 kernel stack</a> to 16KB for the 3.15 release, but
+there are limits to how big the kernel stack can be.  Since there is one
+stack for every process in the system, any increase in its size is felt
+many times over.
+<p>
+The problem of avoiding stack overflows is likely to remain a challenge for
+kernel developers for some time, but it should be possible for the kernel
+to respond better when an overflow does happen.  The key to doing so, as
+can be seen in Andy Lutomirski's <a href="/Articles/691631/">virtually
+mapped stacks patch set</a>, is to change how kernel stacks are allocated.
+<p>
+<h4>Virtually mapped stacks</h4>
+<p>
+Almost all memory that is directly accessed by the kernel is reached via
+addresses in the directly mapped range.  That range is a large chunk of
+address space that is mapped to physical memory in a simple, linear
+fashion, so that, for all practical purposes, it looks as if the kernel is
+working with physical memory addresses.  On 64-bit systems, all of memory
+is mapped in this way; 32-bit systems do not have the ability to fully map
+the amount of memory found in current systems, so <a
+href="/Articles/356378/">more complicated games</a> must be played.
+<p>
+Linux is a virtual-memory system, though, and so the kernel uses
+virtual addresses to reach memory, even in the directly mapped range.  As
+it happens, the kernel reserves another range of addresses for virtually
+mapped memory; this range is used when memory is allocated with
+<tt>vmalloc()</tt> and is, consequently, called the "vmalloc range."
+Allocations in this range are pieced together a page at a time and are not
+physically contiguous.
+Traditionally, the use for this range is to obtain a relatively large chunk
+of memory that needs to be virtually contiguous, but which can be
+physically scattered.
+<p>
+There is (almost! — see below) no need for kernel stacks to be physically
+contiguous, so they could, in principle, be allocated as individual pages
+and mapped into the vmalloc area.  Doing so would eliminate one of the
+biggest uses of larger (physically contiguous) allocations in the kernel,
+making the system more robust when memory is fragmented.  It also would
+allow the placement of no-access guard pages around the allocated stacks
+without the associated memory waste (since all that is required is a
+page-table entry), allowing the kernel to know immediately if it ever
+overruns an allocated stack.  Andy's patch does just this — it allocates
+kernel stacks from the vmalloc area.  While he was at it, he added graceful
+handling of overflows; a proper, non-corrupt oops message is printed, and
+the overflowing process is killed.
+<p>
+The patch set itself is relatively simple, with most of the patches dealing
+with the obnoxious architecture-specific details needed to make it work.
+It seems like a significant improvement to the kernel, and the reviews have
+been generally positive.  There are a few outstanding issues, though.
+<p>
+<h4>Inconvenient details</h4>
+<p>
+One of those is performance; allocating a stack from the vmalloc area, Andy
+says, makes creating a process with <tt>clone()</tt> take about 1.5µs
+longer.  Some workloads are highly sensitive to process-creation overhead
+and would suffer with this change, so it is perhaps unsurprising that Linus
+<a href="/Articles/692233/">responded</a> by saying that "<q>that
+problem needs to be fixed before this should be merged.</q>"  Andy
+thinks that much of the cost could be fixed by making <tt>vmalloc()</tt>
+(which has never been seriously optimized for performance) faster; Linus,
+instead, suggests keeping a small, per-CPU cache of preallocated 
+stacks.  He has, in any case, made it clear that he wants the performance
+regression dealt with before the change can go in.
+<p>
+Another potential cost that has not yet been measured is an increase in
+translation  misses.  The directly mapped area uses huge-page mappings, so the
+entire kernel (all of its code, data, and stacks) can fit in a single
+translation lookaside buffer (TLB) 
+entry.  The vmalloc area, instead, creates another window into memory using
+single-page mappings.  Since
+references to kernel stacks are common, the possibility of an increase in 
+TLB misses is real if those stacks are reached via the vmalloc area.
+<p>
+One other important little detail is that, while allocations from the
+vmalloc area include guard pages, those pages are placed <i>after</i> the
+allocation.  For normal heap memory, that is where overruns tend to
+happen.  But stacks grow downward, so a stack overrun will overwrite memory
+ahead of the allocation instead.  In practice, as long as a guard page is
+placed at the beginning of the vmalloc area, the current code will ensure
+that there are guard pages between each pair of allocations, so the
+pre-allocation page should be there.  But, given that the guard pages are
+one of the primary goals of the patch set, some tweaks may be needed to be
+sure that they are always placed at the beginning of each stack.
+<p>
+Memory mapped into the vmalloc range has one specific constraint: it cannot
+easily be used for direct memory access (DMA) I/O.  That is because such
+I/O expects a memory range to be physically contiguous, and because the
+virtual-to-physical mapping address functions do not expect addresses in
+that range.  As long as no kernel code attempts to perform DMA from the
+stack this should not be a problem.  DMA from the stack is problematic for
+other reasons, but it <a href="/Articles/692246/">turns out</a> that there
+is some code in the kernel that does it anyway.  That code will have to be
+fixed before this patch can be widely used.
+<p>
+Finally, kernels with this patch set applied will detect an overflow of the
+kernel stack, but there is still the little problem of the
+<tt>thread_info</tt> structure living at the bottom of each stack.  An
+overrun that overwrites only this structure, without overrunning the stack
+as a whole, will not be detected.  The proper solution here is to move the
+<tt>thread_info</tt> structure away from the kernel stack entirely.  The
+current patch set does not do that, but Andy has said that he intends to
+tackle that problem once these patches are accepted.
+<p>
+That acceptance seems likely once the current problems have been dealt
+with.  Giving the kernel proper detection and handling of stack overruns
+will remove an important attack vector and simply make Linux systems more
+robust.  It is hard to complain about changes like that.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Kernel_stack">Kernel stack</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#vmalloc">vmalloc()</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Linux_kernel">Linux kernel</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/692208/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor692469"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped kernel stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 23, 2016 12:15 UTC (Thu)
+                               by <b>spender</b> (guest, #23067)
+                              [<a href="/Articles/692469/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What a great idea! Why didn't I think of this years ago?<br>
+<p>
+I guess this is another example of what happens when upstream "punishes" us by refusing to credit us while ripping off research, ideas, and implementations.  When the upstream author fails to do so, articles like this repeat it (because according to the editorial strategy here, whatever is mentioned on public upstream mailing lists is the only truth).<br>
+<p>
+Is it really so difficult for people to act decently instead of playing these silly games walking the edge of plagiarism to protect their ego?<br>
+<p>
+Some reading material:<br>
+<a href="https://lwn.net/Articles/600821/">https://lwn.net/Articles/600821/</a><br>
+<a href="https://lkml.org/lkml/2016/6/15/1064">https://lkml.org/lkml/2016/6/15/1064</a><br>
+<a href="https://lkml.org/lkml/2016/6/21/826">https://lkml.org/lkml/2016/6/21/826</a><br>
+<a href="http://www.openwall.com/lists/kernel-hardening/2016/06/23/1">http://www.openwall.com/lists/kernel-hardening/2016/06/23/1</a><br>
+<p>
+So after all the pointless bikeshedding, we're back to my initial KSTACKOVERFLOW implementation, doing the exact same things on the same platform.  Of course, as Andy has discovered (again by looking at code he didn't credit in his patches) this has no chance of working anytime soon, particularly when specific debugging options (SG_DEBUG, etc) are enabled.  Prior to changing my implementation, I had fixed up dozens of these DMA on stack issues which had persisted in the kernel for years and had also been added in new staging code.  This implementation will both need to fix all the things I fixed, as well as all the issues my new implementation automatically handles or it'll simply break people's machines.<br>
+<p>
+-Brad<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/692469/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor692516"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped kernel stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 23, 2016 14:19 UTC (Thu)
+                               by <b>itvirta</b> (guest, #49997)
+                              [<a href="/Articles/692516/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Whatever happened to the "try to be polite and respectful" part of communicating with other people.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/692516/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor692670"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped kernel stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 25, 2016 1:40 UTC (Sat)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/692670/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm just a person, and I don't have any special ability to speak for "upstream".  I certainly have no intention of punishing anyone or ripping off anyone's work.  My patchset isn't based on grsecurity.  I suspect it works quite differently from grsecurity's implementation, but I haven't actually looked at grsecurity's implementation in any great detail.<br>
+<p>
+My understanding is that grsecurity has some special cases that make DMA on the stack continue working.  I'd guess that this type of misuse in the kernel was much more widespread several years ago than it is now, since the DMA API currently has the ability to warn if the stack is used for DMA and people have put some effort into fixing the offenders.<br>
+<p>
+I could mention in the commit message that GRKERNSEC_KSTACKOVERFLOW has had a similar feature for years.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/692670/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor693208"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped kernel stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 1, 2016 21:13 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/693208/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Is it really so difficult for people to act decently instead of playing these silly games walking the edge of plagiarism to protect their ego?</font><br>
+<p>
+Darwin, meet Wallace. (Or is it the other way around?)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693208/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor692497"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped kernel stacks - ongoing effort</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 23, 2016 14:12 UTC (Thu)
+                               by <b>ds2horner</b> (subscriber, #13438)
+                              [<a href="/Articles/692497/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="http://article.gmane.org/gmane.linux.kernel/2251521">http://article.gmane.org/gmane.linux.kernel/2251521</a><br>
+<p>
+<font class="QuotedText">&gt; When a task goes away, one reference is held until the next RCU grace</font><br>
+<font class="QuotedText">&gt; period so that task_struct can be used under RCU (look for</font><br>
+<font class="QuotedText">&gt; delayed_put_task_struct).</font><br>
+<p>
+Yeah, that RCU batching will screw the cache idea.<br>
+<p>
+But isn't it only the "task_struct" that needs that? That's a separate<br>
+allocation from the stack, which contains the "thread_info".<br>
+<p>
+I think that what we *could* do is re-use the tread-info within the<br>
+RCU grace period, as long as we delay freeing the task_struct.<br>
+<p>
+Yes, yes, we currently tie the task_struct and thread_info lifetimes<br>
+together very tightly, but that's a historical thing rather than a<br>
+requirement. We do the<br>
+<p>
+        account_kernel_stack(tsk-&gt;stack, -1);<br>
+        arch_release_thread_info(tsk-&gt;stack);<br>
+        free_thread_info(tsk-&gt;stack);<br>
+<p>
+in free_task(), but I could imagine doing it earlier, and<br>
+independently of the RCU-delayed free.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/692497/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor692575"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped kernel stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 24, 2016 1:33 UTC (Fri)
+                               by <b>samlh</b> (subscriber, #56788)
+                              [<a href="/Articles/692575/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thank you for the interesting article, Jon! I find this kind of thing cool, but I quickly lose track of all the email threads, so I appreciate the work you put in to summarize what is happening.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/692575/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor692600"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped kernel stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 24, 2016 12:58 UTC (Fri)
+                               by <b>ppisa</b> (subscriber, #67307)
+                              [<a href="/Articles/692600/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The proper solution here is to move the thread_info structure away</font><br>
+<font class="QuotedText">&gt; from the kernel stack entirely. The current patch set does not do that,</font><br>
+<font class="QuotedText">&gt; but Andy has said that he intends to tackle that problem once these</font><br>
+<font class="QuotedText">&gt; patches are accepted.</font><br>
+<p>
+I think that breaking direct relation between thread_info and kernel task<br>
+stack (per thread - not per process as can be misinterpreted from article)<br>
+would be really bad decision. This way significant overhead would be caused for transforming running CPU state vector (SP in Linux case) to pointer to the thread_info pointer ("current").<br>
+<p>
+I have in my mind immediately following solution when I have read about current kernel stack security affair week or so ago.<br>
+<p>
+Use pagetable to protect stack for sure. Use 32kB aligned and 32 kB long virtual address range for each 16 kB stack (start address abbreviated sptr, alignment salig). Use page table entries next way<br>
+<p>
+  sptr + 0 * pagesize  ... valid page ... thread_info<br>
+  sptr + 1 * pagesize  ... not present page ... guard against stack overflow<br>
+  sptr + 2 * pagesize  ... valid page ... top of the stack<br>
+  sptr + 3 * pagesize  ... valid page ... stack<br>
+  ...<br>
+  sptr + n * pagesize  ... valid page ... bottom of the stack<br>
+  sptr + (n - 1) * pagesize  ... not present page ... guard against buffer overflow (index out of local variable size)<br>
+<p>
+Then "current " implementation can stay the same as it is now<br>
+<p>
+  current = current_sp &amp; ~(salig - 1)<br>
+<p>
+Stack size can be adjusted as required when n &lt;= (salig / pagesize) - 3 is held.<br>
+<p>
+There is small inefficiency that whole page is reserved for thread_info which can be some waste of the space but I expect that typical size of this structure is quite large today.<br>
+<p>
+There is even another optimization possible for 64-bit architectures. They have abundant virtual space for today hardware (2^47 for AMD64 kernel) so it would be possible to reserve some large enough virtual range for kernel stacks allocation and place kernel stack on address which is directly computed from top level PID/task number. Then no vmalloc allocation is required to reserve unique virtual address area for new task stack. The size of the range is not so huge for today hardware. 64-bit linux kennel allows 4 millions tasks max. If 32 kB aligned stack slots are considered then  4 M * 32kB corresponds to 15 + 22 bits =&gt; 37 bits which is acceptable and mapping from PID to thread_info would be fast, actual tread state to current as well etc.<br>
+<p>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/692600/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor692669"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped kernel stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 25, 2016 1:18 UTC (Sat)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/692669/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are only two serious things that live in thread_info and matter for performance: flags and cpu.  Cpu would probably perform better in task_struct if it could share a cache line with the rest of the scheduler stuff.  That leavs flags.<br>
+<p>
+On new x86 kernels, most of the flags usage is in C.  Moving it to task_struct will add one level of indirection.  I'll benchmark it at some point, but I doubt it matters.<br>
+<p>
+Anyway, as Linus pointed out, a better solution might be possible: stick flags for the running task in percpu memory instead of in per-task memory.  This would make it faster than even the thread_info approach.  Avoiding breaking signal handling while doing this could be interesting.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/692669/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor692756"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Glad to see it!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 27, 2016 1:02 UTC (Mon)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/692756/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I love to see general hardening solutions an important software like the Linux kernel. I'm very glad to see this.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/692756/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor693211"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped kernel stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 1, 2016 21:57 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/693211/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A doubtless stupid question from someone who never paid that much attention to this area of things: if the thread_info is below the stack and vulnerable to overruns, why not just move it to the top of the stack page and start the stack immediately below it? It's fixed-size, after all, so it should be easy to start the stack pointer right below it. The stack would then grow away from the thread_info, and overruns could not run into it (only underruns, which should be much rarer, one hopes).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693211/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693213"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Virtually mapped kernel stacks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 1, 2016 22:09 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/693213/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      The placement at the bottom was initially done so that it could be easily located just by aligning the stack pointer.  It's not done that way anymore, so that doesn't matter much.  Moving <tt>thread_info</tt> to the top would make it harder to overwrite, but doesn't solve the other problems that come with having it in that bit of memory.  If you're going to change things, it seems better to just move it out entirely.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693213/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

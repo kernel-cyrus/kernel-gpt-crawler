@@ -1,0 +1,270 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>ACPI, device interrupts, and suspend states [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/146094/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/145232/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/146094/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>ACPI, device interrupts, and suspend states</h1>
+<div class="Byline">[Posted August 3, 2005 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+The 2.6.13-rc5 prepatch brought with it the reversal of a couple of
+ACPI-related patches.  A look at what happened is rewarding in that it
+shows how hard it can be to get some things right, and how the kernel
+development model tries to address these issues.
+<p>
+
+Earlier 2.6.13 prepatches included a change to the core ACPI system.
+Whenever the system (or a part of it) is being suspended, the modified ACPI
+code would break the link which routed device interrupts into the
+processor.  This change is part of a new set of rules which expects every
+device to release its interrupt line on suspend, and to reacquire it on
+resume.  There are a few reasons for wanting to do things this way:
+<p>
+<ul>
+
+<li> In theory, at least, a device could be resumed to find that its
+     interrupt number has changed.  People who reconfigure their hardware
+     while the system is suspended (as opposed to being truly shut down)
+     might be seen as actively looking for trouble, but it still might be
+     nice to make things work for them when possible.
+<p>
+<li> The interrupt handler for a suspended device should not normally be
+     called, but that can happen in the case of shared interrupts.  Any
+     interrupt handler which tries to access a suspended device is likely
+     to run into problems; having every <tt>suspend()</tt> method release
+     the device's interrupt line can help to avoid this situation.
+<p>
+<li> On resume, interrupts for a device whose driver has not yet been
+     resumed may be seen as spurious and shut down.  If that interrupt line
+     is shared, however, other devices could be affected.  This problem can
+     be avoided by having ACPI shut down the interrupt altogether until
+     individual drivers restore it, but that depends on drivers explicitly
+     reallocating their interrupt lines.
+</ul>
+<p>
+
+The problem with the ACPI change is that it breaks a large number of
+drivers, and, as a result, it breaks suspend on systems where it used to
+work.  The power management hackers seem to see this situation as
+an unfortunate, but necessary step toward getting suspend working reliably
+on a much broader range of hardware.  Having individual drivers release and
+reacquire their interrupts is also seen as necessary to support runtime
+power management - suspending of individual devices in a running system to
+save power.  The ACPI change, it is said, fixes more systems than it
+breaks, and is thus worthwhile.
+<p>
+
+Linus <a href="/Articles/146100/">disagreed</a> and reverted the patch,
+saying:
+<p>
+<div class="BigQuote">
+	The thing is, we're better off making very very slow progress that
+	is _steady_, than having people who _used_ to have things work for them
+	suddenly break.
+<p>
+	So I believe that if we fix two machines and break one machine,
+	we've actually regressed. It doesn't matter that we fixed more than
+	we broke: we _still_ regressed. Because it means that people can't
+	trust the progress we make!
+</div>
+<p>
+The right solution, according to Linus, is to go ahead and add the
+<tt>free_irq()</tt> and <tt>request_irq()</tt> calls to individual drivers
+when it makes sense to do so, and when it does not break things for
+individual users.  Meanwhile, however, the ACPI subsystem should still
+restore the interrupt state on resume so that unmodified drivers do not
+break.  There are some remaining issues with how that is done: it may
+involve running the ACPI AML interpreter with interrupts disabled, which
+leads to a number of interesting situations.  Benjamin Herrenschmidt also
+<a href="/Articles/146103/">pointed out</a> that it could lead to
+situations where drivers may not be able to receive interrupts during the
+resume process.  
+<p>
+
+Eventually, one assumes, these details will be worked out.  In the mean
+time, it will be interesting to see if the "revert any patch that breaks
+somebody's machine" policy holds.  If it leads to a more stable experience
+for Linux users, it seems like it would be a good thing.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#ACPI">ACPI</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Device_drivers">Device drivers</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Power_management">Power management</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/146094/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor146202"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ACPI, device interrupts, and suspend states</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2005 9:55 UTC (Thu)
+                               by <b>NAR</b> (subscriber, #1313)
+                              [<a href="/Articles/146202/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      So this could be the reason of those "IRQ 11 nobody cared" (or something like this) error messages I got with an accompanying stack trace... As always, LWN's Kernel Page worths every cent of my subscription fee.
+<P>
+<CENTER>Bye,NAR</CENTER>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/146202/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor146447"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ACPI, device interrupts, and suspend states</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2005 19:03 UTC (Fri)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/146447/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      There are ways to make progress without so much disruption.  Believe it or not, people do notice when the kernel starts spitting out printk messages that it didn't spit out before, especially if those messages describe what has to be changed, or who has to be notified, and if those messages are triggered many times by doing something routine that the user relies on.  <br>
+<p>
+Something along the lines of "driver XXX didn't call free_irq before suspend, please fix it" would be nice.  I'd even sift through a bunch of "driver XXX _did_ call request_irq after resume" messages to ensure that all the devices in my system were accounted for, and maybe even fix the ones that aren't.<br>
+<p>
+I'd be willing to run the latest kernel on most of my less essential machines, if I could expect the latest kernel to discover and complain about expected future breakage in my specific circumstances, and if I can expect most of the stuff that worked in the previous kernel to work in the next.<br>
+<p>
+On the other hand, if the kernel developers' approach to API and policy changes is to just commit a patch and let everyone else catch up with fixes to things that--although possibly fragile and ugly--were not actually broken in the first place, then I'll only run those kernels when they're well and truly finished (i.e. never), or when I have absolutely no alternative.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/146447/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor150925"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ACPI, device interrupts, and suspend states</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2005 1:50 UTC (Fri)
+                               by <b>mmarq</b> (guest, #2332)
+                              [<a href="/Articles/150925/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      " In the mean time, it will be interesting to see if the "revert any patch that breaks somebody's machine" policy holds. If it leads to a more stable experience for Linux users, it seems like it would be a good thing. "<br>
+<p>
+ Sorry,... but that to me and perhaps 90% of users out there, from server to desktop, is dont change from kernel altogheter until is proved reliable and safe. I'm not trying to annoy no one, but it still seems to me that there is a slight disconnection betwen the developement world and the user world.<br>
+<p>
+ More and better modularity would adress some issues, until then is one kernel altogether or one another... no patches in the middle.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/150925/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2005, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

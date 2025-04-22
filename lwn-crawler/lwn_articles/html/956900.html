@@ -1,0 +1,858 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Kernel-text replication on NUMA systems [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/956900/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/956869/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/956900/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Kernel-text replication on NUMA systems</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 5, 2024</br>
+           </div>
+Kernel developers often go out of their way to reduce the memory used by
+the kernel itself; that memory is not available for the workloads that
+people are actually interested in running on their systems.  Lower memory
+usage also tends to lead to better performance overall.  But there are
+times when the expenditure of some extra memory can make the system faster.
+The replication of the kernel's text (executable code) and read-only data
+across a NUMA system may be a case in point; patch sets have been posted
+adding that capability to two architectures.
+<p>
+Non-uniform memory access (NUMA) systems are divided into nodes, each of
+which normally contains a number of CPUs and some memory.  All of the
+memory in the system is addressable from any CPU, but access to memory
+attached to the local node will be significantly faster than access to
+memory on remote nodes.  For this reason, the kernel goes out of its way to
+try to keep workloads and their memory on the same nodes, and there is an
+extensive set of system calls allowing applications to control where in the
+system their memory is placed.
+<p>
+But how should the system place data that is needed by <i>all</i> of the
+nodes in the system?  For writable data, there is usually little to be
+done; there must be a single copy somewhere.  At best, that data can be
+spread across all of the nodes so that access times are relatively uniform
+everywhere.  The same can be done with read-only data — such as the
+kernel's text — so that workloads will perform similarly regardless of
+which node they land on, though (as we'll see) not all architectures do
+that.  But the read-only nature of that data suggests another approach as
+well: make a copy of that data on each node, so that every node has fast
+access to it.  For frequently accessed data like the kernel text, the
+result should be improved performance, at the cost of the extra memory
+needed for the duplicate copies.
+<p>
+In May 2023, Russell King posted <a
+href="/ml/linux-doc/ZHYCUVa8fzmB4XZV@shell.armlinux.org.uk/">an
+implementation of kernel-text replication for the arm64 architecture</a>.
+The fact that this work showed up on that architecture is indicative of how
+CPU design has changed; NUMA architectures were once restricted to high-end
+servers, but now they are just as likely to show up in a phone.  As King
+notes, the arm64 architecture currently places the kernel text on a single
+node, leading to performance disparities across the system.  Copying the
+kernel text to each node will give each node local access, thus improving
+performance.
+<p>
+Each node's copy of the text will, naturally, be located at a different
+physical address.  That difference has to be hidden, though; as tasks
+migrate between nodes, they need to find the kernel at the same virtual
+addresses.  King manages that problem by changing the placement of the
+kernel text (and read-only data as well) so that it is covered by its own
+top-level page-table directory.  That directory can easily be set
+differently for each node, resulting in a mapping where the kernel text
+sits at the same virtual address everywhere, even though its physical
+location varies.
+<p>
+Once that is set up, it's mostly just a matter of allocating more memory,
+mapping it properly, and copying the kernel text into it.  Except, of
+course, there are details.  For example, the kernel text is not truly
+read-only; there are times (such as when a tracepoint is enabled, a module
+is loaded, or a BPF program is installed) where the kernel patches its own
+text at run time.  All of those operations must now be replicated across
+all copies of the kernel text.  There are some outstanding problems as well
+that King noted in his posting.  Kernel-text replication is incompatible
+with kernel address-space layout randomization (KASLR), so that security
+mechanism must be disabled.  Text replication also breaks <a
+href="https://docs.kernel.org/dev-tools/kasan.html">KASAN</a>; King asked
+for help fixing it, but that help does not appear to have materialized.
+<p>
+In response that posting, Ard Biesheuvel <a
+href="/ml/linux-doc/CAMj1kXHn0oho_CZMSc5N1updfdZDq+3VAfzw8kZqzzpTSgkXew@mail.gmail.com/">said</a>
+that "<q>the proposed approach is sound, but it is rather intrusive</q>".
+He noted that, if and when <a
+href="/ml/linux-kernel/20230307140522.2311461-1-ardb@kernel.org/">his
+patches</a> adding support for LPA2 (large physical addresses for arm64) is
+merged, there will be another point of incompatibility with text
+replication.  As an alternative approach, he suggested <a
+href="https://source.android.com/docs/core/virtualization/security">protected
+KVM (pKVM)</a> could be used to run a separate kernel in each node, with
+the guest-level page tables being used to map the replicated kernel text.
+King <a
+href="/ml/linux-doc/ZJW7kvWqLVZV4KVr@shell.armlinux.org.uk/">responded
+favorably</a> to the idea but, when he posted <a
+href="/ml/linux-doc/ZMKNYEkM7YnrDtOt@shell.armlinux.org.uk/">a second
+revision of the replication patches</a> in July, it kept the same approach
+as the first version.
+<p>
+That posting received almost no review comments, and
+the work appears to have stalled.  That is unfortunate since, as noted in
+the original posting, there can be real benefits to it:
+<p>
+<blockquote class="bq">
+	Needless to say, the performance results from kernel text
+	replication are workload specific, but appear to show a gain of
+	between 6% and 17% for database-centric like workloads. When
+	combined with userspace awareness of NUMA, this can result in a
+	gain of over 50%.
+</blockquote>
+<p>
+King's patches have not been reposted since July.  The idea of replication
+is alive and well, though, as can be seen in <a
+href="/ml/linux-mm/20231228131056.602411-1-artem.kuzin@huawei.com/">this
+series</a>, posted by Artem Kuzin, adding replication support to the x86
+platform.  The cover letter makes reference to King's work and expresses
+hopes that it will be possible to push both projects forward together.
+This rather larger patch set does not build directly on what came before,
+though.
+<p>
+The arm64 architecture cleanly separates the kernel and user-space page
+tables, making replication a bit easier to implement; x86, instead, lacks
+that separation, with the result that the implementation is a bit more
+complex.  Rather than limit node-specific page-table directories to the top
+level, this series has to create node-specific PUD and PMD (the next two
+levels down on four-level systems) directories as well.  This approach is,
+however, able to support KASLR and KASAN (though KASAN evidently does not
+yet work with five-level page tables).
+<p>
+Here, too, benchmark results would seem to indicate that significant
+performance improvements are possible.
+<p>
+This series has seen even less review attention than the arm64 patches.
+The fact that this work is scrupulously undocumented may be a part of that,
+but it also was only posted on December&nbsp;28, meaning that most
+developers have not yet had a chance to take a good look at it.  Once the
+development community fully recovers from the holidays, discussion on this
+work might pick up.
+<p>
+In theory, this idea should not be particularly controversial.  The amount
+of extra memory needed to replicate the kernel is not huge, especially in
+the context of larger NUMA systems, and the performance benefits look to be
+large.  This change, on either architecture, does require a fair amount of
+intrusive patching of the core kernel, though, and can add complexity to
+the implementation of other important features as well.  Whether this work
+finds its way into the mainline will ultimately depend on whether that
+added complexity is seen as being worthwhile given the benefits it brings.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-NUMA_systems">Memory management/NUMA systems</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#NUMA">NUMA</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/956900/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor957023"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2024 16:29 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/957023/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The motivation on arm64 is not for phones but for servers. There are several arm64 vendors targetting the server space, although I'm not sure which ones have NUMA support. A quick search suggests both Ampere and Cavium have NUMA chips while Graviton does not.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957023/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor957028"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2024 17:29 UTC (Fri)
+                               by <b>MattBBaker</b> (guest, #28651)
+                              [<a href="/Articles/957028/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In the HPC space the A64FX from Fujitsu is a NUMA ARM system. There isn't a choice either, the chip has 4 HBM links for 4 separate L2 caches (and no L3). Probably won't help Fugaku's Top500 placement since the name of the HPC game is kernel bypass.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957028/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor957057"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2024 15:33 UTC (Sat)
+                               by <b>snajpa</b> (subscriber, #73467)
+                              [<a href="/Articles/957057/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Graviton seems to have low core-to-core latency as a design goal, others do not (while Ampere isn't so bad, it's nowhere near what Graviton can do). Graviton is also single socket only, dual socket systems will always be NUMA these days.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957057/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor957068"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2024 21:37 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/957068/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One caveat is that we sometimes see multiple NUMA nodes in a single socket. I believe Intel can do this; statically partition the L3 between two or more groups of cores and present each partition as a NUMA node. There's a latency benefit as you don't have to traverse as many ring stops to get to the L3 slice that holds your data. I think they call it Cluster On Die (COD) because at Intel everything has to have an acronym.<br>
+<p>
+I haven't seen this done on ARM yet, but I haven't been looking terribly hard.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957068/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor957085"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2024 10:48 UTC (Sun)
+                               by <b>snajpa</b> (subscriber, #73467)
+                              [<a href="/Articles/957085/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+yup; btw I find that our workloads (hundreds of OS-level containers on a single kernel with even more containers such as Docker, k8s nested in there) work better with NPS=4 with AMD, which splits the chip in 4 quadrants; which is interesting, b/c I'd have guessed it'd actually be "NUMA node per CCX" which would have the best results in local core to core latency :-D<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957085/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor957086"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2024 10:51 UTC (Sun)
+                               by <b>snajpa</b> (subscriber, #73467)
+                              [<a href="/Articles/957086/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+oh sorry I should have worded it better - ofc node per CCX has the best core to core latencies, but those are low core counts to low core counts, which is why I think the 4 quadrants are doing better in our setup (originally when I started experimenting with this I thought the main problem is saving infinity fabric bandwidth, but that doesn't seem to be as much of a problem after all...)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957086/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor957091"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2024 11:53 UTC (Sun)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/957091/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ampere Altra can be configured to run as 1, 2 or 4 NUMA nodes. While I don't really understood what it does internally, I did notice significant differences in core-to-core latency when configured as &gt;1 node, where threads spread across nodes would interact as badly as on platforms with partitioned L3 caches.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957091/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor957094"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2024 12:52 UTC (Sun)
+                               by <b>snajpa</b> (subscriber, #73467)
+                              [<a href="/Articles/957094/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+as with AMD, it seems to couple a quadrant or a half with the nearest respective memory controllers - <a href="https://amperecomputing.com/assets/Altra_Max_UM_v1_15_20230617_b380fdbc19.pdf">https://amperecomputing.com/assets/Altra_Max_UM_v1_15_202...</a> page 36<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957094/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor957112"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2024 4:16 UTC (Mon)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/957112/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Indeed, and the cache is actually behind the memory controllers:
+
+<p></p><code>
+2.4 System Level Cache (SLC)<br></br>
+The SLC is a memory-side cache that is mostly exclusive with the L2 caches. The SLC is used for processor evictions and caches large data and instruction structures to improve system performance. The SLC is not a traditional processor-side Last Level Cache (LLC), sometimes called an L3 or L4 cache
+</code><p></p>
+This can explain why the inter-core performance differs with NUMA setup.
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957112/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor957123"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2024 14:06 UTC (Mon)
+                               by <b>neggles</b> (subscriber, #153254)
+                              [<a href="/Articles/957123/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The just-released graviton4 is a 2-socket system, actually; this may not be entirely a coincidence<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957123/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor957059"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2024 18:17 UTC (Sat)
+                               by <b>jezuch</b> (subscriber, #52988)
+                              [<a href="/Articles/957059/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is the performance benefit actually more from the kernel code or from read-only data? Maybe it would be worthwhile to do only the latter at first.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957059/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor957063"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2024 19:41 UTC (Sat)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/957063/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't understand what the performance benefit is from read-only data as separate from the kernel code (do you mean separate from the replication?).  Can you explain more what you're talking about?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957063/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor957072"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2024 22:44 UTC (Sat)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/957072/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+6–17% gain for replicating something that can be cached? That's… unexpected. I mean, you would think the hot parts of the kernel code are small enough to fit into each core's L2 cache or something?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957072/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor957076"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2024 3:32 UTC (Sun)
+                               by <b>jason.rahman</b> (subscriber, #120510)
+                              [<a href="/Articles/957076/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Even if the kernel code executed for a specific syscall fits into L2, it'll be quickly evicted when userspace runs following the return. By the time the next syscall or interrupt handler runs any trace of the kernel code or data will be flushed clean from the L2, and TLBs as well. Guessing instruction fetch is most strongly impacted. If data loads miss the cache modern CPUs can run other work out of order to hide latency. But the instant instruction fetch stalls on a cross NUMA node memory access, performance will absolutely crater because none of the other tricks to hide memory latency can help. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957076/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor957083"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2024 8:37 UTC (Sun)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/957083/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But why? I mean, I've been working with profiling database systems (granted, on x86), and I can hardly remember L2 instruction fetch misses at all, much less L3.<br>
+<p>
+And why is local memory fetch OK but cross-NUMA fetches not? Look at e.g. <a href="https://chipsandcheese.com/2023/11/07/core-to-core-latency-data-on-large-systems/">https://chipsandcheese.com/2023/11/07/core-to-core-latenc...</a>, if you're talking about Graviton3 (this was about aarch64 servers, right?) the ratio between best and worst memory fetch is roughly 2x. So if you're saving 17% on doing local memory fetches instead of cross-NUMA fetches, it means you'd spend roughly 34% of your time on instruction fetch/iTLB misses before!? That sounds insane.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957083/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor957099"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2024 15:35 UTC (Sun)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/957099/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I bet this is a very specific workload rather than general performance.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957099/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor957101"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2024 18:06 UTC (Sun)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/957101/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; But why? I mean, I've been working with profiling database systems (granted, on x86), and I can hardly remember L2 instruction fetch misses at all, much less L3.</span><br>
+<p>
+Interesting - even profiling concurrent postgres workers on x86 instruction cache misses show up substantially. Depending on the workload they're even a substantial factor without concurrency. Part of that is some architectural stuff in postgres, but they also show in glibc &amp; kernel. <br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957101/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor957088"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2024 11:00 UTC (Sun)
+                               by <b>snajpa</b> (subscriber, #73467)
+                              [<a href="/Articles/957088/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+well those caches aren't infinite; there's also a huge amount of shared variables in the kernel that the various subsystems need; if you can cache the code, that leaves more room for data closer to the cores :-)<br>
+<p>
+also the amount of kernel code touched by workloads is going to depend heavily on the apps running on the machine; I think it's those heavily aggregating mixed container workloads that should benefit the most from copying the kernel text to all NUMA nodes...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957088/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor957382"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2024 19:30 UTC (Wed)
+                               by <b>jcm</b> (subscriber, #18262)
+                              [<a href="/Articles/957382/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It’s not just kernel text you want to consider. You also want to consider cross-socket page tables. Any time I take a TLB miss and need to walk tables that are on another socket, that’s extra latency added to the walk, for each of the levels of the table. Back in 2019 I was hoping to get some of the NUVIA kernel team to pitch into looking at this. I think it might still be an open area for optimization.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957382/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor958202"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 13, 2024 14:31 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/958202/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think this is an area where doing it better in hardware is likely to be more effective than doing it better in software. Fundamentally, hardware is in a better position to deal with cache coherency than software.<br>
+<p>
+Also Linus shot down replicated userspace pages, eg here:<br>
+<p>
+<a href="https://lore.kernel.org/all/CAHk-=whCf1PAs7D0oGwVLfuJYxCcKeb3ApTF8E+PHGNJE7UW+w@mail.gmail.com/">https://lore.kernel.org/all/CAHk-=whCf1PAs7D0oGwVLfuJYxCc...</a><br>
+<p>
+so I can only imagine his raptorous joy at the idea of NUMA replicated page tables <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/958202/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor958207"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 13, 2024 17:14 UTC (Sat)
+                               by <b>jcm</b> (subscriber, #18262)
+                              [<a href="/Articles/958207/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem with doing it better in hardware is that you still have to fundamentally pay the latency cost, unless you can perfectly predict what is going to be a PTE and prefetch it or preemptively stash it on the right node. I’ve done a lot of thinking about that over the past few years.<br>
+<p>
+Meanwhile there is some data in industry that suggests doing table replication (or just placing the tables and applying constraints on migration) is beneficial.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/958207/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor958208"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 13, 2024 17:17 UTC (Sat)
+                               by <b>jcm</b> (subscriber, #18262)
+                              [<a href="/Articles/958208/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But now the flip side of your argument. One of the likely motivations behind the original work that rmk did is likely that of SLC vs a true L3. If you have a design where (shared) cache lines can’t simultaneously be present in the outermost cache of both sockets then you really need a solution like Russell’s. The first step is to make sure your design can properly share lines between nodes. That’s the first step :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/958208/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor957972"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Kernel-text replication on NUMA systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2024 13:42 UTC (Thu)
+                               by <b>dcoutts</b> (subscriber, #5387)
+                              [<a href="/Articles/957972/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Cray were doing something like this in 2001 with their Linux kernels for their big NUMA systems. These were systems that had multiple boards in multiple cabinets and used custom memory router chips to stitch together the appearance of unified memory. So there were big differences in latency between nodes vs within a node.<br>
+<p>
+I'm sure the kernel code was replicated onto each node there. But more than that, they had some userspace libraries to allow user applications (e.g. MPI) to do the same thing: replicate the application code onto each node. But this was actually visible in the address space, no virtual memory trickery to make it look like it's always in the same place. The reason for that IIRC, was that the system had two modes: in one mode it would use the node's local TLB to cache entries for memory across the entire system, i.e. including mappings for memory on other nodes. In the "global memory" mode, each node's TLB would only cache entries for memory in the local node, and requests for remote memory would forward to the other node and use that node's TLB. This mode scaled much better for lots of nodes, but placed restrictions on the virtual memory layout: each node's memory had to live at a certain offset within memory because the high bits of each pointer corresponded to the node id. And so the process' text would be replicated at each node offset.<br>
+<p>
+I was doing an internship at Cray at the time and my task was to get GDB to understand this global memory case. I took advantage of the support for relocatable shared libs and pretended that the main executable text was a relocatable shared lib, and mapped it in multiple times for each node offset. It actually worked surprisingly well.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/957972/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

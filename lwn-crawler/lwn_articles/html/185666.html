@@ -1,0 +1,1294 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The kernel lock validator [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/185666/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/185078/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/185666/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The kernel lock validator</h1>
+<div class="Byline">[Posted May 31, 2006 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+Locking is a necessary evil in operating systems; without a solid locking
+regime, different parts of the system will collide when trying to access
+the same resources, leading to data corruption and general chaos.  But
+locking has hazards of its own; carelessly implemented locking can cause
+system deadlocks.  As a simple example, consider two locks
+<i>L<sub>1</sub></i> and <i>L<sub>2</sub></i>.  Any code which requires
+both locks must take care to acquire the locks in the right order.  If one
+function acquires <i>L<sub>1</sub></i> before <i>L<sub>2</sub></i>, but
+another function acquires them in the opposite order, eventually the system will
+find itself in a situation where each function has acquired one lock and is
+blocked waiting for the other - a deadlock.
+<p>
+A race condition like the one described above may be a one-in-a-million
+possibility, but, with computers, it does not take too long to exercise a
+code path a million times.  Sooner or later, a system containing this sort
+of bug will lock up, leaving its users wondering what is going on.  To
+avoid this sort of situation, kernel developers try to define rules for the
+order in which locks should be acquired.  But, in a system with many
+thousands of locks, defining a comprehensive set of rules is challenging at
+best, and enforcing them is even harder.  So locking bugs creep into the
+kernel, lurk until some truly inconvenient time, and eventually surprise
+some unsuspecting user.
+<p>
+
+Over time, the kernel developers have made increasing use of automated code
+analysis tools as those tools become available.  The latest such is <a
+href="http://lwn.net/Articles/185605/">the first version of the lock
+validator patch</a>, posted by Ingo Molnar.  This patch (a 61-part set,
+actually) adds a complex infrastructure to the kernel which can then be
+used to prove that none of the locking patterns observed in a running
+system could ever deadlock the kernel.
+<p>
+
+To that end, the lock validator must track real locking patterns in the
+kernel.  There is no point, however, in tracking every individual lock -
+there are thousands of them, but many of them are treated in exactly the
+same way by the kernel.  For example, every <tt>inode</tt> structure
+contains a spinlock, as does every <tt>file</tt> structure.  Once the
+kernel has seen how locking is handled for one <tt>inode</tt> structure, it
+knows how it will be handled for every <tt>inode</tt> structure.  So,
+somehow, the lock validator needs to be able to recognize that all
+spinlocks contained within (for example) the <tt>inode</tt> structure are
+essentially the same.
+<p>
+
+To this end, every lock in the system (including rwlocks and mutexes, now)
+is assigned a specific key.  For locks which are declared statically (for
+example, <tt>files_lock</tt>, which protects the list of open files), the
+address of the lock is used as the key.  Locks which are allocated
+dynamically (as most locks embedded within structures are) cannot be
+tracked that way, however; there may be vast numbers of addresses involved,
+and, in any case, all locks associated with a specific structure field
+should be mapped to a single key.  This is done by recognizing that these
+locks are initialized at run time, so, for example,
+<tt>spin_lock_init()</tt> is redefined as:
+<p>
+<pre>
+    # define spin_lock_init(lock)			\
+    do {						\
+	static struct lockdep_type_key __key;		\
+							\
+	__spin_lock_init((lock), #lock, &amp;__key);	\
+    } while (0)
+</pre>
+<p>
+
+Thus, for each lock initialization, this code creates a static variable
+(<tt>__key</tt>) and uses its address as the key identifying the type of
+the lock.  Since any particular type of lock tends to be initialized in a
+single place, this trick associates the same key with every lock of the
+same type.
+
+<p>
+
+Next, the validator code intercepts every locking operation and performs a
+number of tests:
+<p>
+<ul>
+<li> The code looks at all other locks which are already held when a new
+     lock is taken.  For all of those locks, the validator looks for a past
+     occurrence where any of them were taken <i>after</i> the new lock.  If
+     any such are found, it indicates a violation of locking order rules,
+     and an eventual deadlock.
+<p>
+<li> A stack of currently-held locks is maintained, so any lock being 
+     released should be at the top of the stack; anything else means that
+     something strange is going on.
+<p>
+<li> Any spinlock which is acquired by a hardware interrupt handler can
+     never be held when interrupts are enabled.  Consider what happens when
+     this rule is broken.  A kernel function, running in process context,
+     acquires a specific lock.  An interrupt arrives, and the associated
+     interrupt handler runs on the same CPU; that handler then attempts to
+     acquire the same lock.  Since the lock is unavailable, the handler
+     will spin, waiting for the lock to become free.  But the handler has
+     preempted the only code which will ever free that lock, so it will
+     spin forever, deadlocking that processor.
+     <p>
+     To catch problems of this type, the validator records two bits of
+     information for every lock it knows about: (1)&nbsp;whether the lock
+     has ever been acquired in hardware interrupt context, and
+     (2)&nbsp;whether the lock is ever held by code which runs with
+     hardware interrupts enabled.  If both bits are set, the lock is being used
+     erroneously and an error is signaled.
+<p>
+<li> Similar tests are made for software interrupts, which present the same
+     problems.
+</ul>
+<p>
+
+The interrupt tests are relatively straightforward, requiring just four
+bits of information for each lock (though the situation is a little more
+complicated for rwlocks).  But the ordering tests require a bit more work.
+For every known lock key, the validator maintains two lists.  One of them
+contains all locks which have ever been held when the lock of interest
+(call it <i>L</i>) is
+acquired; it thus contains the keys of all locks which might be acquired
+before <i>L</i>. The other list (the "after" list)
+holds all locks acquired while the <i>L</i> is held.  These two lists thus
+encapsulate the proper ordering of how those other locks should be acquired
+relative to <i>L</i>.
+
+<p>
+Whenever <i>L</i> is
+acquired, the validator checks whether any lock on the "after" list
+associated with <i>L</i> is already held.  It should not find any, since
+all locks on the "after" list should only be acquired after acquiring
+<i>L</i>.   Should it find a lock which should not be held, an error is
+signaled.  The validator code also takes the "after" list of <i>L</i>, connects it
+with the "before" lists of the currently-held locks, and convinces itself
+that there are no ordering or interrupt violations anywhere within that chain.
+If all the tests pass, the validator updates the various "before" and
+"after" lists and the kernel continues on its way.
+<p>
+
+
+Needless to say, all this checking imposes a certain amount of overhead; it
+is not something which one will want to enable on production kernels.  It
+is not quite as bad as one might expect, however.  As the kernel does its
+thing, the lock validator maintains its stack of currently-held locks.  It
+also generates a 64-bit hash value from that series of locks.  Whenever a
+particular combination of locks is validated, the associated hash value is
+stored in a table.  The next time that lock sequence is encountered, the
+code can find the associated hash value in the table and know that the
+checks have already been performed.  This hashing speeds the process
+considerably. 
+<p>
+
+Of course, there are plenty of exceptions to the locking rules as
+understood by the validator.  As a result, a significant portion of the
+validator patch set is aimed at getting rid of false error reports.  For
+example, the validator normally complains if more than one lock with the
+same key is held at the same time - doing so is asking for deadlocks.
+There are situations, however, where this pattern is legitimate.  For
+example, the block subsystem will often lock a block device, then lock a
+partition within that device.  Since the partition also looks like a block
+device, the validator signals an error.  To keep that from happening, the
+validator implements the notion of lock "subtypes."  In this case, locks on
+partition devices can be marked with a different subtype, allowing their
+usage to be validated properly.  This marking is done by using new versions
+of the locking functions (<tt>spin_lock_nested()</tt>, for example) which
+take a subtype parameter.
+<p>
+
+The lock validator was added to <a
+href="http://lwn.net/Articles/185572/">2.6.17-rc5-mm1</a>, so interested
+people can play with it.  Waiting for another -mm release might not be a
+bad idea, however; there has since been a fairly long series of validator
+fixes posted.
+<p>
+
+
+The key point behind all of this is that deadlock situations can be found
+without having to actually make the kernel lock up.  By watching the
+sequences in which locks are acquired, the validator can extrapolate a much
+larger set of possible sequences.  So, even though a particular deadlock
+might only happen as the result of unfortunate timing caused by a specific
+combination of strange hardware, a rare set of configuration options, 220V
+power, a slightly flaky video controller, Mars transiting through Leo, an
+old version of <tt>gcc</tt>, an application which severely stresses the
+system (<tt>yum</tt>, say), and an especially bad Darl McBride hair day,
+the validator has a good chance of catching it.  So this code should result
+in a whole class of bugs being eliminated from the kernel code base; that
+can only be a good thing.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Development_tools-Kernel_debugging">Development tools/Kernel debugging</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Lockdep">Lockdep</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Spinlocks">Spinlocks</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/185666/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor185685"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 3:28 UTC (Wed)
+                               by <b>walken</b> (subscriber, #7089)
+                              [<a href="/Articles/185685/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      This may be a dumb question, but why not assign an explicit rank to every lock type ?<br>
+<p>
+That way, the lock ranks double as documentation of the lock ordering.<br>
+<p>
+(I'm using this quite successfully at work for a kernel-type project, though not related to linux).<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185685/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185691"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 6:22 UTC (Wed)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/185691/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      the list of locks is not static. <br>
+<p>
+remember basic and line numbers? no matter how you started your numbering scheme you eventually ran into trouble.<br>
+<p>
+David Lang<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185691/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor186886"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2006 4:13 UTC (Fri)
+                               by <b>slamb</b> (guest, #1070)
+                              [<a href="/Articles/186886/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      The list of lock <i>keys</i> is static, and that's what would get assigned ranks. I quote from the 
+article:
+
+<blockquote>Locks which are allocated dynamically (as most locks embedded within structures 
+are) 
+[...] should be mapped to a single key. [...] Thus, for each lock initialization, this code creates a 
+static variable (__key) and uses 
+its address as the key identifying the type of the lock. Since any particular type of lock tends to 
+be 
+initialized in a single place, this trick associates the same key with every lock of the same 
+type.</blockquote>
+
+<p>I also work in a project which assigns ranks manually. 
+
+<p>Disadvantage: especially given the number of locks in the Linux kernel, it'd be a large initial 
+effort to go through and create a ranking consistent with all the approved locking orders. (On the 
+other hand, not doing it probably means struggling with this list over and over without it actually 
+being written down anywhere.)
+
+<p>Advantage: you wouldn't even need to run through two code paths to know that they 
+can deadlock - just the one you've defined as wrong.
+
+<p>Advantage: it'd remove <i>all</i> the heaviness of the lock validator. There's no need for 
+the "before" and "after" lists; the rank defines them. The stack could be just a bit array - small 
+enough that it's probably practical to preallocate its full extent on thread creation. Thus, the lock 
+validator would not add potential out of memory failures, and it'd run quickly. There'd be no 
+reason not to always have it on.
+
+<p>(Actually, I'm not sure how strict the same-key locking stuff (<tt>spin_lock_nested</tt> 
+and such) is. To track those, a fancier stack might still be necessary.)
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/186886/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor185689"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OT: The # operator?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 6:25 UTC (Wed)
+                               by <b>Los__D</b> (guest, #15263)
+                              [<a href="/Articles/185689/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I thought that I knew C pretty good, but I NEVER saw a # operator before (Except for preproccesor statements).<br>
+<p>
+What does that #lock in the call do?<br>
+<p>
+Dennis<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185689/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185694"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OT: The # operator?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 6:33 UTC (Wed)
+                               by <b>Los__D</b> (guest, #15263)
+                              [<a href="/Articles/185694/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Doh, just preprocessor argument-&gt;string conversion, nevermind, too early in the morning for me ;)<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185694/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor185855"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OT: The # operator?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2006 10:20 UTC (Thu)
+                               by <b>Octavian</b> (guest, #7462)
+                              [<a href="/Articles/185855/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      aka "stringification"<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185855/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor211658"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">OT: The # operator?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 29, 2006 3:05 UTC (Wed)
+                               by <b>zlo</b> (guest, #41952)
+                              [<a href="/Articles/211658/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Tnx very useful info ofr me<a rel="nofollow" href="http://doorkiller.blogspot.com">!</a>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/211658/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor212070"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam comment</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2006 17:27 UTC (Thu)
+                               by <b>bronson</b> (subscriber, #4806)
+                              [<a href="/Articles/212070/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      The parent post is clearly spam.  Is this the first spammy comment to remain on LWN for any significant amount of time?<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/212070/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor507923"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Spam comment</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2012 14:29 UTC (Tue)
+                               by <b>chrisr</b> (subscriber, #83108)
+                              [<a href="/Articles/507923/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It might be the most long-lived :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/507923/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor185693"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 6:28 UTC (Wed)
+                               by <b>flewellyn</b> (subscriber, #5047)
+                              [<a href="/Articles/185693/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Y'know, it's funny.  Back in college, in my Operating Systems course, we learned that it was <br>
+impossible to design code which would reliably detect all possible deadlock conditions in a <br>
+kernel.<br>
+<p>
+We also learned that schedulers could not run in constant time.<br>
+<p>
+That's twice now that Ingo Molnar has basically rewritten the literature on us.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185693/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185698"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 6:54 UTC (Wed)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/185698/">Link</a>] (12 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Umm, the validator doesn't detect all *possible* deadlock conditions -- just those that, given current and past locking history, might occur. It won't find tomorrow's deadlock if the code that could possibly cause it didn't run today.<br>
+<p>
+Oh, and the scheduler doesn't run in constant time. It just delegates the job to small trivial chunks that run when each process starts+stops using the CPU, so technically it's still O(n), not O(1).<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185698/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185703"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: detecting all possible deadlock conditions</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 7:17 UTC (Wed)
+                               by <b>mingo</b> (guest, #31122)
+                              [<a href="/Articles/185703/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Well, the validator does reduce the incredibly complex QA task of "trigger all possible locking races that can lead to deadlocks, assuming an arbitrary number of CPUs and interrupt sources" to "trigger all locking codepaths at least once".<br>
+<p>
+In other words, we've reduced a highly probabilistic parallel QA (and manual code review) task to a comparatively _much_ simpler task of serial code coverage.<br>
+<p>
+But yes, to increase the 'reach' of the formal proof of correctness we need to increase code coverage during testing. Projects like LTP do that systematically, they use kernel instrumentation and visualization tools to see which code wasnt executed yet and create testcases to trigger it. Plus chaos helps us too: if LTP doesnt trigger it, users will eventually - and will likely not trigger the deadlock itself, but only the codepath that makes it possible. (hence there is much better debug info and a still working system.)<br>
+<p>
+Put differently: it's not bad idea to run through every possible branch of code at least once anyway ;-) If some code is never triggered in practice, why is the code there and how was it tested to begin with? There is a world of a difference between code that is never executed even once and narrow 1-instruction races that need many CPUs to even trigger.<br>
+<p>
+So i'd say "total locking correctness" is not an impossible dream anymore, but is attached to another effort (code coverage) that we want to make as complete as possible anyway.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185703/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185742"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">testing and code coverage</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 14:21 UTC (Wed)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/185742/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <i>Put differently: it's not bad idea to run through every possible branch of code at least once anyway ;-) If some code is never triggered in practice, why is the code there and how was it tested to begin with?</i>
+<p>First, probably it never has been tested systemmatically; this problem is endemic to the Linux development process.  Second, the problem is not only "branches of code [coverage of basic blocks]."  The problem is conditional execution paths through multiple basic blocks, including re-convergent fanout (correlated conditions) and partial correctness with "don't care" conditions.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185742/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185746"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">testing and code coverage</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 14:34 UTC (Wed)
+                               by <b>mingo</b> (guest, #31122)
+                              [<a href="/Articles/185746/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      
+<i> First, probably it never has been tested systemmatically;
+</i>
+
+<p> i think the answer to that is in the section you apparently overlooked:
+
+<p><i> Projects like LTP do that <b>systematically</b>, they use kernel instrumentation and visualization tools to see which code wasnt executed yet and create testcases to trigger it. Plus chaos helps us too: if LTP doesnt trigger it, users will eventually - and will likely not trigger the deadlock itself, but only the codepath that makes it possible. (hence there is much better debug info and a still working system.) </i>
+
+<p> and thus this IMO misleading proposition results in a misleading conclusion:
+
+<p>
+<i> this problem is endemic to the Linux development process.
+</i>
+
+<p> ;-)
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185746/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185754"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">LTP has a long way to go</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 15:12 UTC (Wed)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/185754/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I did not overlook "Projects like LTP do that systematically."  The Linux Testing Project is a drop in the bucket: far too little.  Given its size, the kernel should have over ten thousand individual tests that are run and analyzed [automation helps!] before each release.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185754/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185778"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">LTP has a long way to go</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 15:55 UTC (Wed)
+                               by <b>mingo</b> (guest, #31122)
+                              [<a href="/Articles/185778/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <i> I did not overlook "Projects like LTP do that systematically." The Linux Testing Project is a drop in the bucket: far too little. Given its size, the kernel should have over ten thousand individual tests that are run and analyzed [automation helps!] before each release. </i>
+<p>
+the LTP testsuite's 'testcases/' directory sports 7000+ files, most of which are individual testcases. Testcase files often contain more than 1 testcase. LTP is being run not "before each release" but on Linus' nightly GIT trees - and yes, it's all automated.
+<p>
+furthermore, there are random automated testing efforts as well like scrashme, which can (and do) hit bugs by chance as well.
+<p>
+while i dont claim that LTP is perfect (if it were we'd have no bugs in the kernel), it is certainly alot more than "a drop in the bucket".
+<p>
+but i digress ...
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185778/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor186465"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">LTP has a long way to go</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2006 19:34 UTC (Tue)
+                               by <b>Blaisorblade</b> (guest, #25465)
+                              [<a href="/Articles/186465/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      The problem of LTP is that it, in itself, tests syscall semantics, and many tests are unit tests. They can help in some cases (especially for strange arches, like say UML) - and they're very useful when a functionality is introduced, especially if the implementation is complex (that's my experience - I wrote together the implementation and a very complex testcase of it in one project).<br>
+<p>
+nanosleep() tests aren't going to catch many bugs - nanosleep() uses are very simple.<br>
+<p>
+But, say, run LTP on every possible drivers set, with a dmraid setup on "normal" RAID volumes on IDE and SCSI and SATA physical disks (since many bugs are in hardware drivers)...<br>
+<p>
+Or combine networking tests with analisys of packet capture data and match sent data with on-wire data (supposing it's possible - you actually need a full TCP/IP stack to run on captured data, with additional correctness checking features)...<br>
+<p>
+Then you'll find real bugs. However this starts being difficult.<br>
+<p>
+Another possibility is to extract testcases from atypical applications.<br>
+<p>
+UserModeLinux (on which I work) has been an excellent test-case against ptrace behaviour.<br>
+<p>
+It found subtle bugs in ptrace existing in three kernel releases, in the recent past (one bug lived for 2.6.9 and 2.6.10, affecting security; the other affected x86-64 from 2.6.16.5 to 2.6.16.19).<br>
+<p>
+But in this case, who coded the patches didn't run it.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/186465/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor185749"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">testing and code coverage</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 14:54 UTC (Wed)
+                               by <b>mingo</b> (guest, #31122)
+                              [<a href="/Articles/185749/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <i>Second, the problem is not only "branches of code [coverage of basic blocks]." The problem is conditional execution paths through multiple basic blocks, including re-convergent fanout (correlated conditions) and partial correctness with "don't care" conditions.</i>
+
+<p>
+yes - code coverage and testing is alot more than just basic coverage of all existing code.
+
+<p>
+but coverage that triggers locking is alot simpler than full coverage, because locks are almost always taken in simple ways, without too many branches. So while in theory code like this:
+
+<pre>
+
+void function1(unsigned long mask)
+{
+        if (mask &amp; 0x00000001)
+                spin_lock(&amp;lock0);
+        if (mask &amp; 0x00000002)
+                spin_lock(&amp;lock1);
+        if (mask &amp; 0x00000004)
+                spin_lock(&amp;lock2);
+        if (mask &amp; 0x00000008)
+                spin_lock(&amp;lock3);
+        if (mask &amp; 0x00000010)
+                spin_lock(&amp;lock4);
+...
+        if (mask &amp; 0x80000000)
+                spin_lock(&amp;lock31);
+}
+
+</pre>
+
+<p>
+could exist in the kernel and would require 4 billion values of 'mask' to cycle through all the possible locking scenarios, in practice the kernel is full of much simpler locking constructs:
+
+<pre>
+void function2(unsigned long mask)
+{
+        spin_lock(&amp;lock);
+        ...
+        spin_unlock(&amp;lock);
+}
+
+</pre>
+
+<p>
+where covering the function once is probably enough to map its locking impact. In fact, "tricky", non-straight locking code is being frowned upon from a review and quality POV, which too works in favor of validation quality. To stay with the function1() example, such code will very likely be rejected at a very early review stage.
+
+<p>and finally, even theoretical full code coverage is alot simpler than the possible combinations of codepaths on an multiprocessor system that could trigger deadlocks.
+
+<p>naturally, being a dynamic method, the lock validator can only claim correctness about codepaths it actually observes (any other code doesnt even exist for it), and thus it still depends on how frequently (and with what memory state) those codepaths get triggered.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185749/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor185753"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: detecting all possible deadlock conditions</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 15:08 UTC (Wed)
+                               by <b>NAR</b> (subscriber, #1313)
+                              [<a href="/Articles/185753/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <I>if LTP doesnt trigger it, users will eventually - and will likely not trigger the deadlock itself, but only the codepath that makes it possible. (hence there is much better debug info and a still working system.)</I>
+<P>
+If this feature is turned on in the user's kernel - isn't the performance hit too much for users to keep this configuration option turned on?
+<P>
+<I>If some code is never triggered in practice, why is the code there and how was it tested to begin with?</I>
+<P>
+Error handling (especially hardware-related error handling) might be triggered extremely rarely, but I don't think it should be thrown out. The code could be tested by manually setting some error flag, but obviously the setting of this flag is not included in the production kernel.
+<P>
+<CENTER>Bye,NAR</CENTER>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185753/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor186698"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: detecting all possible deadlock conditions</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2006 8:53 UTC (Thu)
+                               by <b>jmansion</b> (guest, #36515)
+                              [<a href="/Articles/186698/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt;In other words, we've reduced a highly probabilistic</font><br>
+<font class="QuotedText">&gt;parallel QA (and manual code review) task to a</font><br>
+<font class="QuotedText">&gt;comparatively _much_ simpler task of serial code coverage.</font><br>
+<p>
+Hardly.  If you can legitimately *ever* lock two objects of the same type then there will be an exception that turns off the 'false positive' that will also turn off checking whether you acquire A then B and also on some code paths B then A.  Which is exactly the sort of deadlock you normally get in a database server, for example.<br>
+<p>
+Which is not to say that the approach isn't useful, just that its not a panacea.  It would have been handy to have a compare/contrast with FreeBSD's WITNESS facility.<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/186698/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor185709"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: O(1) scheduler</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 7:55 UTC (Wed)
+                               by <b>mingo</b> (guest, #31122)
+                              [<a href="/Articles/185709/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <i> Oh, and the scheduler doesn't run in constant time. It just delegates the job to small trivial chunks that run when each process starts+stops using the CPU, so technically it's still O(n), not O(1). </i>
+
+<p>this statement doesnt parse for me. Sure, if you execute an O(1) operation N times that makes it O(N). What matters is the overhead of context-switching and wakeup, and those are O(1)!
+
+<p>just look at an example: sys_getpid(), the simplest system-call in existence, does:
+
+<p><b>
+        return current->tgid;
+</b>
+
+<p>that's as O(1) as it gets - a handful of instructions. But by your argument, since applications may execute getpid() lots of times, in reality it's O(N)? By that argument there would be code at all that would qualify as O(1) code!
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185709/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185711"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: O(1) scheduler</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 8:08 UTC (Wed)
+                               by <b>frankie</b> (subscriber, #13593)
+                              [<a href="/Articles/185711/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      The O(1) for the scheduler refers the number of processes. The scheduling time is indeed not dependent on the number of processes. That's all.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185711/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor185719"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 9:19 UTC (Wed)
+                               by <b>simlo</b> (guest, #10866)
+                              [<a href="/Articles/185719/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      The old scheduler was O(number of processes on the run-queue). The scheduler in 2.6 is O(number of priorities)=O(140)=O(1).<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185719/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor185700"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 7:09 UTC (Wed)
+                               by <b>piman</b> (guest, #8957)
+                              [<a href="/Articles/185700/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      In fact it's trivial to identify all functions that could deadlock (if you heard otherwise, maybe you should've been paying more attention in class :). What's impossible is identifying all and only those functions that deadlock.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185700/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor185699"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 6:59 UTC (Wed)
+                               by <b>mingo</b> (guest, #31122)
+                              [<a href="/Articles/185699/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Small additional thought to subtype paragraph: while subtypes do fix false positives, their role isnt just to get around exceptions - their role is to correctly map recursive locking semantics.<br>
+<p>
+That means that the "special rules" added for the sake of lockdep (via the use of spin_lock_nested() APIs, etc.) act as a formal specification of the locking rules, and the validator checks those rules against actual behavior.<br>
+<p>
+To stay with the partitions example: if for example some kernel code locks a component partition before a container partition then the validator will detect this deadlock scenario.<br>
+<p>
+So subtypes are not a watering down of the "proof of correctness", they are more like a mechanism to "program by specification" and to let the validator check against that specification. For non-recursive locking, the validator can build the specification automatically.<br>
+<p>
+(besides subtypes, explicit type keys are another way to specify locking semantics. This all gets us one step closer to a more formal programming model and to a more correct kernel.)<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185699/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185720"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 9:35 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/185720/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      ... and now reiser4 turns up with a tree of locks where each rank may be taken within the rank above safely, but where there are a potentially unbounded number of ranks...<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185720/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor186428"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2006 16:07 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/186428/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Hm, on rereading that's not what it does. Sorry.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/186428/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor185712"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 8:11 UTC (Wed)
+                               by <b>pointwood</b> (guest, #2814)
+                              [<a href="/Articles/185712/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I didn't know that Darl McBride having a bad hair day could make my kernel deadlock - you learn something new everday :p<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185712/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185734"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 31, 2006 13:10 UTC (Wed)
+                               by <b>kirkengaard</b> (guest, #15022)
+                              [<a href="/Articles/185734/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Yes ... when he can't get it just so, he goes out and kills some butterflies out of frustration, changing the state of the universe's entropy pool, and unpredictably modifying system behavior.  The occasional kernel deadlock is merely a symptom, though it poses a supremely difficult debugging challenge.  ;)<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185734/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor185833"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The kernel lock validator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2006 5:10 UTC (Thu)
+                               by <b>walken</b> (subscriber, #7089)
+                              [<a href="/Articles/185833/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Just look how Darl can deadlock a court case...<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185833/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor185837"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Any results?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2006 6:32 UTC (Thu)
+                               by <b>man_ls</b> (guest, #15091)
+                              [<a href="/Articles/185837/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I'm surprised that nobody has asked this before. Solutions that look well in theory are, well, just theoretical; but does it work in practice? I assume that someone, at least the author, has had it running for some time now. How does it behave? Has anyone found potential deadlocks on running code, already? Otherwise, are there too few results, too many false positives?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185837/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185887"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Any results?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2006 13:17 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/185887/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Yes, there have been some real deadlocks discussed on the kernel list.  See also <a href="http://vger.kernel.org/~davem/cgi-bin/blog.cgi/2006/05/30#lock_validator">David Miller's posting</a>, where he notes that it found a number of networking bugs while it was being developed.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185887/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor185910"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Any results?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2006 14:14 UTC (Thu)
+                               by <b>arjan</b> (subscriber, #36785)
+                              [<a href="/Articles/185910/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      the ratio of "false positive" and real bugs is about 1:1 so far, where the false positives generally are doing some fishy-but-happens-to-be-ok locking most of the time. The false positives generally require more instrumentation in the code for the exact locking rules, which is good for documentation purposes anyway<br>
+<p>
+I've lost track but we're well over the count of 20 with real bugs found so far (several of these got fixed in mainline before lockdep got posted the other day so it's a bit hard to count)<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185910/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor185998"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Any results?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2006 0:33 UTC (Fri)
+                               by <b>linportal</b> (guest, #38148)
+                              [<a href="/Articles/185998/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      What I have missed in all this is the address to forward detected bugs to. What about this one: <a rel="nofollow" href="http://linux.inet.hr/kernel_lock_validator.html#comment">kseriod deadlock</a>? Is it real or false positive?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/185998/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor186128"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Any results?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2006 11:59 UTC (Sat)
+                               by <b>mingo</b> (guest, #31122)
+                              [<a href="/Articles/186128/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      That's a false positive, caused by recursive locking in the serio code. Arjan has posted the fix:
+
+<pre>
+--- linux/drivers/input/serio/libps2.c.orig
++++ linux/drivers/input/serio/libps2.c
+@@ -177,7 +177,7 @@ int ps2_command(struct ps2dev *ps2dev, u
+                return -1;
+        }
+
+-       mutex_lock(&amp;ps2dev->cmd_mutex);
++       mutex_lock_nested(&amp;ps2dev->cmd_mutex, SINGLE_DEPTH_NESTING);
+
+        serio_pause_rx(ps2dev->serio);
+        ps2dev->flags = command == PS2_CMD_GETID ? PS2_FLAG_WAITID : 0;
+</pre>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/186128/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor186182"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Any results?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2006 3:54 UTC (Sun)
+                               by <b>nevets</b> (subscriber, #11875)
+                              [<a href="/Articles/186182/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <i>the ratio of "false positive" and real bugs is about 1:1 so far, where the false positives generally are doing some fishy-but-happens-to-be-ok locking most of the time.</i>
+
+<p>
+And as Ingo already pointed out.  The <i>fishy-but-happens-to-be-ok</i> are now nicely documented by the work arounds to (in akpm's words) <b>make-lockdep-shut-up</b> patches. ;)
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/186182/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2006, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

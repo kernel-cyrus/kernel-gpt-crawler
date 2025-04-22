@@ -1,0 +1,1277 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>timerfd() and system call review [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/245533/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/244842/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/245533/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>timerfd() and system call review</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 14, 2007</br>
+           </div>
+One of the fundamental principles of Linux kernel development is that
+user-space interfaces are set in stone.  Once an API has been made
+available to user space, it must, for all practical purposes, be supported
+(without breaking applications) indefinitely.  There have been times when
+this rule has been broken, but, even in the areas known for trouble (sysfs,
+for example), the number of times that the user-space API has been broken
+has remained relatively small.
+<p>
+Now consider the <tt>timerfd()</tt> system call, which was added to the
+2.6.22 kernel.  The purpose of this call is to allow an application to
+obtain a file descriptor to use with timer events, eliminating the need to
+use signals.  The system call prototype, as found in 2.6.22, is:
+<p>
+<pre>
+    long timerfd(int fd, int clockid, int flags, struct itimerspec *utimer);
+</pre>
+<p>
+If <tt>fd</tt> is <tt>-1</tt>, a new timer file descriptor will be created
+and returned to the application.  Otherwise, a timer will be set using the
+given <tt>clockid</tt> for the time specified in <tt>utimer</tt>.  The
+<tt>TFD_TIMER_ABSTIME</tt> flag can be set to indicate that an absolute
+timer expiration is needed; otherwise the specified time is relative to the
+current time.  The <tt>flags</tt> argument can also be used to request a
+repeating timer.
+<p>
+There is another aspect to the <tt>timerfd()</tt> API, though: a read on
+the timer file descriptor will return an integer value saying how many
+times the timer has fired since the previous read.  If no timer expirations
+have happened, the <tt>read()</tt> call will block.  In the 2.6.22 kernel,
+the returned value was 32 bits (on all architectures).  It has since been
+decided that a 64-bit value would have been more appropriate, and a patch
+making that change has been merged for 2.6.23.  The 2.6.22.2 stable update
+also contained the API change.
+<p>
+That is not the full story, though.  Michael Kerrisk, while writing manual
+pages for the new system call, <a href="/Articles/245544/">encountered a
+couple of other shortcomings</a> with the interface.  In particular, it is
+not possible to ask the system for the amount of time remaining on a
+timer.  Other timer-related system calls allow for this sort of query,
+either as a separate operation or when changing a timer.  Michael thought
+that the <tt>timerfd()</tt> system call should work similarly to those
+which came before.
+<p>
+Michael has now <a href="http://lwn.net/Articles/245373/">posted a
+patch</a> fixing up the <tt>timerfd()</tt> interface.  With this patch, the
+system call would now look like this:
+<p>
+<pre>
+	long timerfd(int fd, int clockid, int flags, struct itimerspec *utimer,
+                     struct itimerspec *outmr);
+</pre>
+<p>
+The new <tt>outmr</tt> pointer must be <tt>NULL</tt> when the file
+descriptor is first being created.  In any other context, it will be used
+to return the amount of time remaining at any <tt>timerfd()</tt> call.  So
+user space can query a timer non-destructively by calling
+<tt>timerfd()</tt> with a <tt>NULL</tt> value for <tt>utimer</tt>.  If both
+timer pointers are non-<tt>NULL</tt>, the timer will be set to
+<tt>utimer</tt>, with its previous value being returned in <tt>outmr</tt>.
+<p>
+
+This is, of course, an entirely incompatible change to an API which has
+already been exported to user space; any code which is using
+<tt>timerfd()</tt> now will break if it is merged.  By the rules, such a
+change should not be merged, but it appears that there is a good chance
+that the rules will be bent this time around.  One can argue that, in a
+real sense, the API has not yet been made available to user space: there
+has been no glibc release which supports <tt>timerfd()</tt>.  The number
+of applications using this system call must be quite low - if, in fact,
+there are any at all.  So a change at this point, especially if it can get
+into 2.6.23, will improve the interface without actually causing any
+user-space pain.
+
+<p>
+
+Fixing <tt>timerfd()</tt> might still be possible.  But there is no
+denying that we would be better off if we could eliminate this kind of API
+problem before it gets into a stable kernel release and possibly has to be
+supported for many years.  Therein lies the real problem: system calls (and
+other user-space API features) are being added to the kernel at a high
+rate, but review of these changes tends to lag behind.  Given the
+difficulty of fixing user-space API mistakes, it would seem that the review
+standards for API additions should be especially high.
+Causing that to happen will not be easy, though; reviewer attention is a
+scarce resource throughout the free software community.  
+
+<p>
+An idea which has been raised in the past is to explicitly mark new
+user-space interfaces as being in a volatile "beta" state.  For as long as
+the API remains in that state, the kernel developers are free to change
+it.  Applications would, during this period, rely in the API at their
+peril.  This idea has been rejected in the past, though; it is seen as a
+way of avoid proper thought ahead of merging a new API into the kernel.
+Assuming that view still holds, another way will have to be found.
+<p>
+
+One part of the
+solution might well be seen in how the <tt>timerfd()</tt> problems came to
+light.  Michael has demonstrated something your editor has also
+encountered a number of times: one of the best ways to find shortcomings in
+an API is to attempt to document it comprehensively.  If the kernel
+community were to resolve that it would not merge user-space API features
+in the absence of complete documentation, it might just provide the
+necessary incentive to get that last review pass done.
+<p>
+
+This idea seems likely to come up at next month's kernel summit (for which
+<a
+href="http://thunker.thunk.org/pipermail/ksummit-2007-discuss/2007-August/000398.html">a
+preliminary agenda</a> has just been posted).  How it will be received is
+anybody's guess; writing documentation appears to be a task so challenging
+that even kernel hackers fear to try it.  This challenge may be worth
+taking up, though, if the reward is few long-lasting user-space API
+problems in the future.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Development_model-User-space_ABI">Development model/User-space ABI</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#timerfd">timerfd()</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#User-space_API">User-space API</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/245533/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor245569"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2007 18:30 UTC (Tue)
+                               by <b>mhelsley</b> (guest, #11324)
+                              [<a href="/Articles/245569/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      "one of the best ways to find shortcomings in an API is to attempt to document it comprehensively"<br>
+<p>
+True. However it's not nearly as good when the person involved in writing the code implementing the API also writes the documentation -- that does not strain underlying assumptions in the way that thorough review and proper documentation processes tend to.<br>
+<p>
+So perhaps once the API is in glibc and documented by another party it could be considered "stable".<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245569/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245619"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2007 1:24 UTC (Wed)
+                               by <b>mkerrisk</b> (subscriber, #1978)
+                              [<a href="/Articles/245619/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <em>"one of the best ways to find shortcomings in an API is to attempt to document it comprehensively"
+<p>
+True. However it's not nearly as good when the person involved in writing the code implementing the API also writes the documentation -- that does not strain underlying assumptions in the way that thorough review and proper documentation processes tend to.
+</em>
+<p>
+Agreed.  However, I've been trying to encourage kernel developers to supply the beginnings of a man page that I then review.  Even that is a very fruitful process, when it happens.  But the ideal is of course as you suggest a much better review and documentation process involving kernel developers.
+
+<p>
+<em>
+So perhaps once the API is in glibc and documented by another party it could be considered "stable".</em>
+<p>
+There are many problems with this idea: some APIs never make it to glibc; sometimes glibc provides a wrapper that modifies the API; sometimes documentation does not arrive for a very long time...
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245619/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor246046"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2007 18:16 UTC (Sat)
+                               by <b>landley</b> (guest, #6789)
+                              [<a href="/Articles/246046/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Two points:<br>
+<p>
+1) Before a third party can document an API, they have to learn how to <br>
+use it, which is a chicken and egg problem (especially if you're trying <br>
+to be thorough).  If nothing else it's insanely time consuming.<br>
+<p>
+2) I don't pay much attention to glibc, I pay attention to uClibc.  I'll <br>
+happily document what uClibc implements, and ignore the rest because if <br>
+uClibc doesn't implement it, it really can't be all that important.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/246046/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor246069"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2007 7:09 UTC (Sun)
+                               by <b>mkerrisk</b> (subscriber, #1978)
+                              [<a href="/Articles/246069/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <em>
+1) Before a third party can document an API, they have to learn how to
+use it, which is a chicken and egg problem (especially if you're trying
+to be thorough). If nothing else it's insanely time consuming.
+</em>
+<p>
+Doing it that way would be.  Obviously efficiently written documentation needs to be collaborative, either written by the developer, and improved via critique from peers and/or individuals well versed in writing documentation, or written by a third party with help from the developer, who explains the API.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/246069/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor246091"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2007 5:20 UTC (Mon)
+                               by <b>landley</b> (guest, #6789)
+                              [<a href="/Articles/246091/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      You didn't follow the saga of my attempts to document the subset of sysfs <br>
+used to populate /dev.  Responses I got included:<br>
+<p>
+A) Contradictory information from different developers.<br>
+B) Corrections consisting of "that's wrong" with no hint about the <br>
+approved way to do it.<br>
+C) Being repeatedly told I was an idiot and not worth their time.<br>
+D) Questioning why anyone would want to document this when someone's <br>
+already written a program using it.<br>
+E) Being repeatedly told "there is no stable API", I.E. outright <br>
+resistance to documenting this area because they didn't want to lose the <br>
+freedom to change it on a whim.<br>
+<p>
+I also got some useful information, but both of the developers I need to <br>
+talk to are essentially spam-blocking me now.  Oh well.<br>
+<p>
+Also, although development and debugging parallelize just fine, editorial <br>
+functions don't.  This is why you generally don't have multiple <br>
+maintainers whose jurisdictions overlap unless there's a clear hierarchy <br>
+of who reports to who.  Writing documentation to be read by end users has <br>
+a significant editorial function.<br>
+<p>
+Rob<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/246091/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor245645"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2007 15:18 UTC (Wed)
+                               by <b>dougg</b> (guest, #1894)
+                              [<a href="/Articles/245645/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      In the 9 years that I have designed, implemented, supported and documented one particular kernel API not one of the thousands of emails that I have received concerning that API was an offer to write documentation.<br>
+<p>
+I did notice that the glibc folks removed some documentation from the header file that defines the API. I'm not aware that they put that documentation anywhere else. And someone recently noted the discrepancy between the glibc distributed header and the kernel driver header. The solution proposed was to remove the documentation from the driver header as well.<br>
+<p>
+Now I get to sit back and watch someone else go through a similar process with the bsg driver. And that driver is going to be released with an API that has pending changes (at least 6 months old) held up due to kernel bureaucracy.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245645/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor246043"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2007 17:34 UTC (Sat)
+                               by <b>landley</b> (guest, #6789)
+                              [<a href="/Articles/246043/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Which API are you referring to?<br>
+<p>
+(Someone who writes documentation.)<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/246043/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor245570"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2007 18:49 UTC (Tue)
+                               by <b>bronson</b> (subscriber, #4806)
+                              [<a href="/Articles/245570/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; it is seen as a way of avoid proper thought ahead of merging a new API into the kernel.</font><br>
+<p>
+The problem with this is that no amount of proper thinking will shake out everything.  Comprehensive documentation goes a long way, certainly, but some problems will only come to light once people actually start using an interface.<br>
+<p>
+The kernel team is really good at following convention and knocking bad patches down; I don't see any reason to believe that a beta period would turn into a crutch to avoid proper thinking.  Are there any other reasons a beta period would be bad?  It just seems like common sense to me!<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245570/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245574"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2007 19:00 UTC (Tue)
+                               by <b>musicon</b> (guest, #4739)
+                              [<a href="/Articles/245574/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Perhaps allowing interface changes to remain in "beta" through the first released kernel containing them, and then "final" in the next kernel release.<br>
+<p>
+Eg, timerfd is beta in .22, final in .23?<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245574/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245578"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2007 19:33 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/245578/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Certainly having a system where syscalls *don't* automatically transition <br>
+out of beta state is a recipe for disaster: the lesson of <br>
+CONFIG_EXPERIMENTAL is that a lot of them will simply never transition at <br>
+all :(<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245578/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245944"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2007 17:40 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/245944/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>I agree.  If you have a "We're not committed to this and don't stand behind it yet" status, things stay in that status a long time and then there's no distinction between function in that status and not.
+<p>
+I think it should be like the 5-second rule for reclaiming food dropped on the floor.  You have one release to change your mind and redo a user interface before it becomes set in stone.
+<p>
+The effectiveness of that would depend entirely upon how well the rule can be communicated to users.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245944/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor247113"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 28, 2007 17:31 UTC (Tue)
+                               by <b>efexis</b> (guest, #26355)
+                              [<a href="/Articles/247113/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      So you have a ratification process, where the next (or next+1) release either ratifies the API and it becomes 'stable', alters it (and it remains 'experimental'), or removes it. This stops anything sitting in the experimental state for too long, as developers have to make the improvements or formalise it to keep it in the kernel.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/247113/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor245620"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2007 1:32 UTC (Wed)
+                               by <b>mkerrisk</b> (subscriber, #1978)
+                              [<a href="/Articles/245620/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      But in the lack of a formalized review process, this still won't fix the problem.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245620/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor246047"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2007 18:19 UTC (Sat)
+                               by <b>landley</b> (guest, #6789)
+                              [<a href="/Articles/246047/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Don't confuse formalizing with automating.  Adding bureaucratic <br>
+procedures to collaborative volunteer development really doesn't improve <br>
+matters.  (You can't do this unless you've filled in the proper forms.  <br>
+Isn't this a fun hobby?)<br>
+<p>
+Having infrastructure so that something automatically times out if not <br>
+dealt with, and people can check what timeouts are pending, that might <br>
+help.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/246047/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor246070"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2007 7:52 UTC (Sun)
+                               by <b>mkerrisk</b> (subscriber, #1978)
+                              [<a href="/Articles/246070/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I doubt that timeouts are enough.  Too many things just get by because no-one notices (in time).
+<p>
+By a formalized process, I was suggesting something like a sign-off from one (or preferably more) individuals who might not necessarily be kernel developers, but must be well versed in the Unix system call APIs, who would 
+<p>
+<ol>
+<li>
+Consider the design of the API, in particular aspects such as: 
+<ul>
+<li>
+<strong>Generality</strong> of the design: is it too tailored towards a single purpose? could it be generalized to suit a wider range of uses?
+<li>
+<strong>Simplicity</strong>; e.g., is the API overly complex? Complexity often hints at bad design.
+<li>
+<strong>Consistency</strong> with similar APIs; e.g., if this API takes similar arguments to an existing API, does it interpret them in a similar way to that API? (This might seem obvious, but there are certainly some glaring examples where new Linux syscalls have failed to follow this simple idea.) 
+<li>
+<strong>Integration</strong> with existing APIs; e.g., could this API perhaps be better written as something that leverages existing features of the existing system call API?  
+<em>timerfd()</em> is an interesting case in point.
+One of the things I have now begun to wonder is whether it would be feasible to have tight integration of timerfd with the POSIX timers API, so that all that is required is a simplified <em>timerfd()</em> call that takes only a clockid argument and creates a timerfd descriptor and returns a <em>timer_t *</em> which is then manipulated using the traditional <em>timer_settimer()</em>, <em>timer_gettimer()</em>, etc.
+</ul>
+<li>
+Verify that the API had undergone sufficient testing, either by examining the coverage of the test programs provided by the API developer, or by writing programs of their own (in fact I'd say the later is in any case necessary).
+<li>
+Verify that the API has been well documented, either by the developer, or by third parties (working in collaboration with the developer).
+</ol>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/246070/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor246090"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2007 5:08 UTC (Mon)
+                               by <b>landley</b> (guest, #6789)
+                              [<a href="/Articles/246090/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      I could see a separate API list, for discussing JUST API issues and not <br>
+implementation, which stuff could get cc'd to the way I cc stuff to <br>
+linux-doc.  (Things just get buried and lost on linux-kernel.)<br>
+<p>
+But adding more layers of bureaucracy seldom improves a process, and <br>
+inflicting bureaucracy on volunteers makes them go away.  (We added <br>
+signed-off-by for _tracking_ purposes, in response to a clear and present <br>
+danger the nature of which was a lawsuit.)<br>
+<p>
+Adding additional layers of verification and certification before <br>
+something can be merged is never how Linux has done stuff.  Linus still <br>
+accepts some patches directly, when you can get his attention...<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/246090/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor245599"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2007 20:46 UTC (Tue)
+                               by <b>asamardzic</b> (guest, #27161)
+                              [<a href="/Articles/245599/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Great to see that lots of things once requiring messing with signals are getting exposed trough some kind of file descriptors, not only in Linux but in other Unix flavors as well.  It really feels "Unix way", let's hope SUS will catch and standardize alike syscalls once...<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245599/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor245616"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2007 0:49 UTC (Wed)
+                               by <b>gdt</b> (subscriber, #6284)
+                              [<a href="/Articles/245616/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>IETF requires two independent implementations before approving a protocol. Something similar should be true for system calls: used by two independent applications. There's a lot of narrow thinking exposed in some system calls, and this would widen that. I've had the joy of using the TASKSTATS feature in a way not forseen by its author and until recently it wouldn't compile from user space at all since its header file was omitted.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245616/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245757"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2007 11:45 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/245757/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      But a syscall can't easily be used by any applications until it's in glibc <br>
+or some other library, and once it is you can't change it because it's <br>
+exposed to applications so you can't tell who might be using it.<br>
+<p>
+(Most of these new syscalls are Linux-specific, anyway, and thus likely to <br>
+see comparatively little use outside of abstraction layers like glibc. <br>
+POSIX still remains king.)<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245757/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor245621"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2007 1:58 UTC (Wed)
+                               by <b>mkerrisk</b> (subscriber, #1978)
+                              [<a href="/Articles/245621/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Jon, thanks for the article!  One point not made in the article is that in 2.6.22, the <em>timerfd()</em> API is broken (this I also discovered while working on the man page).  In 2.6.22, it was intended that <em>read()</em> from a <em>timerfd()</em> file descriptor would return a 4-byte value, but a bug meant that only the least significant byte was returned.  So the 2.6.22 interface is in any case unusable.  (The fix for this problem went in with the switch to 8-byte reads.)
+
+<blockquote>
+<em>
+If the kernel community were to resolve that it would not merge user-space API features in the absence of complete documentation, it might just provide the necessary incentive to get that last review pass done.
+</em>
+</blockquote>
+<p>
+Given the number of bugs and interface problems I've noticed while developing on man pages, I think this would be a hugely effective step.  This will also be the subject of a <a href="http://www.linuxconf.eu/2007/programme/abstract-MKerrisk-1.shtml">presentation that I'll be making at linuxconf.eu</a>, which precedes this year's Kernel Summit.  Arnd Bergmann will cover some related ground at the conference talking about <a href="http://www.linuxconf.eu/2007/programme/abstract-ABergmann-1.shtml">How to not invent kernel interfaces</a>.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245621/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245668"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2007 16:45 UTC (Wed)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/245668/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+        The Multicians did the whole mutation thing somewhat<br>
+better than we do in the Unix world... they tended to<br>
+document first, by writing white papers to get their<br>
+algorithms discussed.<br>
+<p>
+  After they delivered,they then froze the parameter<br>
+list part of the APIs, but they versions-numbered structures<br>
+passed as parameters, so one could <br>
+- add new elemnts to the end (a compatable change)<br>
+- retire old papameters (version change required), or<br>
+- change precision of parameter values (version change required).<br>
+<p>
+I've used the same trick on Unix/Linux to avoid having to<br>
+have "flag days" and allow several of us (Hi, Edsel!) to <br>
+develop in parallel, even when we were changing intarfaces<br>
+with wild abandon.<br>
+<p>
+--dave<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245668/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor245634"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2007 12:20 UTC (Wed)
+                               by <b>clugstj</b> (subscriber, #4020)
+                              [<a href="/Articles/245634/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      "The purpose of this call is to allow an application to obtain a file descriptor to use with timer events, eliminating the need to use signals."<br>
+<p>
+Why is this going into the kernel?  It is trivial to achieve the same effect in userspace with pipe() and a thread sleeping in pthread_cond_timedwait().<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245634/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245663"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2007 16:28 UTC (Wed)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/245663/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>Speed, I presume. Almost anything can done in a userspace (<a href="http://user-mode-linux.sourceforge.net/">UML</a> is a proof), the question is "what does it cost". Solution with pipe() and thread will be many times slower...</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245663/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor245688"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2007 19:01 UTC (Wed)
+                               by <b>njs</b> (guest, #40338)
+                              [<a href="/Articles/245688/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      You, uh, want to have one thread per pending timer?<br>
+<p>
+The real solution avoiding timerfd is to write a proper main loop like the ones in glib, Qt, Twisted Python, libevent, etc., that puts timers on a heap and uses the delay from timer at the head of the heap to set the timeout on one's blocking syscall (select, epoll, kqueue, whatever).<br>
+<p>
+This is all a truly fantastic pain in the butt, though, esp. once you bring in other events like signals, process handling (waitpid), etc.  Even worse, it's not composable -- if you have libraries that need to do IO, getting them integrated with each other and with your main loop is almost impossible.  Again there are pure-userspace solutions possible in principle (e.g. abstracted wrappers over multiple event loops like liboop), but in practice it remains a huge issue.  This is one of the reasons we still don't have a really decent async dns resolver library, for instance.<br>
+<p>
+I don't know how much of a help these Linux-specific solutions will be in the long run, but being able to wrap all event sources into fds via timerfd and signalfd and so on, and combine multiple fds into a single fd (for purposes of event selection) via epoll, certainly has the *potential* to simplify all these messes significantly.  Maybe we'll even figure out eventually whether this or kqueue is better.<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245688/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245712"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2007 22:34 UTC (Wed)
+                               by <b>pphaneuf</b> (guest, #23480)
+                              [<a href="/Articles/245712/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      My thoughts exactly, except that I'd point out that a "timer signaled over a pipe library" would probably have a single thread, which would use a heap for the timers. Kind of silly, having a thread whose goal is to sleep all the time, basically, but hey, you've got to do what you've got to do...
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245712/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245745"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2007 10:18 UTC (Thu)
+                               by <b>IkeTo</b> (subscriber, #2122)
+                              [<a href="/Articles/245745/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I think the "one thread per timer" might be part of the problem, but not the whole problem.  The bigger part is that to allow programming is such a style, all your events (i.e., wait for input) must signal that condition when the input comes.  What it means is that every fd you wait for must be in its own thread (creating a lot of headaches to prevent race conditions and deadlocks), or else you must use pselect() or epoll() or whatever which subsumes the need for the timer thread anyway.  On the other hand, I still don't quite know what is the best use case of timerfd().  It clearly is geared towards pselect() or epoll().  But that simply replaces the user-mode code to manage the timers by some kernel-mode code to manage the timers via file descriptors.  I can see the kernel-mode approach more wasteful: it requires a timer structure and a file structure for each timer, a userland approach would require just an entry in a priority queue.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245745/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245758"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2007 11:48 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/245758/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      It might be more wasteful, but it's a lot easier to write the userspace <br>
+code. Memory is cheap in the quantities we're talking about here (apps <br>
+that use millions of timers simultaneously are going to be very rare).<br>
+<p>
+And having *everything* be an fd would finally realize one of the goals of <br>
+the Unix world since its creation :)<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245758/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245761"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2007 12:43 UTC (Thu)
+                               by <b>IkeTo</b> (subscriber, #2122)
+                              [<a href="/Articles/245761/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; but it's a lot easier to write the userspace code</font><br>
+<p>
+But when "userspace code" means library code, this is going to be hard to sell.  After all the application developer see none of those.  Can you imagine a version of, say, GLib implements its event loop using the timerfd() interface?  Personally I can't.<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245761/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor247588"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 30, 2007 23:19 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/247588/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Actually I'd expect this to be mostly used by libraries. Currently <br>
+libraries have the problem that signal disposition is process-global and <br>
+can't be reset without interfering with other libraries, which is <br>
+ameliorated by signalfd. Also, major libraries like glib *can* <br>
+realistically include system-dependent code without being too annoying: it <br>
+only has to go into glib, rather than into all its users (and glib already <br>
+supports some Linux-specific interfaces anyway: indeed in a sense that's <br>
+part of its raison d'etre).<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/247588/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor247171"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 28, 2007 21:58 UTC (Tue)
+                               by <b>renox</b> (guest, #23785)
+                              [<a href="/Articles/247171/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt;&gt;And having *everything* be an fd would finally realize one of the goals of the Unix world since its creation :) &lt;&lt;</font><br>
+<p>
+Given that Plan9 has been much more thorough than Unix in the 'everything is a file' way, I wonder how they solved this issue?<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/247171/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor247590"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 30, 2007 23:23 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/247590/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Plan 9 has `notes' instead of signals, but it looks like they too were <br>
+`call this function automatically' things rather than being reified into <br>
+fds. Surprising. (However, notes are plan9ish in another way: they're <br>
+strings, not integers.)<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/247590/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor245763"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2007 13:20 UTC (Thu)
+                               by <b>pphaneuf</b> (guest, #23480)
+                              [<a href="/Articles/245763/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>The use for <tt>timerfd</tt> is one of <b>integration</b>, I think. It's now possible to make an <tt>epoll</tt> fd, put all of your things in it <em>as well as your timers</em>, and just give back that single fd to an application, telling it to just call a specific function whenever it becomes readable. Note that in those integration situations (a classical example of which being an asynchronous DNS resolver), you don't get to specify the expiration of the <tt>select</tt> (or similar) call, or at least, not without complicating the interface.
+
+<p>Of course, it can currently be faked with a thread, either entirely (use a single pipe, and put your whole <tt>select</tt> loop in a thread, managing the timers as well) or in part (if you have <tt>epoll</tt>, you can put the fds in it, and use a thread just for the timers). You avoid the race conditions and deadlocks by only doing the minimal amount in the thread, just enough to simulate <tt>epoll</tt> or <tt>timerfd</tt>.
+
+<p>What's nice is that with each improvement (<tt>epoll</tt> and then <tt>timerfd</tt>), you can make that integration simpler and less complicated (running a thread in the background involves having to deal with untimely termination, making sure to block all signals and other such details). It's also possible to implement the same interface for the application whether you're faking it or not, so you can have some autoconf tests for <tt>epoll</tt> and <tt>timerfd</tt>, and then apply the right amount of emulation.
+
+<p>As for the wastefulness, the timer structure is also more or less the same as that "entry" you'd put in a priority queue, and if you use pipes to fake things, you end up having not one, but <em>two</em> file structures, not to mention an almost entirely useless buffer.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245763/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor245896"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2007 11:49 UTC (Fri)
+                               by <b>Octavian</b> (guest, #7462)
+                              [<a href="/Articles/245896/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; Why is this going into the kernel? It is trivial to achieve the same effect in userspace with pipe() and a thread sleeping in pthread_cond_timedwait().</font><br>
+<p>
+The pipe() mechanism to achieve synchr. timer events wrt epoll()/select() are considered a 'trick' I suppose (which I've used in my own projects too).  So, in the end we do not need to remember this trick at least, that's an achievement.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245896/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor245791"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2007 15:25 UTC (Thu)
+                               by <b>mrfredsmoothie</b> (guest, #3100)
+                              [<a href="/Articles/245791/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p><i>one of the best ways to find shortcomings in an API is to attempt to document it comprehensively.</i></p>
+<p>Hmmm. Another way would be to require someone to write a non-trivial program which uses the API to do something useful.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245791/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor245878"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2007 9:01 UTC (Fri)
+                               by <b>addw</b> (guest, #1771)
+                              [<a href="/Articles/245878/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><i>Another way would be to require someone to write a non-trivial program which uses the API to do something useful.</i></blockquote><p>
+<b>And</b> make that non-trivial program part of the available documentation.<p>
+One of the most frustrating things in working with FLOSS is that often (but by no means always) the documentation is awful. It is generally a set of notes written by the author (who entirely understands what it is all about), so someone coming new to the problem has a really hard time getting to see how everything fits together.
+<p>
+A non-trivial program would be great for system calls; something similar needs to be available for other FLOSS components.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/245878/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor246094"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2007 8:25 UTC (Mon)
+                               by <b>mkerrisk</b> (subscriber, #1978)
+                              [<a href="/Articles/246094/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      I'm open to suggestions about specific pages in <em>man-pages</em> that need non-trivial example programs.  (Over time an increasing number of example programs have been added.)
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/246094/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor246042"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2007 17:32 UTC (Sat)
+                               by <b>landley</b> (guest, #6789)
+                              [<a href="/Articles/246042/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>Since I have an interest in this documentation stuff I thought I'd see 
+if 
+<a 
+href=http://linux-foundation.org/weblogs/press/2007/04/30/linux-foundation-announces-open-source-developer-travel-fund/>this 
+travel fund</a> might be willing to send me to Cambridge (or failing that 
+get some cheap tickets through the University of Texas).  Unfortunately, 
+the <a href=http://www.usenix.org/events/kernel07/>summit's website</a> 
+says "Participation in the summit is by invitation only".</p>
+
+<p>What's the point of telling us about an event we can't attend?  If we 
+were invited, presumably we'd get emails about the schedule...</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/246042/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor251576"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timerfd() and system call review</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 26, 2007 6:27 UTC (Wed)
+                               by <b>ury</b> (guest, #47805)
+                              [<a href="/Articles/251576/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      why not just open("/proc/sys/timerfd...", .. ) or some similar <br>
+to create timerfd descriptor?<br>
+<p>
+maybe some ioctl can be used to control timer (or sysfs )<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/251576/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2007, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

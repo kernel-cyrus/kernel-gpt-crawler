@@ -1,0 +1,285 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Realtime and interrupt latency [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/139784/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/139208/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/139784/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Realtime and interrupt latency</h1>
+<div class="Byline">[Posted June 14, 2005 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+The realtime Linux patches,  covered at length (too much length, according
+to some) on these pages, have been aimed primarily at reducing scheduling
+latency: the amount of time it takes to switch control to a high-priority
+process in response to an event which makes it runnable.  Scheduling
+latency is important, but the harder end of the realtime spectrum also
+places a premium on interrupt latency: how long the system takes to respond
+to a hardware interrupt.  In many realtime situations, the processor must
+answer quickly when the hardware asks for attention; excessive latency can
+lead to lost data and failure to respond quickly enough to external
+events.  A Linux-based, realtime beer monitoring system may only have a
+few milliseconds to deal with a "refrigerator door opened" interrupt before
+one's roommate has swiped a bottle and left the scene.  In this sort of
+high-stakes deployment, interrupt latency is everything.
+<p>
+
+One of the biggest sources of interrupt latency is periods when the
+processor has simply disabled interrupt delivery.  Device drivers often
+disable interrupts - on the local processor at least - to avoid creating
+race conditions with themselves.  Even (or especially) when spinlocks are
+used to control concurrency with interrupt handlers, interrupts must be
+disabled.  Imagine a driver which duly acquires a spinlock before working
+with its data structures.  One of that driver's devices raises an interrupt while
+the lock is held, and the interrupt handler runs on the same CPU.  That
+interrupt handler will try to acquire the same spinlock, and, finding it
+busy, will proceed to spin until the lock becomes free.  But, since the
+interrupt handler has preempted the only thread which can ever release the
+lock, it will spin forever.  That is a different sort of interrupt latency
+altogether, and one which even general-purpose kernels try to avoid.  The
+usual technique is simply to disable interrupts while holding a spinlock
+which might be acquired by an interrupt handler.  Disabling interrupts
+solves the immediate problem, but it can lead to increased interrupt
+latency. 
+<p>
+
+Ingo Molnar's realtime preemption patches improve the situation by moving
+interrupt handlers into their own processes.  Since interrupt handlers are
+scheduled with everything else, and since "spinlocks" no longer spin with
+this patch set, the sort of deadlock described in the previous paragraph
+can not happen.  So there is no longer any need to disable interrupts when
+acquiring spinlocks.  Changing the locking primitives eliminated the major
+part of the code in the kernel which runs with interrupts disabled.
+<p>
+
+Daniel Walker recently noticed that one could do a little better - and
+followed up with <a href="/Articles/139044/">a patch</a> showing how.
+Fixing the locking primitives got rid of most of the driver code which runs
+with interrupts turned off, but it did nothing for all of the places where
+drivers explicitly disable interrupts themselves with a call to
+<tt>local_irq_disable()</tt>.  In most of these cases, the driver is simply
+trying to avoid racing with its interrupt handler.  But when interrupt handlers
+run in their own threads, all 
+that is really needed to avoid concurrency problems is to disable
+preemption.  So Daniel's patch reworks <tt>local_irq_disable()</tt> to turn
+off preemption while leaving the interrupt
+configuration alone.  For the few cases where it is truly necessary to
+disable interrupts at the hardware level, <tt>hard_local_irq_disable()</tt>
+(later renamed to <tt>raw_local_irq_disable()</tt>)
+has been provided.
+<p>
+
+One might argue that disabling preemption is counterproductive, given that
+any code which runs with preemption disabled will contribute to the
+scheduling latency problem.  But any code which disables interrupts already
+runs with preemption turned off, so the situation is not made any worse by
+this patch.  It could, in fact, be improved: all that really needs to be
+protected against is preemption by one specific interrupt handler thread.
+The extra scheduler complexity which would be required to implement that
+solution is unlikely to be worth it, however; better to just fix the
+drivers to use locks.  So Ingo picked up Daniel's patch, spent a few
+minutes completely reworking it, and added it to his realtime preemption
+patch set.
+
+<p>
+Meanwhile, Karim Yaghmour was <a href="/Articles/139801/">heard
+wondering</a>:
+<p>
+<div class="BigQuote">
+	I'm not sure exactly why you guys are reinventing the wheel. Adeos
+	already does this soft-cli/sti stuff for you, it's been available
+	for a few years already, tested, and ported to a number of
+	architectures, and is generalized, why not just adopt it?
+</div>
+<p>
+It does seem that not everybody understands what the Adeos patch (available
+from <a href="https://gna.org/projects/adeos">the Gna server</a>) does.
+The description of Adeos, in its current form, as a "nanokernel" probably
+does this work a disservice; what Adeos really comes down to is a patch to
+the kernel's interrupt handling code.
+<p>
+
+To reduce interrupt latency, Adeos takes the classic approach of adding a
+layer of indirection.  The patch adds an "interrupt pipeline" to the
+low-level, architecture-specific code.  Any "domain" (read "piece of code")
+can register itself with this interrupt pipeline, providing a priority as
+it does so.  Whenever a hardware interrupt arrives, Adeos works its way
+down the pipeline, calling into the handler of each domain which has
+expressed an interest in that interrupt.  The higher-priority handlers are,
+of course, called first.
+<p>
+
+In this world, the regular Linux interrupt subsystem is registered as just
+another Adeos domain.  Any code which absolutely, positively must have its
+interrupts arrive within microseconds can register itself as a
+higher-priority domain.  When interrupt time comes, the high-priority code
+can respond to the interrupt before Linux even hears about it.  Since
+nothing in Linux can possibly get in the way (unless it does evil things to
+the hardware), there is no need to worry about which parts of Linux might
+create latency problems.
+<p>
+
+Some <a href="/Articles/139403/">benchmark results</a> were recently
+posted; they showed generally better performance from Adeos than from the
+realtime preemption patch.  Some issues have been raised, however, with how
+those numbers were collected; the tests are set to be rerun in the near
+future.
+<p>
+
+Meanwhile, a slow debate over inclusion of the realtime work continues,
+with some participants pushing for the code to be merged eventually, others
+being skeptical, and a few asking for the realtime discussion to be removed
+from linux-kernel altogether.  One viewpoint worth considering can be found
+in <a href="/Articles/139806/">this posting</a> from Gerrit Huizenga, who
+argued that the realtime patches of today resemble the scalability patches
+from a few years ago, and that they must follow a similar path toward
+inclusion: 
+<p>
+<div class="BigQuote">
+	I believe that any effort towards mainline support of RT has to
+	follow a similar set of guidelines.  And, I believe strongly that
+	*most* of the RT code should be crafted so that every single laptop
+	user is running most of the code *and* benefiting from it.  If most
+	of the RT code goes unused by most of the population, and the only
+	way to get an RT kernel of any reasonable level is to ask the
+	distros to build yet another configuration, RT will always be a
+	poor, undertested, underutilized ugly stepchild of Linux.
+</div>
+<p>
+
+Ingo Molnar clearly understands this; he has consistently worked toward
+making the realtime patches minimally intrusive and useful in many
+situations.  Parts of the realtime work have already been merged, and this
+process may continue.  There may come a time when developers will be
+surprised to discover that most of the realtime preemption patch can be
+found in the mainline.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Interrupts">Interrupts</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Latency">Latency</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Realtime">Realtime</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/139784/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor140453"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Realtime discussion coverage excellent</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 18, 2005 18:58 UTC (Sat)
+                               by <b>erwbgy</b> (subscriber, #4104)
+                              [<a href="/Articles/140453/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; The realtime Linux patches, covered at length (too much length, according to some) on   </font><br>
+<font class="QuotedText">&gt; these pages,  </font><br>
+ <br>
+I for one would disagree that there has been too much coverage of this issue - I find it <br>
+fascinating area.  The Kernel page is one of the main reasons that I subscribe to LWN, and I <br>
+know I'm not alone, so keep up the good work. <br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/140453/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2005, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

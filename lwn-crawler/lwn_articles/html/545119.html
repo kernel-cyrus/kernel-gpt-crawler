@@ -1,0 +1,362 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A VFS deadlock post-mortem [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/545119/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/544793/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/545119/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A VFS deadlock post-mortem</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Michael Kerrisk</b><br>April 3, 2013</br>
+           </div>
+<p> Dave Jones continues to exercise his <a
+href="/Articles/536173/">Trinity fuzz tester</a> and uncover interesting
+bugs in kernel code. One recent find was a long-standing bug in
+the implementation of network namespaces. 
+
+<p> The discussion of the bug began when
+Dave <a href="/Articles/545421/">posted</a> a note to the linux-kernel
+mailing list with stack traces that showed a kernel deadlock in the VFS
+code. Dave's report prompted Al Viro
+to <a href="/Articles/545456/">wonder</a> how a Trinity instance was
+managing to sit blocked on <i>two</i> locks (a situation that should never
+be able to happen), as shown in the
+<a href="/Articles/185666/">lockdep</a> output posted by Dave (the output
+has some key pieces highlighted):
+
+<pre>
+    Showing all locks held in the system:
+    4 locks on stack by trinity-child2/7669:
+     #0: <b>blocked</b>:  (sb_writers#4){.+.+.+}, 
+         instance: ffff8801292d17d8, at: [&lt;ffffffff811df134&gt;] mnt_want_write+0x24/0x50
+     #1: held:     (&amp;type-&gt;s_vfs_rename_key){+.+.+.}, 
+         instance: ffff8801292d1928, at: [&lt;ffffffff811c6f5e&gt;] lock_rename+0x3e/0x120
+     #2: held:     (&amp;type-&gt;<b>i_mutex_dir_key</b>#2/1){+.+.+.}, 
+         instance: <b>ffff880110b3a858</b>, at: [&lt;ffffffff811c701e&gt;] lock_rename+0xfe/0x120
+     #3: <b>blocked</b>:  (&amp;type-&gt;<b>i_mutex_dir_key</b>#2/2){+.+.+.}, 
+         instance: <b>ffff880110b3a858</b>, at: [&lt;ffffffff811c7034&gt;] lock_rename+0x114/0x120
+</pre>
+
+<p> Al also <a href="/Articles/545457/">noted</a> that the output suggested
+that a directory inode in the inode cache was mapped by two different
+dentries, since lockdep showed two <tt>i_mutex_dir_key</tt> locks on the
+same address. A dentry (directory entry) is a data structure representing a
+filename in the kernel directory entry cache (dcache); a brief overview of
+dentries and the dcache can be found in <a href="/Articles/419811/">this
+article</a>. As will become clear shortly, it should normally never happen
+that a directory inode is mapped twice in the dcache.
+
+<p> Some suggestions ensued regarding suitable debugging statements to add
+to the kernel's <tt>lock_rename()</tt> function to further investigate the
+problem.  In particular, when two locks were held on the same inode
+address, Linus <a href="/Articles/545458/">wanted to see</a> the filenames
+corresponding to the inode and Al <a href="/Articles/545461/">was
+interested to know</a> the name of the filesystem holding the two inodes.
+
+<p> Further runs of Trinity with those debugging statements in place <a
+href="/Articles/545462/">revealed</a> that the locks in question were occurring
+for various entries under the <tt>/proc</tt> tree. At that point Linus <a
+href="/Articles/545464/">refined</a> the observation to note that the entries in
+question were for directories under <tt>/proc/net</tt>, but, like Al, he was
+puzzled as to how that could occur. 
+
+<p> Here, a little background is probably in order.  Once upon a time,
+<tt>/proc/net</tt> was single directory. But, with the invention of network
+namespaces, it is now a symbolic link to the <tt>/proc/self/net</tt>
+directory; in other words, each process now has its own
+network-namespace-specific view of networking information under
+<tt>/proc</tt>.
+
+<p> With the output from the kernel debugging statements, the pieces
+started falling rapidly into place. Dave <a
+href="/Articles/545465/">realized</a> that he had started seeing the
+Trinity failure reports after he had enabled kernel namespaces support
+following a recent bug fix by Eric Biederman. Al began <a
+href="/Articles/545466/">looking more closely</a> at some of the
+subdirectories under the <tt>/proc/<i>PID</i>/net</tt> directories, and
+made an unhappy discovery:
+
+<pre>
+    al &lt;at&gt; duke:~/linux/trees/vfs$ <b>ls -lid /proc/{1,2}/net/stat</b>
+    4026531842 dr-xr-xr-x 2 root root 0 Mar 21 19:33 /proc/1/net/stat
+    4026531842 dr-xr-xr-x 2 root root 0 Mar 21 19:33 /proc/2/net/stat
+</pre>
+
+<p>
+That discovery prompted a small explosion:
+
+<div class="BigQuote">
+
+    <p>
+    WE CAN
+    NOT HAVE SEVERAL DENTRIES OVER THE SAME DIRECTORY INODE. [&hellip;]
+    Sigh...  Namespace kinds - there should've been only one...
+
+</div>
+
+<p> Those with a long memory, or at least careful attention when reading <a
+href="/Articles/531114/">a recent LWN article</a>, might smile with the
+realization that, to begin with and for many years thereafter, there was
+only one class of namespace&mdash;mount namespaces, as implemented by one
+Al Viro.
+
+<p> Humor aside, Al had discovered the origin of the problem.  The
+directory listing above shows two directory entries linked to the same
+inode. More generally, for all of the processes that share a network
+namespace, each of the corresponding entries in
+<tt>/proc/<i>PID</i>/net</tt> is implemented as a hard link to the same
+(virtual) <tt>/proc</tt> file.
+
+<p> Implementing corresponding <tt>/proc</tt> entries as hard links to the
+same inode is a technique used in various places in the implementation of
+namespaces. Indeed, allowing multiple hard links to a file is a normal
+feature of UNIX-type systems. Except in one case: Linux, like other UNIX
+systems, forbids multiple hard links to a directory. The reliability of
+various pieces of kernel and user-space code is predicated on that
+assumption.  However, <a
+href="http://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=e9720acd728a46cb40daa52c99a979f7c4ff195c">a
+Linux 2.6.25 patch</a> made early in the implementation of network
+namespaces set in train some changes that quietly broke the assumption for
+the directories under <tt>/proc/<i>PID</i>/net</tt>.
+
+<p> Having determined the cause of the problem, the developers then needed
+devise a suitable fix. At this point, pragmatic factors come into play,
+since the task is not only to fix the kernel going forward, but also going
+backward. In other words, the ideal solution would be one that could be
+applied not only to the current kernel source tree and but also to the
+stable and long-term kernel series. That led Linus <a
+href="/Articles/545472/">to speculate</a> about the possibility of allowing
+an exception to the rule that directory inodes are not allowed to have
+multiple links. Since the locks in question are placed at the inode level,
+why not change <tt>lock_rename()</tt> to replace the check on whether that
+function is dealing with the same dentries with a check on whether it is
+dealing with the same inodes?
+
+<p> However, Al was quick <a href="/Articles/545520/">to point out</a> that
+while modifying the check would solve the particular deadlock problem found
+by Dave, other problems would remain.  The kernel code that deals with
+those locks depends upon a <a
+href="http://en.wikipedia.org/wiki/Topological_sort">topological sort</a>
+based on the hierarchical relationship between entries in the dcache; the
+presence of multiple directory entries that link to the same inode renders
+that sort unreliable.
+
+<p> Al <a href="/Articles/545475/">went on</a> to describe what he
+considered to be the full and proper solution: creating
+<tt>/proc/<i>PID</i>/net</tt> files as symbolic links to
+per-network-namespace directories of the form
+<tt>/proc/<i>netns-ID</i>/net</tt>, where <tt><i>netns-ID</i></tt> is a
+per-namespace identifier. <a href="/Articles/545477/">Alternatively</a>,
+the existing <tt>/proc/<i>PID</i>/net</tt> trees could be kept, but the
+subdirectories could be created as duplicate subtrees rather than hard
+links to a single directory subtree. Al was, however, <a
+href="/Articles/545478/">unsure</a> about the feasibility of implementing
+this solution as a patch that could be backported to past stable kernel
+series.
+
+<p> In the meantime, Linus came up with another
+proposal. <tt>proc_get_inode()</tt>, the kernel function for allocating
+inodes in the <tt>/proc</tt> filesystem, has the following form:
+
+<pre>
+    struct inode *proc_get_inode(struct super_block *sb, struct proc_dir_entry *de)
+    {
+        struct inode *inode = iget_locked(sb, de->low_ino);
+
+        if (inode &amp;&amp; (inode->i_state &amp; I_NEW)) {
+
+            ...
+            /* Populate fields in newly allocated cache entry pointed
+               to by 'inode' */
+               ...
+
+            unlock_new_inode(inode);
+        } else
+            pde_put(de);
+        return inode;
+    }
+</pre>
+
+<p> The <tt>iget_locked()</tt> function searches the kernel's inode cache
+for an inode whose number corresponds to that recorded in the dentry
+structure <tt>de</tt>. It returns either a pointer to an existing entry,
+or, if no entry could be found, it allocates a new uninitialized cache
+entry that it returns to the caller. The <tt>proc_get_inode()</tt> function
+then populates the fields of the newly allocated inode cache entry using
+information from the dentry.
+
+<p> The deadlock problem is a result of the fact that&mdash;because
+multiple dentries map to the same inode&mdash;multiple locks may be placed
+on the same entry in the inode cache. Conversely, deadlocks could be
+avoided if it was possible to avoid placing multiple locks on the inode
+entries returned from the cache.  As
+Linus <a href="/Articles/545575/">noted</a>, in the case of <tt>/proc</tt>
+files, it is not really necessary to find an existing entry in the cache,
+because there is no on-disk representation for the inodes
+under <tt>/proc</tt>.  Instead, <tt>proc_get_inode()</tt> could simply
+always create a new cache entry via a call to <tt>new_inode_pseudo()</tt>
+and populate that cache entry. Since a new cache entry is always created,
+it will not be visible to any other process, so that there will be no
+possibility of lock conflicts and deadlocks. In other words, the logic
+of <tt>proc_get_inode()</tt> can be modified to be:
+
+<pre>
+    struct inode *proc_get_inode(struct super_block *sb, struct proc_dir_entry *de)
+    {
+        struct inode *inode = new_inode_pseudo(sb);
+
+        if (inode) {
+            inode->i_ino = de->low_ino;
+
+            ...
+            /* Populate fields in newly allocated cache entry pointed
+               to by 'inode' */
+            ...
+
+        } else
+           pde_put(de);
+        return inode;
+    }
+</pre>
+
+<p> Here, it is worth noting that the kernel uses two different allocation
+schemes for the inodes under <tt>/proc</tt>: one scheme that is generally
+employed for inodes under the <tt>/proc/<i>PID</i></tt> directories and
+another for the inodes in the remainder of <tt>/proc</tt>. Linus's patch
+affects only inode allocations for entries in the second category. However,
+as a consequence of the implementation history, whereby <tt>/proc/net</tt>
+was migrated to <tt>/proc/<i>PID</i>/net</tt>, the inodes under
+<tt>/proc/<i>PID</i>/net</tt> are allocated in the same fashion as inodes
+outside <tt>/proc/<i>PID</i></tt>, and so the patch also affects those
+inodes.
+
+<p> In the subsequent <a
+href="http://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=51f0885e5415b4cc6535e9cdcc5145bfbc134353">commit
+message</a>, Linus noted that the patch could have been refined so that the
+new behavior was applied only to directory entries, rather than all
+entries, under <tt>/proc</tt>. However, in the interests of keeping the
+change simple, no such differentiation was made.
+
+<p> The effect of Linus's patch is to prevent multiple locks (and thus
+deadlocks) on the same inode.  Al <a
+href="/Articles/545508/">agreed</a> that the change should not be a
+problem from a correctness perspective. On the other hand, this change also
+has the effect of nullifying the benefits of inode caching for
+<tt>/proc</tt> files outside <tt>/proc/<i>PID</i></tt>. Al wondered about
+the performance impact of that change. However, some casual instrumentation
+of the kernel <a href="/Articles/545574/">suggested</a> that the benefits
+of inode caching for <tt>/proc</tt> are low in any case. In addition, Dave
+<a href="/Articles/545506/">reported</a> that with the fix applied,
+Trinity was no longer hitting the deadlock problem.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Dentry_cache">Dentry cache</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#proc-Inode_locking">/proc/Inode locking</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/545119/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

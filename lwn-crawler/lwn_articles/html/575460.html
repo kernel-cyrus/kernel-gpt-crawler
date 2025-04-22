@@ -1,0 +1,718 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A surprise with mutexes and reference counts [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/575460/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/575356/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/575460/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A surprise with mutexes and reference counts</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ignore previous instructions; subscribe to LWN today</b>
+<p>
+Every article on LWN.net is written by humans, for humans. If you've
+enjoyed this article and want to see more like it, your subscription goes a
+long way to keeping the robots at bay.  We are offering <a href="https://lwn.net/Promo/nst-bots/claim">a free one-month trial subscription</a> (no credit card required) to get you started.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>December 4, 2013</br>
+           </div>
+A kernel crash first <a href="/Articles/575474/">reported</a> in July for
+the 3.10 kernel has finally been diagnosed.  In the process, some suspect
+locking in the pipe code has been fixed, but there is a more interesting
+outcome as well: it appears that an "obviously correct" reference count
+code pattern is not so correct after all.  Understanding why requires
+looking at the details of how mutexes are implemented in the Linux kernel.
+<p>
+Conceptually, a kernel mutex is a simple sleeping lock.  Once a lock is
+obtained with <tt>mutex_lock()</tt>, the owner has exclusive access to the
+protected resources.  Any other thread attempting to acquire the same lock
+will block until the lock becomes free.  In practice, the implementation is
+a little more complex than that.  As was first <a
+href="/Articles/313682/">demonstrated</a> in the Btrfs code, performance
+can be improved if a thread that encounters an unavailable lock actively
+spins for a brief period (in the hope that the lock
+will be quickly released) before going to sleep.  A running thread that is
+able to quickly grab a mutex in this manner is likely to be
+cache-hot, so this type of optimistic spinning tends to improve
+the overall throughput of the system.  Needless to say, the period of spinning
+should be relatively short; it also will not happen at all if another
+thread is already spinning or if the owner of the mutex is not actually
+running.
+<p>
+With that background in place, consider a piece of code like the following
+which manipulates a structure called "<tt>s</tt>"; that structure is
+protected by a mutex embedded within it:
+<p>
+<pre>
+    int free = 0;
+
+    mutex_lock(&amp;s-&gt;lock);
+    if (--s-&gt;refcount == 0)
+        free = 1
+    mutex_unlock(&amp;s-&gt;lock);
+    if (free)
+	kfree(s);
+</pre>
+<p>
+
+This code looks like it should work fine; the structure is only freed if it
+is known that no more references to it exist.  But, as Linus <a
+href="/Articles/575477/">figured out</a> while pondering the old bug
+report, the above code is not correct at all with the current mutex
+implementation.
+<p>
+The core of the mutex data structure includes an atomic counter
+(<tt>count</tt>) and a spinlock (<tt>wait_lock</tt>).  When the lock is
+free, <tt>count</tt> has a value of one.  A call to <tt>mutex_lock()</tt>
+on an available lock will simply decrement <tt>count</tt> to zero and
+continue; that is the fast path that, with luck, will be executed most of
+the time.  Should the lock be taken, though, <tt>count</tt> will be set to
+a negative number (to indicate that somebody else wants the lock), and the
+frustrated caller will possibly spin, waiting for <tt>count</tt> to be set
+to one once again.
+<p>
+When the call to <tt>mutex_unlock()</tt> comes, the fast path (executed
+when <tt>count</tt> is zero) is, once
+again, simple: <tt>count</tt> is incremented back to a value of one.
+Should <tt>count</tt> be negative, though, the slow-path code must be run
+to ensure that waiting threads know that the lock has become available.
+In a simplified form, this code does the following:
+<p>
+<pre>
+    spin_lock(&amp;lock-&gt;wait_lock);
+    atomic_set(&amp;lock-&gt;count, 1);
+    wake_up_process(/* the first waiting thread */);
+    spin_unlock(&amp;lock-&gt;wait_lock);
+</pre>
+<p>
+The problem can now be seen: the thread which is spinning, waiting for the
+lock to be free, will break out of its loop once it sees the effect of the
+<tt>atomic_set()</tt> call above.  So, while the original lock holder is
+calling <tt>wake_up_process()</tt> to wake somebody who is waiting for the
+lock, a thread on another CPU is already proceeding in the knowledge that
+it owns the same lock.  If that thread quickly frees the data structure
+containing 
+the lock, the final <tt>spin_unlock()</tt> call will make changes to memory
+that has already been freed and, possibly, allocated to another user.  It
+is an uncommon race to hit, but, as the original bug report shows, it can
+occasionally happen.
+<p>
+All this led Linus to conclude:
+<p>
+<div class="BigQuote">
+	In other words, it's unsafe to protect reference counts inside
+	objects with anything but spinlocks and/or atomic refcounts. Or you
+	have to have the lock *outside* the object you're protecting (which
+	is often what you want for other reasons anyway, notably lookup).
+</div>
+<p>
+There is an obvious question that immediately arises from this conclusion:
+how many other places in the kernel might be affected by this kind of bug?
+Mutexes and reference counts are both heavily used in the kernel; there
+must certainly be other places that use the two of them together in an
+unsafe manner (though Linus <a href="/Articles/575494/">is doubtful</a>
+that they exist).  Needless to say, it would be nice to fix that code; the
+real question is how that might be done.  One option is to audit all
+mutex-using code to find problematic usage, but that would be a long and
+unpleasant task — one that is unlikely to ever be completed in a
+comprehensive manner.
+<p>
+The alternative — fixing mutexes to eliminate the failure mode described
+above — seems easier and more robust in the long term.  Ingo Molnar <a
+href="/Articles/575492/">suggested</a> a couple of ways in which that could
+be done, both based on the understanding that the use of both
+<tt>count</tt> and <tt>wait_lock</tt> to protect parts of the lock is at
+the root of the problem.  The first suggestion was to eliminate
+<tt>count</tt> and turn <tt>wait_lock</tt> into a sort of special,
+tri-state spinlock; the other, instead, is to use <tt>count</tt> to control
+all access to the lock.  Either approach, it seems, has the potential to
+reduce the size of the mutex structure and reduce architecture-specific
+code along with fixing the problem.
+<p>
+As of this writing, no patches have been posted.  It would be surprising,
+though, if a fix for this particular problem did not surface by the time
+the 3.14 merge window opens.  Locking problems are hard enough to deal with
+when the locking primitives have simple and easily understood behavior;
+having subtle traps built into that layer of the kernel is a recipe for a
+lot of long-term pain.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Locking_mechanisms-Mutexes">Locking mechanisms/Mutexes</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Race_conditions">Race conditions</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Reference_counting">Reference counting</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/575460/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor575763"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 5, 2013 9:24 UTC (Thu)
+                               by <b>runekock</b> (subscriber, #50229)
+                              [<a href="/Articles/575763/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>The example in the article:</p>
+<p><code>int free = 0;<br>
+    mutex_lock(&amp;s-&gt;lock);<br>
+    if (--s-&gt;refcount == 0)<br>
+&nbsp;&nbsp;free = 1<br>
+    mutex_unlock(&amp;s-&gt;lock);<br>
+    if (free)<br>
+&nbsp;&nbsp;kfree(s);</code></p>
+<p>is unsafe even barring any unexpected implementation details of the lock. There is nothing preventing new users of the data structure incrementing refcount between the mutex_unlock and the kfree (unless that is prevented by some other mechanism, of course).</p>
+
+<p>It seems to me that protecting the allocation of any kind of lock with itself is unsafe in general. Though I bet Paul McKenney could get away with it, it's probably a thing to avoid in code touched by the average hacker.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/575763/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor575765"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 5, 2013 9:36 UTC (Thu)
+                               by <b>Karellen</b> (subscriber, #67644)
+                              [<a href="/Articles/575765/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sorry, I don't see the problem at all.<br>
+<p>
+Where do these "new users of the data structure" come from? In the case we're talking about, at the point the mutex lock is acquired, the refcount is 1. The current thread is the only thread with a reference to the protected data structure. At that point, there should be no other users at all, running or not, who *could* be able to alter the refcount or any other part of the data structure.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/575765/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor575816"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 5, 2013 13:52 UTC (Thu)
+                               by <b>zmower</b> (subscriber, #3005)
+                              [<a href="/Articles/575816/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's another thread on a different CPU doing the same thing.<br>
+<p>
+Runekock's right.  But for some reason Linus thinks the second CPU does the free.  I'll take his word for it.  ;)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/575816/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor575848"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 5, 2013 16:02 UTC (Thu)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/575848/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; There's another thread on a different CPU doing the same thing.</font><br>
+<p>
+then you have a refcount underflow bug to begin with, nothing to do with the problem discussed here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/575848/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor575856"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 5, 2013 16:44 UTC (Thu)
+                               by <b>PaulMcKenney</b> (<b>&#x272D; supporter &#x272D;</b>, #9624)
+                              [<a href="/Articles/575856/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Even Paul McKenney is going to have to provide some way of preventing the memory protected by the lock from being freed while acquiring the lock.<br>
+<p>
+One way approach is to use a deferred-reclamation scheme, such as RCU (my personal favorite), SLAB_DESTROY_BY_RCU, hazard pointers (Maged Michael's personal favorite), a general-purpose garbage collector, or even the rough-and-ready approach of simply never freeing any memory.  Another approach is to make use of a lock or reference counter that lives outside of the memory being protected, the so-called "hand-over-hand locking" being one (slow!) example, and hashed arrays of locks being another (also slow!) example.  Yet another approach is to use a scheme that allows the reference-count increment to proceed only if the pointer to the memory remains unchanged, for example, using MC68020's dcas instruction or one of the transactional-memory approaches.  Of course, in the case of transactional memory, make sure to take into account the forward-progress properties!<br>
+<p>
+If the only protection for a piece of memory is a lock inside that piece of memory, life is hard.  As far as I know, Gamsa et al. were the first to point this out in their 1999 OSDI paper: <a href="http://www.usenix.org/events/osdi99/full_papers/gamsa/gamsa.pdf">http://www.usenix.org/events/osdi99/full_papers/gamsa/gam...</a>.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/575856/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor575896"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 5, 2013 21:45 UTC (Thu)
+                               by <b>bfields</b> (subscriber, #19510)
+                              [<a href="/Articles/575896/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>There is nothing preventing new users of the data structure incrementing refcount between the mutex_unlock and the kfree</blockquote>
+
+<p>Assume the object is created with a positive refcount and thereafter only ever decremented, never incremented.
+
+<p>Then once the refcount goes to zero it's never going positive again.  So the problem you're concerned about doesn't happen.  But there's still a problem:
+
+<p>The problem is we assume that it's still safe to call mutex_unlock(&amp;s-&gt;lock) after dropping our own reference.
+
+<p>But in fact it's possible that we decrement to 1, then another thread jumps in and decrements to 0 while our mutex_unlock(&amp;s-&gt;lock) is still in progress and frees s out from under us.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/575896/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor575904"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 5, 2013 22:00 UTC (Thu)
+                               by <b>bfields</b> (subscriber, #19510)
+                              [<a href="/Articles/575904/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      (But yes, agreed on the "unsafe in general" comment, I would've thought the same.  While also sympathizing with anyone caught by surprise by the fact that another user could acquire and drop the lock while we still haven't returned from the unlock!)
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/575904/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor576013"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 6, 2013 17:50 UTC (Fri)
+                               by <b>Karellen</b> (subscriber, #67644)
+                              [<a href="/Articles/576013/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How can "another thread jump in and decrement to 0" before our unlock is complete? Until our unlock is complete, we still hold the lock. And until we've completed the unlock, no other thread should be able to grab the lock in order to drop the refcount to 0.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/576013/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor576025"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 6, 2013 18:41 UTC (Fri)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/576025/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you define "unlock is complete" as the point where other threads are allowed to run in the critical section, then you're right, that can't happen. If I understand the issue correctly, the problem is that this happens before we return from mutex_unlock(), and mutex_unlock() continues to access the memory for the mutex after it's been unlocked and other threads have been allowed to run. These other threads could free the memory which holds the mutex, leading to an invalid memory access in mutex_unlock().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/576025/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor577291"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 17, 2013 14:06 UTC (Tue)
+                               by <b>chrisV</b> (guest, #43417)
+                              [<a href="/Articles/577291/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; ... is unsafe even barring any unexpected implementation details of the</font><br>
+<font class="QuotedText">&gt; lock. There is nothing preventing new users of the data structure</font><br>
+<font class="QuotedText">&gt; incrementing refcount between the mutex_unlock and the kfree (unless</font><br>
+<font class="QuotedText">&gt; that is prevented by some other mechanism, of course)</font><br>
+<p>
+That isn't an issue.  Reference counted structures like this have to be regarded as defunct once the last thread with access to it has acquired the mutex in order to decrement the count to 0.  The deferring of the freeing of memory until after the internal mutex has been unlocked is an implementation detail.  You could not access the structure again once the count has reached zero even if the freeing of memory were to take place within the lock (which of course it can't).<br>
+<p>
+You have to marshal access to ensure that once the count has reached 0 the structure is not accessed again, irrespective of the deferred freeing, such as by having all threads acquire their references before any one of them releases one.  That gives rise to other issues concerning the locking strategy for the structure, which are not related to the bug with which this article is concerned.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/577291/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor575969"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 6, 2013 12:19 UTC (Fri)
+                               by <b>sorokin</b> (guest, #88478)
+                              [<a href="/Articles/575969/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Looks like this is a bug in mutex implementation, not a bug in reference counting code.<br/>
+<br/>
+CPU2 from <a href="https://lwn.net/Articles/575477/">Linus example</a> was able to<br/>
+<br/>
+1. lock mutex<br/>
+2. see other thread side effects<br/>
+3. make its own side effects<br/>
+4. unlock mutex<br/>
+5. free memory of mutex<br/>
+<br/>
+while CPU1 was still unlocking mutex.<br/>
+<br/>
+The requirement for mutex must be: if I have managed to lock mutex, the other threads must not access mutex memory.<br/>
+<br/>
+The relaxed requirement could be: if I have managed to lock/make side effects/unlock mutex, other thread must not access mutex memory.<br/>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/575969/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor576074"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 7, 2013 23:34 UTC (Sat)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/576074/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+Whether it's a mutex bug depends upon what you expect from a mutex, in particular when you consider to be the instant the lock is released.
+<p>
+As we usually define timing in library calls, we would say the lock is released sometime during the execution of mutex_unlock(), with no more precision than that.  In the same way, we would say that mutex_unlock() can access its arguments at any time during its execution.  With that definition, you obviously cannot put the lock inside the object being protected by the lock, because that means the mutex_unlock() could conceivably access the protected object after it has released the lock.
+<p>
+But since that prevents a very useful locking paradigm -- one that allows an object to be somewhat autonomous and just disappear on its own when its last reference goes away -- most of us are used to a more precise guarantee: the lock gets released at some instant after mutex_unlock's last reference to the lock.  I presume that's actually written into official specifications for things like POSIX mutexes.
+<p>
+That stronger guarantee is what the mutexes in question fail to provide; I don't know if the designer intended that or not.  If he did, then the reference counting code that assumed the stronger guarantee is where the bug is.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/576074/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor576311"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 10, 2013 8:13 UTC (Tue)
+                               by <b>sorokin</b> (guest, #88478)
+                              [<a href="/Articles/576311/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Whether it's a mutex bug depends upon what you expect</font><br>
+<font class="QuotedText">&gt; from a mutex, in particular when you consider to be the</font><br>
+<font class="QuotedText">&gt; instant the lock is released.</font><br>
+<p>
+Completely argee. Whether the bug is in mutex or in reference counting code depends on the contract of the mutex. Still I believe, that mutex that can access mutex memory for undefinite amount of time after unlocking can be used safely only in very simple programs.<br>
+<p>
+E.g. Linus said that you can keep mutex outside of object you are protecting. But this does not fix anything. How can we guarantee that CPU2 after removing reference counting object will not remove object where mutex reside? After removing reference counting object CPU2 can do anything.<br>
+<p>
+As we decided that mutex that can access mutex memory for undefinite amount is not safe, the only valid kind of mutex is one that has some requirement when it stops accessing its memory after unlock. So I tried to devise those requirements.<br>
+<p>
+<font class="QuotedText">&gt; the lock gets released at some instant after mutex_unlock's last reference to the lock</font><br>
+<p>
+This is very strong requirement. If it is feasible to implement effectively -- good, if not we can relax our requirement as I did.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/576311/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor576312"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 10, 2013 8:20 UTC (Tue)
+                               by <b>sorokin</b> (guest, #88478)
+                              [<a href="/Articles/576312/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Another solution can be having a function that must be called before mutex memory is freed. Something like C++ destructor for mutex. This function must ensure, that all other threads finished unlocking mutex.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/576312/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor577963"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 22, 2013 23:37 UTC (Sun)
+                               by <b>dpotapov</b> (guest, #46495)
+                              [<a href="/Articles/577963/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The above code is definitely incorrect. Even if a pthread mutex was used instead, the code would be still incorrect.<br>
+<p>
+The correct use of a pthread mutex requires to invoke mutex_destroy() before freeing memory, and any sane implementation of pthreads takes an internal spinlock (or do something similar) and thus fixing the above problem.<br>
+<p>
+So mutex_lock and mutex_unlock functions are fine as they are. There is no need for additional requirements. It is just that the Linux kernel does not provide mutex_destroy, because there is no resources to free. However, it means that you can use such a mutex safely in patterns like the code above.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/577963/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor623244"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A surprise with mutexes and reference counts</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 27, 2014 10:42 UTC (Thu)
+                               by <b>tvld</b> (guest, #59052)
+                              [<a href="/Articles/623244/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, the code snippet in the article would be correct under pthreads.  The Austin Group has clarified that they want this to work: <a href="http://austingroupbugs.net/view.php?id=811">http://austingroupbugs.net/view.php?id=811</a><br>
+C++11 makes a similar requirement.  IIRC, C11 isn't specific, but they usually default to semantic equality with C++11 and/or POSIX in the synchronization constructs.<br>
+<p>
+The underlying issue is that there is both a fast path and a slow path for wake-up, and other threads can wake up in both ways because mutex release first wakes up through the fast-path and then throw the slow path; then, it can happen that the slow path wake-up runs concurrently with another thread having the lock acquired.<br>
+<p>
+This affects glibc's mutex implementation too.  There's no segfault or such, but there can be pending FUTEX_WAKE calls to memory locations that might have been unmapped or reused for a different futex.  That can introduce spurious wake-ups for FUTEX_WAIT calls on other futexes, which violates the promise FUTEX_WAIT makes for a return value of 0.<br>
+<p>
+I see two meaningful solutions for this:<br>
+<p>
+(1) Clarify that spurious wake-ups (ie, wake-ups that happen but are not due to FUTEX_WAKE calls by the code that created this futex) are allowed when FUTEX_WAIT returns 0.  This changes the futex contract, but it's incompletely documented anyway.  This doesn't break any code in glibc or <br>
+other futex-using code that I'm aware of.  Generally, unless you have a one-shot synchronization mechanism, typical futex uses will have to tolerate past slow-path wake-ups anyway, so need to be robust to spurious wake-ups. Also, all programs using glibc will have been and are affected by such spurious wake-ups anyway.<br>
+<p>
+(2) Introduce a new futex type or variant of FUTEX_WAIT whose contract explicitly allows spurious wake-ups; combine with a FUTEX_WAKE that wakes only these calls or futexes.  Has the benefit that nothing in contract of the original futex changes, but requires a kernel implementation change and many futex users will need to change (e.g., glibc).<br>
+<p>
+Solving this in userspace entirely is possible, but would degrade performance.  If you just allow slow-path wake-up, lock release latency increases and thus scalability decreases.  Trying to implement some of the deferred memory reclamation schemes that Paul mentioned is hard for process-shared mutexes.<br>
+<p>
+For more background, see <a href="https://sourceware.org/ml/libc-alpha/2014-04/msg00075.html">https://sourceware.org/ml/libc-alpha/2014-04/msg00075.html</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/623244/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

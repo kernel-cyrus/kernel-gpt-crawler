@@ -1,0 +1,543 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A virtual filesystem locking surprise [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/939389/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/939365/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/939389/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A virtual filesystem locking surprise</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 31, 2023</br>
+           </div>
+It is well understood that concurrency makes programming problems harder;
+the high level of concurrency inherent in kernel development is one of the
+reasons why kernel work can be challenging.  Things can get even worse,
+though, if concurrent access happens in places where the code is not
+expecting it.  The long story accompanying <a
+href="/ml/linux-fsdevel/20230724-vfs-fdget_pos-v1-1-a4abfd7103f3@kernel.org/">this
+short patch</a> from Christian Brauner is illustrative of the kind of
+problem that can arise when assumptions about concurrency prove to be
+incorrect.
+<p>
+Within the kernel, <a
+href="https://elixir.bootlin.com/linux/v6.4.6/source/include/linux/fs.h#L959"><tt>struct
+file</tt></a> is used to represent an open file.  It contains the
+information needed to work with that file, including an extensive <a
+href="https://elixir.bootlin.com/linux/v6.4.6/source/include/linux/fs.h#L1771">operations
+vector</a>, a reference count, a pointer to the associated inode, the
+current read/write position, and more.  Since there can be multiple
+references to an open file, there must be a way to serialize access to this
+structure.  The <tt>f_lock</tt> spinlock is used in most cases, but there
+is also a mutex called <tt>f_pos_lock</tt> that is used for access to the
+file position.
+<p>
+Acquiring and releasing locks has a cost of its own.  Many I/O operations
+affect the file position, so an I/O-intensive workload can end up
+repeatedly taking and releasing <tt>f_pos_lock</tt>, increasing the
+overhead imposed by the kernel.  As it happens, though, having multiple
+references to an open file is a relatively rare occurrence.  If there is
+only a single reference to a given file, concurrent access to the file
+position cannot happen and that lock overhead is wasted.  To avoid this
+waste, the function that acquires <tt>f_pos_lock</tt> (<a
+href="https://elixir.bootlin.com/linux/v6.4.6/source/fs/file.c#L1039"><tt>__fdget_pos()</tt></a>)
+contains an optimization:
+<p>
+<pre>
+    if (file_count(file) &gt; 1)
+        mutex_lock(&amp;file-&gt;f_pos_lock);
+</pre>
+<p>
+(The code has been simplified slightly to highlight the relevant part).
+The idea here is simple enough: if there is only a single reference to the
+file, concurrent access cannot happen and there is no point in taking the
+lock, so the <tt>mutex_lock()</tt> call is skipped.
+<p>
+The <a href="/Articles/776703/">io_uring subsystem</a> has been under
+intensive development since its introduction in 2019; it is rapidly
+becoming an independent interface to much kernel functionality.  There are
+currently efforts underway to add io_uring operations corresponding to <a
+href="/ml/linux-kernel/20230711204352.214086-1-axboe@kernel.dk/"><tt>waitid()</tt></a>,
+<a
+href="/ml/linux-kernel/20230720221858.135240-1-axboe@kernel.dk/">futexes</a>,
+and <a
+href="/ml/linux-fsdevel/20230711114027.59945-1-hao.xu@linux.dev/"><tt>getdents()</tt></a>.
+That last patch, making the <a
+href="https://man7.org/linux/man-pages/man2/getdents.2.html"><tt>getdents()</tt>
+system call</a> available in io_uring, is relevant here because
+<tt>getdents()</tt> relies heavily on the file position (and, possibly,
+state kept by the filesystem implementation) to allow a process to read
+through a long directory in multiple calls.
+<p>
+The "fixed files" feature of io_uring is also relevant here; it lets a file
+be used numerous times in io_uring operations without the per-call overhead
+required with regular system calls.  That overhead, which includes
+acquiring a reference to the file and validating the process's access to
+it, can be significant in I/O-heavy applications; fixing a file makes it
+possible to pay that cost only once, improving performance.
+When a file is fixed into io_uring, a new reference is created, so the
+reference count will increase.  The process can, however, close its own
+file descriptor after fixing it in io_uring, leaving the fixed-file
+reference as the only one.  The reference count will, as a result, drop
+back to one.  It will also stay there while I/O operations on the file are
+underway in io_uring; the whole point of fixing the file is to avoid the
+cost of repeatedly gaining and releasing references.
+<p>
+Brauner <a
+href="/ml/linux-fsdevel/20230712-alltag-abberufen-67a615152bee@brauner/">pointed
+out</a> a problem in the <tt>getdents()</tt> patch: if a file has been
+fixed in io_uring, and its reference count is one, it will be possible to
+run multiple <tt>getdents()</tt> operations concurrently within io_uring,
+each of which will access <tt>f_pos</tt> without taking the lock.  The
+results of this concurrency are highly unlikely to be what the developer
+was hoping for.  One might argue that this is a "then don't do that" sort
+of situation but, as Brauner described in his patch addressing the problem,
+io_uring is not the only way to run into trouble.
+<p>
+In 2020, the kernel acquired an interesting system call named <a
+href="/Articles/808997/"><tt>pidfd_getfd()</tt></a>, which allows a
+suitably privileged process to extract an open file descriptor from a
+running process.  This operation can be useful for, among other things,
+enabling a privileged supervisor process to perform operations that another
+process cannot perform on its own; opening a file outside of a container
+might be one example.  For this to work, the file descriptor created by
+<tt>pidfd_getfd()</tt> must refer to the same open <tt>file</tt> structure
+as the descriptor in the target process.  It creates a second reference to
+that structure, and the reference count is duly incremented to reflect
+that.
+<p>
+A problem arises, though, if the target process has a <tt>getdents()</tt>
+call underway when its file descriptor is grabbed by
+<tt>pidfd_getfd()</tt>.  Since, when <tt>getdents()</tt> was called, the
+file's reference count was one, the target process will not have acquired
+<tt>f_pos_lock</tt>.  If the process that obtained the file descriptor with
+<tt>pidfd_getfd()</tt> also passes it to <tt>getdents()</tt>, things can go
+wrong.  The second call will see the elevated reference count and acquire
+<tt>f_pos_lock</tt> but, since the first call did not acquire that lock,
+that acquisition will succeed immediately and the two <tt>getdents()</tt>
+call will run concurrently, once again with something other than the
+intended results.
+<p>
+The fix is easy enough: simply remove the check on <tt>f_count</tt> and
+acquire <tt>f_pos_lock</tt> unconditionally.  That will impose a
+performance cost, but nobody seems to have been worried enough about it to
+actually measure it.  Linus Torvalds <a
+href="https://git.kernel.org/linus/20ea1e7d13c1b">applied the patch</a> for
+the 6.5-rc4 release after editing the changelog (which he <a
+href="/ml/linux-fsdevel/CAHk-=whfJhag+iEscftpVq=dHTeL7rQopCvH+Pcs8vJHCGNvXQ@mail.gmail.com/">described</a>
+as "<q>*way* too much</q>", but which your editor found most useful).  He
+also complained about how <tt>pidfd_getfd()</tt> shares the <tt>file</tt>
+structure, saying it would have been better to simply reopen the file
+(creating a new <tt>file</tt> structure); that would defeat the purpose for
+<tt>pidfd_getfd()</tt>, though, since the new file descriptor would no
+longer be usable to perform actions on the other process's behalf.
+<p>
+Torvalds <a
+href="/ml/linux-fsdevel/CAHk-=wg8gY+oBoehMop2G8wq2L0ciApZEOOMpiPCL=6gxBgx=g@mail.gmail.com/">remains
+grumpy</a> about the shared access to <tt>struct file</tt> created by
+<tt>pidfd_getfd()</tt>, but it seems like it is here to stay.  In any case,
+this problem has been fixed, clearing the way for the (eventual) use of
+<tt>getdents()</tt> on fixed files in io_uring.  But it provides an
+example about how subtle assumptions regarding concurrency can go wrong in
+surprising ways.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Virtual_filesystem_layer">Filesystems/Virtual filesystem layer</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/939389/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor939809"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A virtual filesystem locking surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2023 15:14 UTC (Mon)
+                               by <b>brauner</b> (subscriber, #109349)
+                              [<a href="/Articles/939809/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; That will impose a performance cost, but nobody seems to have been worried enough about it to actually measure it.</span><br>
+<p>
+Actually, I did request performance measurements from Intel's lkp-tests even before I sent that patch but only received them after it was applied.<br>
+<p>
+To quote from that (private) mail:<br>
+<p>
+"we've already been merging it into our<br>
+so-called hourly kernels which are distributed to our machine pool for<br>
+various performance tests which we supported.<br>
+<p>
+so far, we didn't capture any performance change caused by this branch.<br>
+<p>
+in order to avoid missing, we aslo decided to run some performance tests<br>
+directly upon this branch [...]<br>
+to see if it could cause any performance change comparing to v6.5-rc1.<br>
+<p>
+firstly we want to check stress-ng jobs with HDD such like:<br>
+stress-ng-class-filesystem<br>
+stress-ng-class-io<br>
+stress-ng-class-os<br>
+stress-ng-class-vm-stack<br>
+stress-ng-os-1-thread<br>
+upon our Ice Lake and Cascade Lake test machines."<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/939809/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor939818"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A virtual filesystem locking surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2023 17:10 UTC (Mon)
+                               by <b>wsy</b> (subscriber, #121706)
+                              [<a href="/Articles/939818/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;    if (file_count(file) &gt; 1)</span><br>
+<span class="QuotedText">&gt;        mutex_lock(&amp;file-&gt;f_pos_lock);</span><br>
+<p>
+What happens if the refrence count changed between the check and the lock?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/939818/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor939835"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A virtual filesystem locking surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2023 19:03 UTC (Mon)
+                               by <b>stevie-oh</b> (subscriber, #130795)
+                              [<a href="/Articles/939835/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My understanding is that this is (well, *was*) ostensibly impossible, because the requirement is twofold: there is only one reference to this file descriptor, _and_ the process that has that reference is single-threaded.<br>
+<p>
+The logic goes like this:<br>
+1. Only one reference exists to this file descriptor<br>
+2. The reference belongs to a process with only one thread<br>
+3. Therefore, right now, there is only one thread that can access or manipulate this file descriptor<br>
+4. Right now, that thread is busy running executing this function, which means it can't conflict with anything.<br>
+<p>
+The problem, then, is that io_uring and pidfd_getfd violate the validity of the leap from 2-&gt;3.   pidfd_getfd would do what you mentioned: it allows the reference count to be incremented by a thread from another process.  io_uring, on the other hand, seems to do work on threads that don't get "counted" for #2.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/939835/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor939852"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A virtual filesystem locking surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2023 21:13 UTC (Mon)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/939852/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Functions such as fdget_pos() return a bunch of flags for later use in fdput() and fdput_pos(). One such flag is FDPUT_POS_UNLOCK, which directs fdput_pos() to release the mutex.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/939852/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor939822"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">General solution</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2023 18:27 UTC (Mon)
+                               by <b>calumapplepie</b> (guest, #143655)
+                              [<a href="/Articles/939822/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IMO, not acquiring a lock just because the reference count is *currently* one is a pretty nasty anti-pattern, but is also a really useful strategy in a lot of cases.  It's nasty because it always creates a race window where a process can acquire a second reference to $PROTECTED_STRUCTURE and then see the instance success.  Its useful because there are just so many cases where most objects will be doing something singlethreaded but the occasional object might be used concurrently.<br>
+<p>
+Proposal: someone rigs up something clever, as a general solution that can be applied to all the various objects in the kernel, via a little struct that can be put inside a larger object, call it 'rcutex'.  It tracks whether or not a user can assume that there is only a single reference to an object; when you're going lock-acuqiring, you simply check if the bit is set, and if so you can go ahead with the assumption that you have an exclusive reference.  When you go to make a new reference to an object containing an rcutex, you clear the singlethreaded bit, wait an RCU grace period if it was set, and then you can proceed knowing that there are no ongoing lockless accesses.<br>
+<p>
+Now, I'm not Paul McKenney, so take this with a grain of salt, but I think it should be possible to use the grace periods of RCU, or a similar construct, to accomplish this.  The details are beyond me, however; do we make the rcutex some sort of RCU-proected pointer, or will we need a non-rcu solution?  This will obviously slow down the adding-references-to-existing-objects case, due to the need to wait a grace period; there are a half dozen ways to amortize that cost springing to mind, both through heuristics and through trying to avoid actually waiting the period in a time-critical path.  Some caution is needed for the case of two references being added at the same time; but two people clearing a bit still results in a cleared bit*<br>
+*probably.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/939822/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor939860"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">General solution</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2023 22:44 UTC (Mon)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/939860/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That seems like a potentially useful structure, as long as people acquiring the second reference to something are willing to wait the (potentially considerable) amount of time for an RCU grace period to expire.<br>
+<p>
+That might be a reasonable amount of overhead for pidfd_getfd, for instance.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/939860/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor940235"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">General solution</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2023 8:14 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/940235/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Link to documentation for people (like me) who are unfamiliar with the term "RCU": <a href="https://www.kernel.org/doc/Documentation/RCU/rcu.txt">https://www.kernel.org/doc/Documentation/RCU/rcu.txt</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940235/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor940259"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">General solution</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2023 10:31 UTC (Thu)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/940259/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's a wealth of articles on RCU here on LWN too, from the RCU author, e.g.: <a href="https://lwn.net/Articles/263130/">https://lwn.net/Articles/263130/</a><br>
+<p>
+Just google for "LWN RCU" in your favourite search engine, e.g. DuckDuckGo.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940259/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor940284"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RCU</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2023 13:13 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/940284/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      ...or look in <a href="/Kernel/Index/#Read-copy-update">the RCU section</a> of the LWN kernel index.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/940284/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor941347"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A virtual filesystem locking surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 12, 2023 4:34 UTC (Sat)
+                               by <b>dxin</b> (guest, #136611)
+                              [<a href="/Articles/941347/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Isn't mutex_lock already heavily optimized for the uncontended case? E.g mutex_trylock_fast. Is it still necessary to find a case to skip the locking like this?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941347/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

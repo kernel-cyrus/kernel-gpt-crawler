@@ -1,0 +1,800 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Restartable sequences in glibc [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/883104/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/882885/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/883104/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Restartable sequences in glibc</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 31, 2022</br>
+           </div>
+"Restartable sequences" are small segments of user-space code designed to
+access per-CPU data structures without the need for heavyweight locking.
+It is a relatively obscure feature, despite having been supported by the
+Linux kernel since the 4.18 release.  Among other things, there is no
+support in the GNU C Library (glibc) for this feature.  That is about to
+change with the upcoming  <a
+href="https://sourceware.org/glibc/wiki/Release/2.35">glibc 2.35</a>
+release, though, so a look at the user-space API
+for this feature is warranted.
+<p>
+The kernel makes extensive use of per-CPU data structures to avoid locking.
+This technique works well if the kernel takes care to disable
+preemption while those data structures are being manipulated; as long as a
+task running in the kernel has exclusive access to the data, it can safely
+make changes.  It would be nice to be able to use similar techniques in
+user space, but user-space code lacks the luxury of being able to disable
+preemption.  So a different approach, which relies on detecting rather than
+preventing preemption, must be used.
+<p>
+<h4>A restartable-sequences refresher</h4>
+<p>
+That approach is restartable sequences, which were first <a
+href="/Articles/650333/">proposed</a> by Paul Turner in 2015, then later <a
+href="/Articles/697979/">pursued</a> by Mathieu Desnoyers and <a
+href="http://git.kernel.org/linus/d7822b1e24f2">merged</a> in 2018.
+Restartable sequences rely on a couple of simple
+rules for the creation of safe, lock-free critical sections.  The first rule
+is that the critical section cannot make any changes to the protected data structure
+that are visible to other threads until the final instruction in that
+section.  That last instruction will typically be a pointer assignment
+making the new state of things visible.  The other rule is that the section
+can be interrupted at any time prior to that last instruction; when that
+happens, the code must be able recover and restart the operation from the
+beginning.
+<P>
+Using restartable sequences is a bit tricky because user space must be able
+to tell the kernel when such a sequence is running.  Executing a system
+call would defeat the purpose of the entire exercise, though; at that
+point, the thread might as well just grab a lock.  So, instead, restartable
+sequences are managed with a special region of memory shared between user
+space and the kernel.  Specifically, user space sets up a special
+structure, <a
+href="https://elixir.bootlin.com/linux/v5.16.3/source/include/uapi/linux/rseq.h#L56"><tt>struct
+rseq</tt></a>, and informs the kernel of this structure using the
+<tt>rseq()</tt> system call.  The structure is a bit complex, but at its
+core is field called <tt>rseq_cs</tt>, which is a pointer to <a
+href="https://elixir.bootlin.com/linux/v5.16.3/source/include/uapi/linux/rseq.h#L40">a
+structure also called <tt>rseq_cs</tt></a>, containing the description of a critical
+section: 
+<p>
+<pre>
+    struct rseq_cs {
+	__u32 version;
+	__u32 flags;
+	__u64 start_ip;
+	__u64 post_commit_offset;
+	__u64 abort_ip;
+    };
+</pre>
+<p>
+To set up a critical section, a user-space thread fills in an
+<tt>rseq_cs</tt> structure, setting <tt>start_ip</tt> to the address of the
+first instruction in that section.  The <tt>post_commit_offset</tt> is the
+length of the critical section in bytes; when added to <tt>start_ip</tt>
+the result is the first instruction after the end of the section.
+<tt>abort_ip</tt>, instead, is the address of the instruction to jump to if
+the sequence is interrupted (via preemption or CPU migration, for example)
+before it completes.  <tt>version</tt> should be zero, and the
+<tt>flags</tt> field can be used to tweak restart 
+behavior; some information on that can be found in <a
+href="https://git.kernel.org/pub/scm/libs/librseq/librseq.git/tree/doc/man/rseq.2">this
+man page source</a>.
+<p>
+Actually running the critical section is a matter of storing the address of
+the <tt>rseq_cs</tt> structure into the <tt>rseq</tt> structure that was
+registered with the kernel; this should be done just prior to entry into
+the section.  Whenever the kernel preempts the
+thread, it will check the instruction pointer to see whether the critical
+section was executing at the time; if so, when the thread resumes
+execution, it will jump to the <tt>abort_ip</tt> address, at which point it
+should recover and try again.
+<p>
+One potential problem with the restartable-sequences ABI is that any given
+thread can only register a single <tt>rseq</tt> structure with the kernel.
+Even checking a single structure adds a bit of overhead to the hottest
+parts of the scheduler; checking a list of them would be unacceptable.  The
+restriction makes sense, but it does pose a problem in situations where
+there might be more than one user of restartable sequences in a thread;
+some of them might be buried inside libraries and invisible to users of
+those libraries, perhaps several layers up the call stack.  For restartable
+sequences to be a reliable mechanism, there must be a way to prevent these
+users from stepping on each other's toes.
+<p>
+<h4>The GNU C Library's approach</h4>
+<p>
+If glibc is to expose restartable sequences to its users, it must have a
+plausible answer to the sharing problem.  The <a
+href="/ml/libc-alpha/cover.1638880888.git.fweimer@redhat.com/">implementation</a>
+put together by Florian Weimer takes the approach of putting glibc in the
+middle for users of this mechanism.  Thus, the registration of the
+<tt>rseq</tt> structure with the <tt>rseq()</tt> system call is done by
+glibc itself during initialization; by the time user code runs, that setup
+will have already been performed.  Should an application want to perform
+its own registration (and not use the glibc support at all), the
+<tt>glibc.pthread.rseq</tt> <a
+href="https://www.gnu.org/software/libc/manual/html_node/Tunables.html">tunable</a>
+can be used to disable the automatic registration.
+<p>
+Applications using restartable sequences via glibc should include
+<tt>&lt;sys/rseq.h&gt;</tt>.  This header defines the <tt>rseq</tt> and
+<tt>rseq_cs</tt> structures and a few important variables, the first of
+which is <tt>__rseq_size</tt>.  That will be the size of the <tt>rseq</tt>
+structure registered by the library, or zero if registration didn't happen
+for whatever reason (no support in the kernel or disabled, for example).
+<p>
+Finding the <tt>rseq</tt> structure registered by glibc is not quite as
+straightforward as one might think.  It is stored in the thread control
+block (TCB) maintained by the library; specifically, it can be found at an
+offset of <tt>__rseq_offset</tt> bytes from the thread pointer.  Actually
+getting at the thread pointer is an architecture-specific affair, though;
+GCC offers <tt>__builtin_thread_pointer()</tt> for some architectures but
+not all.  As it happens, x86 is one of the exceptions; there the thread
+pointer is stored in the FS register and applications must fetch it
+themselves.
+<p>
+The glibc-registered <tt>rseq</tt> structure is shared by all users within
+a given thread, but each user should create its own <tt>rseq_cs</tt>
+structure describing its critical section.  Immediately prior to entering
+its critical section, a thread should store the address of its
+<tt>rseq_cs</tt> structure into the <tt>rseq_cs</tt> field of the global
+<tt>rseq</tt> structure; it should reset that field to <tt>NULL</tt> on
+exit.  This setup implies that critical sections cannot nest, but these
+sections are meant to be short and should not be calling into other code
+anyway, so that will not be a problem.
+<p>
+The code located at <tt>abort_ip</tt> must begin with the special
+<tt>RSEQ_SIG</tt> sentinel, which is defined in an architecture-dependent
+manner.  Note that, if the abort code is invoked, the <tt>rseq_cs</tt>
+field will be zeroed by the kernel and must be assigned anew before
+reentering the critical section.
+<p>
+There is also an <tt>__rseq_flags</tt> variable containing the flags that
+were used when registering with the kernel; according to <a
+href="/ml/libc-alpha/67665bb0d00cd540def5bfe758c94c98458536df.1638880889.git.fweimer@redhat.com/">Weimer's
+documentation patch</a>, that variable is always set to zero for now.
+<p>
+With that structure in place, applications using glibc can now use
+restartable sequences in a cooperative way.  Unfortunately, there aren't
+really any useful examples of code using this new API to point to; this is
+all new stuff at this point.
+
+<p>
+As readers have likely understood by now, actually coding the critical
+section almost certainly requires resorting to assembly language.  This is
+clearly not a feature that is intended for casual or frequent use, but it
+can evidently produce significant performance gains in systems with high
+scalability requirements.  Support in the GNU C Library will make
+restartable sequences a bit more accessible, but it seems destined
+to remain a niche feature used by few developers.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Restartable_sequences">Restartable sequences</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/883104/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor883353"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 31, 2022 18:42 UTC (Mon)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/883353/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Coincidentally I just added rseq support to rr.<br>
+<p>
+I&#x27;m a bit surprised that glibc is going to default to initializing rseq for every thread. An extra syscall for every thread creation, whether or not rseq will actually be used, seems like unnecessary overhead and this is also going to break every existing rseq user. Wouldn&#x27;t it have made more sense to require users to call some kind of &quot;ensure rseq initialized&quot; function on each thread before they use rseq?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883353/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor883359"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 31, 2022 20:04 UTC (Mon)
+                               by <b>mjw</b> (subscriber, #16740)
+                              [<a href="/Articles/883359/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Did you have to do anything special for rr?<br>
+Do you have a pointer to your patch?<br>
+<p>
+For valgrind we opted for now to simply return ENOSYS for rseq after consulting with the glibc hackers to confirm this causes glibc to simply skip the rseq setup when running under valgrind (as if running on a kernel that doesn&#x27;t implement rseq).<br>
+<p>
+<a href="https://bugs.kde.org/show_bug.cgi?id=405377">https://bugs.kde.org/show_bug.cgi?id=405377</a><br>
+<p>
+A real implementation is somewhat tricky if you might have instrumented the restartable sequence. DynamoRIO lists some issues and their current &quot;run twice&quot; approach <a href="https://dynamorio.org/page_rseq.html">https://dynamorio.org/page_rseq.html</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883359/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor883366"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 31, 2022 23:54 UTC (Mon)
+                               by <b>zx2c4</b> (subscriber, #82519)
+                              [<a href="/Articles/883366/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="https://github.com/rr-debugger/rr/commit/64f0d4ef83bd36ee93bc2734b5095d2c5138afae">https://github.com/rr-debugger/rr/commit/64f0d4ef83bd36ee...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883366/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor883378"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2022 6:53 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/883378/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+rr generally doesn&#x27;t instrument code. Also, we run code on a single core and control scheduling. It is therefore pretty easy to for us to emulate rseq completely. We don&#x27;t pass the syscall through, instead when rr performs a context switch or signal delivery, we emulate an rsync abort ourselves if necessary.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883378/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor883379"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2022 6:54 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/883379/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oh and rr also pins tracees to a single core (usually) so there are never any CPU migrations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883379/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor883374"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2022 1:57 UTC (Tue)
+                               by <b>compudj</b> (subscriber, #43335)
+                              [<a href="/Articles/883374/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+AFAIK glibc expects to do heavy use of rseq. The initial use-case is to speed up sched_getcpu() on various architectures, but they also want to use it other future improvements internal to glibc.<br>
+<p>
+So glibc is not just wiring rseq up for the application. It expects to use it as well even before the application main() is started.<br>
+<p>
+I tried to keep track of all rseq &quot;early adopter&quot; open source projects (e.g. tcmalloc), and they have been made aware that they would have to update their userspace ABI to adapt to the glibc ABI. It was not an issue for them. I maintain librseq, which I have adapted to co-exist with glibc 2.35 and older glibc as well. I have not made any official release of this librseq project yet especially because I was awaiting a final choice on the userspace ABI, which is now happening with glibc 2.35. I have also sent a patch series to Peter Zijlstra to update the Linux kernel rseq selftests so they can co-exist with glibc 2.35. It is queued in the tip tree for the next merge window.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883374/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor883392"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2022 14:29 UTC (Tue)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/883392/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>Looks like the notion <i>this is clearly not a feature that is intended for casual or frequent use, but it can evidently produce significant performance gains in systems with high scalability requirements</i> is completely wrong: it would <b>absolutely</b> be the feature which many apps would be “frequently using”… although not directly but because small handful of very low-level libraries would adopt it eagerly.</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883392/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor883458"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2022 21:37 UTC (Tue)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/883458/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is there a compatibility story for those libs getting linked into something that doesn&#x27;t link to glibc (e.g. because it uses musl or something)? Or are those users just out of luck?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883458/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor883463"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Musl</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2022 21:49 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/883463/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Marginally related: the musl developer <a href="https://lwn.net/ml/libc-alpha/20220201152112.GL7074@brightrain.aerifal.cx/">isn't entirely happy</a> with the glibc plan and would like to see it delayed.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883463/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor883496"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2022 11:41 UTC (Wed)
+                               by <b>compudj</b> (subscriber, #43335)
+                              [<a href="/Articles/883496/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+librseq can be used as an alternative way to register rseq for cases where the libc does not handle rseq. It requires the application to explicitly call a register/unregister API at the beginning/end of each thread&#x27;s lifetime. It is compatible with the glibc-2.35+ ABI as well and will let glibc handle rseq registration in those cases. See <a href="https://git.kernel.org/pub/scm/libs/librseq/librseq.git/">https://git.kernel.org/pub/scm/libs/librseq/librseq.git/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883496/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor883368"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2022 1:26 UTC (Tue)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/883368/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In the case of nested restartable sequences, what would even be the correct behavior? If sequence A called into code that started sequence B, and an interruption occurred during B, should we jump to A&#x27;s interruption vector or B&#x27;s? Technically, they were BOTH interrupted, but the failure of B is part of the failure of A? So we should jump to A&#x27;s vector?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883368/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor883372"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2022 1:51 UTC (Tue)
+                               by <b>compudj</b> (subscriber, #43335)
+                              [<a href="/Articles/883372/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is no such thing as nested restartable sequences. A rseq c.s. cannot issue a function call that moves the instruction pointer outside of the critical section range.<br>
+<p>
+Please keep in mind that this is user-space code, so interrupt handlers don&#x27;t really make sense in this context. What happens when a signal is delivered on top of a rseq critical section is very much relevant though.<br>
+<p>
+What happens in this case is that the rseq c.s. interrupted by the signal handler will be aborted (it&#x27;s instruction pointer moved to the abort_ip) so when the signal handler returns, the interrupted thread will continue its execution at the abort ip. It&#x27;s pretty much as simple as that.<br>
+<p>
+This allows using rseq critical sections within signal handlers as well.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883372/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor883436"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2022 16:10 UTC (Tue)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/883436/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I&#x27;m thinking in terms of code that may itself make use this restartible sequences feature, within a restartable sequence. It would be a linear sequence of code, but there may be a subtask of one atomic sequence that itself makes the most sense to implement as an atomic sequence. I have a hard time imagining such a senario (why not just handle cleanup for both sequences as part of the code at the outer sequence&#x27;s cleanup vector, and omit the inner sequence&#x27;s guards?) but I wouldn&#x27;t be surprised if such a case existed.<br>
+<p>
+As for how such a situation could ever occur, the article mentions calling code that makes use of restartible sequences, which I suppose could be inlined. So, one bit of restartible code could call a data manipulation library that itself naively tried to create a restartible sequence to protect it&#x27;s own data structures. Each is trying to protect it&#x27;s manipulation of it&#x27;s data structures from access during premption by discarding results that were being worked on if a premption occurred.<br>
+<p>
+The tricky thing here is the matter of cleanup. If something interrupts both sequences by occuring during the nested sequence, then you could restart just the inner sequence but that&#x27;s wrong because the outer sequence is interrupted and doesn&#x27;t know it. BUT, if you run just out outer sequence&#x27;s cleanup code, then the data structures for the inner sequence may be left in an indeterminate state with the changes not being discarded. You can&#x27;t run both, because only the entry not the exit is defined.<br>
+<p>
+And while we&#x27;re at it, we&#x27;re invented the C++ problem of memory cleanup :/<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883436/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor883438"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2022 16:24 UTC (Tue)
+                               by <b>compudj</b> (subscriber, #43335)
+                              [<a href="/Articles/883438/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The code for a restartable sequence critical section sits squarely within a single inline asm. So there is no way one could &quot;call&quot; a data manipulation library from the inline asm without an explicit call, which would move the instruction pointer outside of the critical section, and is not at all a supported use-case.<br>
+<p>
+So I really don&#x27;t think the scenario you have in mind can realistically happen with the current rseq ABI.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883438/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor883369"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2022 1:38 UTC (Tue)
+                               by <b>compudj</b> (subscriber, #43335)
+                              [<a href="/Articles/883369/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A small correction about the sentence &quot;Immediately prior to entering its critical section, a thread should store the address of its rseq_cs structure into the rseq_cs field of the global rseq structure; it should reset that field to NULL on exit.&quot; in the article.<br>
+<p>
+Whereas it is OK to set rseq_cs to NULL when exiting a rseq critical section, it is not actually needed. The only requirement is that the rseq_cs pointer is set to NULL at some point after exiting the rseq critical section, but before reclaim of the memory holding the rseq_cs structure and the code it points to (e.g. dlclose(3) of a shared library).<br>
+<p>
+Removing the requirement for setting the rseq_cs pointer to NULL on exit from a rseq critical section is a significant performance improvement considering that the entire critical section is implemented with very few instructions, which is achieved by letting the kernel detect when it returns to user-space over an instruction pointer which is outside of the range of the rseq critical section. When this is detected, the kernel simply clears the rseq_cs pointer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883369/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor883376"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2022 3:27 UTC (Tue)
+                               by <b>compudj</b> (subscriber, #43335)
+                              [<a href="/Articles/883376/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In order to facilitate use of rseq for the mere mortals, I&#x27;ve been working on a library called librseq. It is available at <a href="https://git.kernel.org/pub/scm/libs/librseq/librseq.git/">https://git.kernel.org/pub/scm/libs/librseq/librseq.git/</a> . It has two goals: <br>
+<p>
+Its primary goal is to provide a higher-level C API as static inline functions to implement the critical sections for common use-cases on all supported architectures (currently x86 32/64, arm 32/64, powerpc 32/64, s390, s390/x, and mips). It does the heavy lifting: it implements the per-architecture assembly for each per-cpu data access pattern.<br>
+<p>
+Its second goal is to provide a rseq registration API to be used with older glibc (before 2.35) which is also compatible with glibc 2.35.<br>
+<p>
+librseq is available under both LGPLv2.1 and MIT licenses. This library is still under active development, with no official release yet.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883376/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor883470"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2022 2:38 UTC (Wed)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/883470/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If I&#x27;m understanding things correctly, it seems that the only real problem glibc is solving is the following:<br>
+<p>
+1. In order to use restartable sequences, someone needs to alloc a struct rseq and tell the kernel about it. Also, you can&#x27;t free that struct unless the thread exits or you tell the kernel to stop using it.<br>
+2. If multiple different libraries or codepaths try to do that, they will step on each other.<br>
+3. Therefore, someone needs to &quot;own&quot; the struct rseq for each thread, and everyone needs to agree on the ownership of this struct.<br>
+4. However, once everyone agrees on who owns the struct, there&#x27;s nothing wrong with foreign code overwriting the struct, so long as it stays within its own thread and doesn&#x27;t have any reentrancy issues (the struct only needs to be valid over short instruction sequences, and nesting is explicitly unsupported - clobbering somebody else&#x27;s rseq state is a non-issue as long as you don&#x27;t move the struct, free it, or clobber it from a signal handler).<br>
+<p>
+glibc fills the role of the &quot;someone&quot; in step 3. However, I don&#x27;t understand why this role must necessarily be filled by a specific, fixed userspace component at all. If the kernel exposed an API for querying the address of a thread&#x27;s current struct rseq (which the kernel surely knows), then you could just take a &quot;first to call rseq() wins&quot; approach, and completely sidestep the ownership issue altogether. You would still have the problem that the struct must be freed when the thread exits (and no earlier!), and in practice this might result in glibc trying to be the first to initialize it anyway, but there would be no need for an explicit userspace ABI for this sort of coordination - everybody could just use the kernel to coordinate who owns the struct. OTOH, I suppose there might be some sequencing issues when the thread exits (i.e. during the thread-exiting process, exactly when does it become &quot;safe&quot; to free/reclaim the struct rseq?), but I tend to imagine that there are ways of solving this problem (e.g. it must be allocated on the owning thread&#x27;s stack, it must be free&#x27;d from a different thread after the owning thread is gone, or something similar), and it probably wouldn&#x27;t be too hard to agree on a convention for how to do that.<br>
+<p>
+Have I misunderstood something?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883470/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor883473"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2022 4:06 UTC (Wed)
+                               by <b>foom</b> (subscriber, #14868)
+                              [<a href="/Articles/883473/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+glibc plans to use rseq internally to do useful things like speed up malloc, so it needs to do rseq registration regardless of whether anyone else wants to use it. There doesn&#x27;t seem to be much point in creating a mechanism to share registration duties, if libc will always &quot;win&quot; anyways.<br>
+<p>
+As far as not exposing any user space abi: if you don&#x27;t, every user would then need to make a syscall to retrieve the rseq area&#x27;s location separately per thread? And presumably then cache it in a tls variable for performance? That seems a bit silly and wasteful, when it&#x27;s easy enough to just make a constant thread offset available in user space to anyone who needs it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/883473/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor938648"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Restartable sequences in glibc</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 20, 2023 13:53 UTC (Thu)
+                               by <b>vickyBishnoi</b> (guest, #166151)
+                              [<a href="/Articles/938648/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Does it possible to disable rseq for selected application?<br>
+if yes, how it can be done.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/938648/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

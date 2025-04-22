@@ -1,0 +1,729 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>io_uring, SCM_RIGHTS, and reference-count cycles [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/779472/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/779199/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/779472/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>io_uring, SCM_RIGHTS, and reference-count cycles</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 13, 2019</br>
+           </div>
+The io_uring mechanism that was <a href="/Articles/776703/">described here</a> in
+January has been through a number of revisions since then; those changes have
+generally been fixing implementation issues rather than changing the
+user-space API.  In particular, this patch set seems to have received more
+than the usual amount of security-related review, which can only be a good
+thing.  Security concerns became a bit of an obstacle for io_uring, though,
+when virtual filesystem (VFS) maintainer Al Viro <a
+href="/ml/linux-block/20190201180541.GQ2217@ZenIV.linux.org.uk/">threatened
+to veto</a> the merging of the whole thing.  It turns out that there were
+some reference-counting issues that required his unique experience to
+straighten out.
+
+<p>
+The VFS layer is a complicated beast; it must manage the complexities of
+the filesystem namespace in a way that provides the highest possible
+performance while maintaining security and correctness.  Achieving that
+requires making use of almost all of the 
+locking and concurrency-management mechanisms that the kernel offers, plus
+a couple more implemented internally.  It is fair to say that the number of
+kernel developers who thoroughly understand how it works is extremely
+small; indeed, sometimes it seems like Viro is the only one with the full
+picture.
+<p>
+
+In keeping with time-honored kernel tradition, little of this complexity is
+documented, so when Viro gets a moment to write down how some of it works,
+it's worth paying attention.  In <a
+href="/ml/linux-fsdevel/20190207040058.GW2217@ZenIV.linux.org.uk/">a long
+"brain dump"</a>, Viro described how file reference counts are managed, how
+reference-count cycles can come about, and what the kernel does to break
+them.  For those with the time to beat their brains against it for a while,
+Viro's explanation (along with a few <a
+href="/ml/linux-fsdevel/20190211173521.GI2217@ZenIV.linux.org.uk/">corrections</a>)
+is well worth reading.  For the rest of us, a lighter
+version follows.
+
+<p>
+<h4>Reference counts for file structures</h4>
+<p>
+
+The Linux kernel uses the <a
+href="https://elixir.bootlin.com/linux/v5.0-rc6/source/include/linux/fs.h#L900"><tt>file</tt></a>
+structure to represent an open file.  Every open file descriptor in user
+space is represented by a <tt>file</tt> structure in the kernel; in
+essence, a file descriptor is an index into a table in <a
+href="https://elixir.bootlin.com/linux/v5.0-rc6/source/include/linux/fdtable.h#L44"><tt>struct
+files_struct</tt></a>, where a pointer to the <tt>file</tt> structure can be
+found.  There is a fair amount of information kept in the <tt>file</tt>
+structure, including the current position within the file, the access mode,
+the <a
+href="https://elixir.bootlin.com/linux/v5.0-rc6/source/include/linux/fs.h#L1782"><tt>file_operations</tt>
+structure</a>, a <tt>private_data</tt> pointer for use by lower-level code,
+and more.
+
+<p>
+Like many kernel data structures, <tt>file</tt> structures can have
+multiple references to them outstanding at any given time.  As a simple
+example, passing a file descriptor to <a
+href="http://man7.org/linux/man-pages/man2/dup.2.html"><tt>dup()</tt></a> will
+allocate
+a second file descriptor referring to the same <tt>file</tt> structure;
+many other examples exist.  The kernel must keep track of these references
+to be able to know when any given <tt>file</tt> structure is no longer used
+and can be freed; that is done using the <tt>f_count</tt> field.  Whenever
+a reference is created, by calling <tt>dup()</tt>, forking the process,
+starting an I/O operation, or any of a number of other ways,
+<tt>f_count</tt> must be increased.  When a reference is removed, via a
+call to <tt>close()</tt> or <tt>exit()</tt>, for example, <tt>f_count</tt>
+is decreased; when it reaches zero, the structure can be freed.
+<p>
+Various operations within the kernel can create references to <tt>file</tt>
+structures; for example, a <tt>read()</tt> call will hold a reference for
+the duration of the operation to keep the <tt>file</tt> structure in
+existence.  Mounting a filesystem contained within a file via the loopback
+device will create a reference that persists until the filesystem is
+unmounted again.  One important point, though, is that references to
+<tt>file</tt> structures are not, directly or indirectly, contained within
+<tt>file</tt> structures themselves.  That means that any given chain of
+references cannot be cyclical, which is a good thing.  Cycles are the bane
+of reference-counting schemes; once one is created, none of the objects
+contained within the cycle will ever see their reference count return to
+zero without some sort of external intervention.  That will prevent those
+objects from ever being freed.
+<p>
+<h4>Enter SCM_RIGHTS</h4>
+<p>
+Unfortunately for those of us living in the real world, the situation is
+not actually as simple as portrayed above. There are indeed cases where
+cycles of references to <tt>file</tt> structures can be created, preventing
+those structures from being freed.  This is highly unlikely to happen in
+the normal operation of the system, but it is something that could be done
+by a hostile application, so the kernel must be prepared for it.
+<p>
+<a href="http://man7.org/linux/man-pages/man7/unix.7.html">Unix-domain
+sockets</a> are used for communication between processes running on
+the same system; they behave much like pipes, but with some significant
+differences.  One of those is that they support the
+<tt>SCM_RIGHTS</tt> control message, which can be used to transmit an open
+file descriptor from one process to another.  This feature is often used to
+implement request-dispatching systems or security boundaries; one process
+has the ability to open a given file (or network socket) and make decisions
+on whether another process should get access to the result.  If so,
+<tt>SCM_RIGHTS</tt> can be used to create a copy of the file descriptor and
+pass it to the other end of the Unix-domain connection.
+<p>
+
+<tt>SCM_RIGHTS</tt> will obviously create a new reference to the
+<tt>file</tt> structure behind the descriptor being passed.  This is done
+when the <a
+href="http://man7.org/linux/man-pages/man2/sendmsg.2.html"><tt>sendmsg()</tt></a>
+call is made, and a structure containing pointers to the
+<tt>file</tt> structure being passed is attached to the receiving end of
+the socket.  This allows the passing side to immediately close its file
+descriptor after passing it with <tt>SCM_RIGHTS</tt>; the reference taken
+when the operation is queued will keep the file open for as long as it
+takes the receiving end to accept the new file and take ownership of the
+reference.  Indeed, the receiving side need not have even accepted the
+connection on the socket yet; the kernel will stash the <tt>file</tt>
+structure in a queue and wait until the receiver gets around to asking for
+it. 
+
+<p>
+Queuing <tt>SCM_RIGHTS</tt> messages in this way makes things work the way
+application developers would expect, but it has an interesting side effect:
+it creates an indirect reference from one <tt>file</tt> structure to
+another.  The <tt>file</tt> structure representing the receiving end of an
+<tt>SCM_RIGHTS</tt> message, in essence, owns a reference to the
+<tt>file</tt> structure transferred in that message until the application
+accepts it.  That has some important implications.
+<p>
+Suppose some process connects to itself via a Unix-domain socket, so it has
+two file descriptors, call them FD1 and FD2, one corresponding to each end
+of the connection.  It then proceeds to use <tt>SCM_RIGHTS</tt> to send FD1 to
+FD2 and the reverse; each file descriptor is sent to the opposite end.  We
+now have a situation where the <tt>file</tt> structure at each end of the
+socket indirectly holds a reference to the other — a cycle, in other words.
+This can work 
+just fine; if the process then accepts the file descriptor sent to either
+end (or both), the cycle will be broken and all will be well.
+<p>
+If, however, the process closes FD1 and FD2 without accepting the
+transferred file descriptors, it will remove the
+only two references to the underlying <tt>file</tt> structures — except for
+those that make up the cycle itself.  Those <tt>file</tt> structures will
+have a permanently elevated reference count and can never be freed.  If
+this happens once as the result of an application bug, there is no great
+harm done; a small amount of kernel memory will be leaked..  If a hostile
+process does it repeatedly, though, those cycles 
+could eventually consume a great deal of memory.
+<p>
+
+There are other ways of using <tt>SCM_RIGHTS</tt> to create this kind of
+cycle as well.  The problem always involves descriptor-passing datagrams
+that have never been received, though; this fact is used by the kernel to
+detect and break cycles.  When a <tt>file</tt> structure corresponding to a
+Unix-domain socket gains a reference from an <tt>SCM_RIGHTS</tt> datagram,
+the <tt>inflight</tt> field of the corresponding <a
+href="https://elixir.bootlin.com/linux/v5.0-rc6/source/include/net/af_unix.h#L50"><tt>unix_sock</tt></a>
+structure is incremented.  If the reference count on the
+<tt>file</tt> structure is higher than the <tt>inflight</tt> count (which
+is the normal state of affairs), that
+file has external references and is thus not part of an unreachable cycle.
+
+<p>
+If, instead, the two counts are equal, that <tt>file</tt> structure
+<i>might</i> be 
+part of an unreachable cycle.  To determine whether that is the case, the
+kernel finds the set of all in-flight Unix-domain sockets for which all
+references 
+are contained in <tt>SCM_RIGHTS</tt> datagrams (for which <tt>f_count</tt>
+and <tt>inflight</tt> are equal, in other words).  It then counts how many
+references to each of those sockets come from <tt>SCM_RIGHTS</tt>
+datagrams attached to sockets in this set.  Any socket that has references
+coming from outside the set is reachable and can be removed from the set.
+If it is reachable, and if there are any
+<tt>SCM_RIGHTS</tt> datagrams waiting to be consumed attached to it,
+the <tt>file</tt>s contained within that datagram are also reachable and
+can be removed from the set.
+<p>
+At the end of an iterative process, the kernel may
+find itself with a set of in-flight Unix-domain sockets that are only
+referenced by unconsumed (and unconsumable) <tt>SCM_RIGHTS</tt> datagrams;
+at this point, it 
+has a cycle of <tt>file</tt> structures holding the only references to each
+other.  Removing those 
+datagrams from the queue, releasing the references they hold, and
+discarding them will break the cycle.
+<p>
+As one might imagine, given that the VFS is involved, there is more
+complexity than has been described above and some gnarly  locking issues
+involved in carrying out these operations.  See
+Viro's message for the gory details.
+<p>
+<h4>Fixing io_uring</h4>
+<p>
+
+Among the features provided by io_uring is the ability to "register" one or
+more files with an open ring; that speeds I/O operations by eliminating the
+need to acquire and release references to the registered files every time.
+When a file is registered with an io_uring, the kernel will create and hold
+a reference for the duration of that registration.  This is a useful
+feature but it contained a problem that, seemingly, only somebody with a
+Viro-level understanding of the VFS could spot, describe, and fix; it is a
+new variant on the cycle problem described above.  In short: a process could
+create a 
+Unix-domain socket and register both ends with an io_uring.  If it were
+then to pass the file descriptor corresponding to the io_uring itself over
+that socket, then close all of the file descriptors, a cycle would be
+created.  The io_uring code was unprepared for that eventuality.
+
+<p>
+Viro proposed a solution that involves making the file registration
+mechanism set up the <tt>SCM_RIGHTS</tt> data structures as if the
+registered file descriptor were being passed over a Unix-domain socket.
+There is a useful analogy here; registering a file can be thought of as
+passing it to the kernel to be operated on directly.  Once the setup has
+been done, the same cycle-breaking logic will find (and fix) cycles created
+using io_uring structures.
+<p>
+Jens Axboe, the author of io_uring, <a
+href="/ml/linux-fsdevel/73e23146-2138-5a46-46ed-9c7f1f912a04@kernel.dk/">implemented
+the solution</a> and verified that it works.
+With that issue resolved, it appears that the path to merging io_uring in
+the 5.1 development cycle may be clear.  In the process, a bit of light has
+been shed on a corner of the VFS that few people understand.  The problem
+of a lack of people with a wide understanding of the VFS layer as a whole,
+though, is likely to come up again; it rather looks like a cycle that we
+have not yet gotten out of.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Asynchronous_IO">Asynchronous I/O</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Virtual_filesystem_layer">Filesystems/Virtual filesystem layer</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#io_uring">io_uring</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/779472/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor779733"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 13, 2019 17:14 UTC (Wed)
+                               by <b>abatters</b> (<b>&#x272D; supporter &#x272D;</b>, #6932)
+                              [<a href="/Articles/779733/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The act of registering one file with another file reminded me of epoll.  Out of curiosity, I went to look at how epoll handles this problem.  The answer is that epoll doesn't increment the reference count when a file is added to a epoll set.  Instead, epoll hooks into the file cleanup path to automatically remove a file from all epoll sets when its reference count drops to 0.  See:<br>
+<p>
+linux/fs/eventpoll.c::eventpoll_release_file()<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779733/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor779740"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 13, 2019 19:30 UTC (Wed)
+                               by <b>axboe</b> (subscriber, #904)
+                              [<a href="/Articles/779740/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Which is a lot less elegant imho, and introduces extra conditionals in the code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779740/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor779911"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">epoll</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 15, 2019 15:12 UTC (Fri)
+                               by <b>dw</b> (guest, #12017)
+                              [<a href="/Articles/779911/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+but epoll's semantics are different, it's basically a "weak reference". Closing the FD causes the poller to unregister it, which makes sense, as the only alternative is epoll_wait() yielding events on a file for which no FD exists<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779911/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor779743"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring, SCM_RIGHTS, and reference-count cycles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 13, 2019 20:35 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/779743/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It then counts how many references to each of those sockets come from SCM_RIGHTS datagrams attached to sockets in this set. Any socket that has references coming from outside the set is reachable and can be removed from the set.</font><br>
+A tracing garbage collector, in other words.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779743/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor779747"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring, SCM_RIGHTS, and reference-count cycles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 13, 2019 23:46 UTC (Wed)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/779747/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+FWIW, gnarly locking issues are mostly in socket-related stuff.  I'd been reading through net/unix/*.c for the last week or so and it looks like the code didn't get a serious review (which, alas, pretty much has to involve people who are *not* intimately familiar with it - amazing how much crap gets caught by asking yourself "why is this done (at all|that way)?" and trying to figure it out) for quite a while ;-/<br>
+<p>
+As for the documentation...  TBH, I've lost count of how many times I'd sat down to put it together; the usual result is a series of tree-wide searches to verify the rules being described, followed by getting sidetracked to fix some bogosity caught by those.  Sometimes in VFS proper, sometimes in filesystems, sometimes it's drivers or networking or ipc or kvm or... getting creative.  With any luck the results do make the kernel better, but by the time the dust settles the original analysis needs to be re-verified (call graphs changes, locking conditions at relevant call sites, etc.).  Lather, rinse, repeat - usually it's 2-4 cycles a year ;-/<br>
+<p>
+Result is an impressive pile of notes (coherent pieces of text interspersed with edited and annotated git grep output, call graphs, need-to-fix-that-bogosity-someday notes, CoC-violating rants, etc.)<br>
+<p>
+The thing is, it's not just VFS - _some_ stuff got encapsulated sanely, but quite a bit of data structures are played with by very odd places in the kernel in very odd ways.  For example, I hadn't been able to find anyone who would admit understanding arch/ia64/kernel/perfmon.c, and that thing used to play with struct file life cycle in extremely irregular ways - had been quite a thorn for more than a decade until it got disabled in Kconfig (and seeing that nobody has complained since then, it'll hopefully go away, and good riddance).<br>
+<p>
+I don't know how to get from braindumps like that one to the set of coherent docs.  Note that this one does not go into<br>
+   * any kind of details on modifying descriptor tables and primitives for work with descriptors (iterating, etc.); relatively irrelevant for this thread, definitely needed in any documentation of descriptor tables.<br>
+   * -&gt;flush() method and notifying file of getting disconnected from descriptors (the only relevance to that thread would be "no, it's not usable for anything in this case - you'll keep getting false positives from hell every time something calls system(3)"; for any documentation of struct file life cycle it would obviously need to be included)<br>
+   * struct file lifecycle (all that is covered is basically from successful open to final fput(); alloc_file_...() and friends are not covered at all and neither are the things _after_ the final fput())<br>
+   * use of struct files * as opaque ID for POSIX locks/leases/etc. and related merry horrors in network/cluster filesystems (belongs in discussion of struct files lifetime and places where it can and cannot be poked in)<br>
+   * RCU-related issues (fortunately, fairly self-contained area)<br>
+   * lifecycle for unix_sock and related locking (I'd been nowhere near up-to-date on that; digging through this code proves to be... fruitful, as in "interesting bugs keep turning up", some in places like aushit).  Again, it's a separate topic, but it *is* getting involved here, especially now that Jens is copying gobs of that stuff into his code; we'll need to turn that into a small set of well-defined primitives, or that will be a source of massive PITA for years to come.<br>
+   * higher-level discussion of the nature of objects involved (descriptors vs. opened files vs. files being accessed) - that one I probably can fish out of the pile, remove the unprintable parts and turn into a coherent text, but that material is a lot better covered by various textbooks, so I decided to skip it.<br>
+<p>
+So it was a mashup of at least three different pieces, with different level of details and rather uneven style; it's still useful as concentrated background information relevant to the problem at hand, but turning that into sane documentation is not an easy task ;-/ Taken together and turned into readable text it would grow into a counterpart of a couple of chapters in The Daemon Book.  And that's a fairly small part of the interfaces - sure, it's the first one you get through on a lot of syscalls, but...<br>
+<p>
+I'll be glad to assist with getting such docs done (supplying missing pieces, answering questions regarding the relationship between the topics involved, etc.), but I'm afraid that I'm not up to doing it all on my own.  Another thing to keep in mind: quite a few things can change, quite possibly - as the direct result of trying to document the situation.  Freezing the kernel interfaces while the description gets written is not going to happen - not for something with that wide a surface.  Especially since all that stuff is reachable for sufficiently enterprising driver willing to poke its tender bits into machinery (and recreate the Modern Times scene with trip through the gears, often enough).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779747/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor779767"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring, SCM_RIGHTS, and reference-count cycles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 14, 2019 4:11 UTC (Thu)
+                               by <b>unixbhaskar</b> (guest, #44758)
+                              [<a href="/Articles/779767/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks, a bunch Al ! sometimes people need this kind of explanations to a get a kick on their butt to do well. People (obviously including me!) don't know so many things and your commentary made so much good to the wider audience to understand the intricacies.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779767/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor779773"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring, SCM_RIGHTS, and reference-count cycles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 14, 2019 8:43 UTC (Thu)
+                               by <b>Freeaqingme</b> (subscriber, #103259)
+                              [<a href="/Articles/779773/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Have you considered simply putting all those notes online with a huge disclaimer that it may very well be outdated at the moment of publishing? At least some parts would probably still be relevant, and it may help people see and understand why certain strategies were used/changed through the times.<br>
+<p>
+As a bonus, someone may pick up on those notes and use them as a starting point to convert into perhaps more coherent, up2date, documentation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779773/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor779777"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring, SCM_RIGHTS, and reference-count cycles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 14, 2019 10:32 UTC (Thu)
+                               by <b>kay</b> (subscriber, #1362)
+                              [<a href="/Articles/779777/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+corbet? ;)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779777/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor779889"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring, SCM_RIGHTS, and reference-count cycles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 15, 2019 13:40 UTC (Fri)
+                               by <b>ermo</b> (subscriber, #86690)
+                              [<a href="/Articles/779889/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, maybe the Linux Foundation would be willing to sponsor some work by you and corbet, which could also become a series of articles here on LWN?<br>
+<p>
+Everyone wins?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779889/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor780007"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring, SCM_RIGHTS, and reference-count cycles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 17, 2019 15:37 UTC (Sun)
+                               by <b>andyc</b> (subscriber, #1130)
+                              [<a href="/Articles/780007/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="https://lwn.net/ml/linux-fsdevel/20190211085533.35190404@lwn.net/">https://lwn.net/ml/linux-fsdevel/20190211085533.35190404@...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/780007/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor779853"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring, SCM_RIGHTS, and reference-count cycles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 14, 2019 18:31 UTC (Thu)
+                               by <b>rgmoore</b> (<b>&#x272D; supporter &#x272D;</b>, #75)
+                              [<a href="/Articles/779853/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>I don't know how to get from braindumps like that one to the set of coherent docs.</blockquote>
+
+<p>I don't know for sure either, but I would bet a good starting place would be somebody (like the Linux Foundation) hiring a technical writer to do most of the work for you.  Documentation will continue to lag behind code until somebody is willing to pay real money to get it done.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779853/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor780010"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring, SCM_RIGHTS, and reference-count cycles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 17, 2019 21:10 UTC (Sun)
+                               by <b>rweikusat2</b> (subscriber, #117920)
+                              [<a href="/Articles/780010/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Some minor additions: A process doesn't need to "connect to itself" to create an SCM_RIGHTS loop. Using to unconnected AF_UNIX sockets should work, too. There's also a socketpair systemcall which creates a pair of connected AF_UNIX sockets.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/780010/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor780510"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring, SCM_RIGHTS, and reference-count cycles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 22, 2019 4:29 UTC (Fri)
+                               by <b>scientes</b> (guest, #83068)
+                              [<a href="/Articles/780510/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The is some pretty atrocious code in systemd-journald (that I wrote) that uses proc to get the capabilities of the logging process for every logged message. My concern that this was too slow for the hot path was ignores and it was merged. It would be nice if SCM_RIGHTS of similar can allow removing this horrible code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/780510/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor780626"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">io_uring, SCM_RIGHTS, and reference-count cycles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 24, 2019 14:52 UTC (Sun)
+                               by <b>Alex.C</b> (guest, #130620)
+                              [<a href="/Articles/780626/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For interest in sample code, here is a short code : <a rel="nofollow" href="https://github.com/acassen/socket-takeover">https://github.com/acassen/socket-takeover</a><br>
+<p>
+Use-case here was to provide a seamlessly takeover from one process to another for critical software upgrade (used for components on mobile core-network).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/780626/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2019, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

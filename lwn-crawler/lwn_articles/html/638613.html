@@ -1,0 +1,1672 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Attaching file descriptors to processes with CLONE_FD [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/638613/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/638068/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/638613/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Attaching file descriptors to processes with CLONE_FD</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 1, 2015</br>
+           </div>
+The classic Unix system design has many advantages, but friendliness to library
+code is not always one of them.  The problem, at its core, is the use of
+global structures and mechanisms that cannot be manipulated independently
+by an application and any libraries it may use; the file descriptor table
+and signal handling vectors are a couple of examples.  A recently posted
+patch set is trying to address a little piece of this problem, but may
+point the way toward a larger long-term change in how processes are managed
+in Linux.
+<p>
+
+Consider a library that needs to create a child process with
+<tt>fork()</tt> and be notified when that process exits.  The library
+cannot call <tt>wait()</tt> without blocking the entire calling process and,
+possibly, interfering with the reaping of any child processes created
+elsewhere in the application.  Receiving asynchronous notifications with
+the <tt>SIGCHLD</tt> signal has a similar problem: there can only be one
+<tt>SIGCHLD</tt> handler, so catching it in the library clashes with the
+application's use of that signal.  The need to avoid this kind of conflict
+with application code can greatly limit what can be done within a library.
+<p>
+Josh Triplett's <a href="/Articles/636646/"><tt>CLONE_FD</tt></a> patch set
+is an attempt to solve that particular problem.  It adds a new flag,
+<tt>CLONE_FD</tt>, to a variant of the <tt>clone()</tt> system call (called
+<tt>clone4()</tt>); if
+that flag is 
+present, a successful <tt>clone4()</tt> will return a file descriptor
+referring to the process it just created.  There is little that can be done
+with that 
+descriptor by default, but, if the <tt>CLONE_AUTOREAP</tt> flag is also
+set, the system's behavior changes somewhat.
+<p>
+In particular, when a process created with <tt>CLONE_AUTOREAP</tt> exits,
+it will be cleaned up immediately rather than sitting in the "zombie" state
+until the parent process gets around to calling <tt>wait()</tt>.  This
+behavior can be useful in its own right if the parent process is not
+concerned about when the child exits.  If the parent does care about its
+child's exit, though, it can create a process file descriptor
+with <tt>CLONE_FD</tt>; that descriptor will become
+readable when the process exits.  In particular, it will be possible to
+read a structure like:
+<p>
+<pre>
+    struct clonefd_info {
+	uint32_t code;   /* Signal code */
+	uint32_t status; /* Exit status or signal */
+	uint64_t utime;  /* User CPU time */
+	uint64_t stime;  /* System CPU time */
+    };
+</pre>
+<p>
+With this mechanism in place, a library function can create a process and
+wait for it to complete without interfering with process management
+anywhere else in the program.  It thus solves the problem of having to
+share the machinery for managing process exit information by removing that
+sharing and, essentially, turning a running process into a sort of "file"
+that can be tracked and managed exclusively by the code that knows about
+it.
+<p>
+There was one tiny little problem in the way of implementing this solution,
+though: there is no room for additional flags for the <tt>clone()</tt>
+system call.  So Josh had to create a new one, which he called
+<tt>clone4()</tt>.  The intended interface, as presented by the
+C library, is:
+<p>
+<pre>
+    int clone4(uint64_t flags, size_t args_size, struct clone4_args *args,
+               int (*fn)(void *), void *arg);
+</pre>
+<p>
+The <tt>flags</tt> field holds the flags to the operation: the traditional
+<tt>clone()</tt> flags and the new ones described above.  As with
+<tt>clone()</tt>, the child process will call <tt>fn(arg)</tt> after its
+creation.  The <tt>args</tt> argument looks like this:
+<p>
+<pre>
+    struct clone4_args {
+	pid_t *ptid;
+	pid_t *ctid;
+	unsigned long stack_start;
+	unsigned long stack_size;
+	unsigned long tls;
+	int *clonefd;
+	unsigned clonefd_flags;
+    };
+</pre>
+<p>
+Most of these fields match arguments passed to the <tt>clone()</tt> call;
+they have just been moved into a separate structure.  The <tt>clonefd</tt>
+and <tt>clonefd_flags</tt> fields are new, though; the first is a location
+to store the created file descriptor when <tt>CLONE_FD</tt> is passed; the
+second can hold the  <tt>O_CLOEXEC</tt> and <tt>O_NONBLOCK</tt> flags to be
+applied to that file descriptor.
+<p>
+The size of the <tt>clone4_args</tt> structure must be passed separately in
+<tt>args_size</tt>.
+If fields must be added to this structure in the future, the passed size
+will allow the kernel to determine which version of the structure is in use
+and respond accordingly.
+<p>
+For completeness, the actual system call (invoked from the C library wrapper)
+looks like this:
+<p>
+<pre>
+    int clone4(unsigned flags_high, unsigned flags_low,
+               unsigned long args_size,
+               struct clone4_args *args);
+</pre>
+<p>
+At this level, <tt>clone4()</tt> behaves like <tt>fork()</tt>, returning
+into both the parent and child processes (but with different return
+values).
+<p>
+This functionality is useful enough, but the patch description also
+includes this intriguing note:
+<p>
+<div class="BigQuote">
+	The CLONE_FD file descriptor uniquely identifies a process on the
+	system in a race-free way, by holding a reference to the
+	task_struct.  In the future, we may introduce APIs that support
+	using process file descriptors instead of PIDs.
+</div>
+<p>
+Process IDs (PIDs) are subject to a narrow race condition: a process could
+exit and be replaced by another using the same PID.  In a system where
+there are many processes running and there is a lot of fork activity, the
+probability of short-term PID reuse is significant, especially if, as is
+usually the case, the range of available PIDs has not been increased beyond
+the traditional 32,768.  A file descriptor that is attached to a process at
+creation time is not subject to this race, though; it should thus be safer
+for other processes to operate on.
+<p>
+Adding file-descriptor-oriented process-management system calls is a future
+exercise, though; for now, the <tt>CLONE_FD</tt> functionality solves the
+immediate problem.  This patch has been through two rounds of review so
+far; some significant changes have been made, but the core functionality
+seems to be uncontroversial.  One more review round seems likely to happen,
+though; after that, this feature could conceivably be added as early as the
+4.2 development cycle.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#System_calls-clone">System calls/clone()</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/638613/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor638789"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 1:27 UTC (Thu)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/638789/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wow, just yesterday I was fighting pid-related bugs in rr and wishing for a feature exactly like this!<br>
+<p>
+Even when you're not writing a library and not worried about malicious pid-wraparound attacks, wrangling pids and making sure that you wait exactly once on every child is an enormous pain. Not to mention trying to mix-and-match 'waitpid' with other kinds of waiting.<br>
+<p>
+Please integrate ptrace into this and give us a reliable way to detach-and-kill a process, or better yet, specific threads!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638789/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638810"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 5:06 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638810/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ptrace is one of many APIs that ought to work on something other than PIDs, yeah.  On the other hand, ptrace's API really needs a complete overhaul, not just a small patch.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638810/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor639340"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2015 11:58 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/639340/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes indeed, but ptrace() is extra-annoying in that not only does it work on a thread-by-thread basis (so that only the thread that attached / seized can do anything), not only is its only existing interface waitpid() (waitid() throws away ptrace()-critical information and cannot be used!), but the ptrace-related waitpid() responses *only come to the attached thread*. This makes writing threaded programs that use ptrace, or programs that use ptrace and want to do anything else concurrently at all, a real nightmare.<br>
+<p>
+There was an old waitfd() patch from Casey Dahlin that endeavoured to fix this back in 2009 (by providing a pollable fd corresponding to waitpid() results), but it was rejected on the grounds that anything you could do with waitfd() you could just do by creating a new thread and waitpid()ding from that. Because of ptrace(), this is untrue.<br>
+<p>
+I reanimated this patchset for the Oracle Enterprise Kernel, but I'd be ever so glad to throw it out and use something better instead :) it has some kludges in it I am not at all proud of.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/639340/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor648149"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 15, 2015 13:12 UTC (Mon)
+                               by <b>tromey</b> (guest, #49192)
+                              [<a href="/Articles/648149/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As a former gdb developer, I'd like to say that while ptrace could use an overhaul, at the same time waiting for a total overhaul is letting the perfect be the enemy of the good.  In practical terms the biggest problem with ptrace is the reporting interface, not the requesting interface.  Having a PTRACE_FD request to get a file descriptor that gets status reports from the kernel would be a big improvement.  It would let gdb avoid clashes with libraries that also want to muck with SIGCHLD and wait*.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/648149/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor648265"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 16, 2015 15:05 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/648265/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Agreed! Hell, I had to pile a variant of the old waitfd() API into the oracle enterprise kernel for the sake of *one program* that wanted to do ptrace() waits while also waiting on a message-passing fd from elsewhere. No point sending it upstream -- it was already rejected on the grounds that you can always just waitpid() from another thread. Not if the waitpid() is waiting for ptrace() results you can't.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/648265/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor638790"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 1:43 UTC (Thu)
+                               by <b>javispedro</b> (guest, #83660)
+                              [<a href="/Articles/638790/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This seems similar to Win32's CreateProcess returning a (refcounted) handle to the process. It's interesting that the design of Linux seems to be evolving towards making FDs work like handles (e.g. anon inodes getting more use). Not saying it's a bad thing; in fact I find I prefer this approach.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638790/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638797"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 3:34 UTC (Thu)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/638797/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Evolving? PIDs were always inconsistent in the sense that most resources on Unix were managed as file descriptors.<br>
+<p>
+This simply makes things more consistent.<br>
+<p>
+Does Windows permit sending handles between unrelated processes? Because presumably you'll be able to do that with this, which open ups all manner of possibilities for process management which don't involve cgroups or a global process manager.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638797/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638799"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 3:45 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/638799/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Does Windows permit sending handles between unrelated processes?</font><br>
+Yes, although there are some issues with the required security access level.<br>
+<p>
+<font class="QuotedText">&gt; Because presumably you'll be able to do that with this, which open ups all manner of possibilities for process management which don't involve cgroups or a global process manager.</font><br>
+Well, you still have to track process hierarchies and your child processes may very well wish to use the classic Unix process management utilities. Besides, cgroups controllers offer significant additional functionality.<br>
+<p>
+But it's not a question of choosing one of them. Descriptor-based process management will allow to do lots of clever stuff in conjunction with cgroups.<br>
+<p>
+For example, right now it's pretty darn impossible to find out which cgroup caused an OOM killer to go on a rampage. It's not even possible to reliably know _what_ was killed (Go on, try it, I dare you!). So serious cgroups users often have to reimplement the OOM killer themselves.<br>
+<p>
+And it actually kinda makes sense - you can't simply pass a PID of a killed process to a cgroup-based controller, since it might be reaped. But with real descriptor-based process management such scenarios are extremely simple.<br>
+<p>
+Next on my things-UNIX-should-have-had-from-the-start list: /dev-based network device management.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638799/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638844"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 8:56 UTC (Thu)
+                               by <b>fishface60</b> (subscriber, #88700)
+                              [<a href="/Articles/638844/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If we're compiling a wishlist, can we separate mount into loadfs and attach, and have an unmount that works on file descriptors, so we can detach filesystems that have been mounted on top of.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638844/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638921"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 17:27 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638921/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Something like that was the proposal at Kernel Summit from Al Viro: separating mount into a call that opens the filesystem type (such as ext4) and then a (potentially filesystem-specific) call to feed in parameters and mount that filesystem.<br>
+<p>
+I also think it'd make sense to have that second call return a directory file descriptor, which can be used with openat without mounting it, and then feed that to a call like bindmount() (which would also be used for bind mounts, by opening a directory and feeding it in as the dirfd).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638921/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor638807"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 5:09 UTC (Thu)
+                               by <b>javispedro</b> (guest, #83660)
+                              [<a href="/Articles/638807/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Evolving? PIDs were always inconsistent in the sense that most resources on Unix were managed as file descriptors.</font><br>
+Well, "everything is a file" resources certainly are, but e.g. mutexes, timers, threads, processes, etc. are not (see win32). Oh wait, there's timerfd now... so yeah, I'd said it's been changing.<br>
+<p>
+<font class="QuotedText">&gt; Because presumably you'll be able to do that with this, which open ups all manner of possibilities for process management which don't involve cgroups or a global process manager.</font><br>
+I agree; this makes much of cgroups redundant. Obviously all of the current cgroups functionality needs to be adapted. I just wish the decision to go with process handles was made _before_ the design of cgroups.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638807/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor638813"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 5:26 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638813/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Because presumably you'll be able to do that with this, which open ups all manner of possibilities for process management which don't involve cgroups or a global process manager.</font><br>
+<p>
+Yeah, that thought crossed our minds as well.  Just for one random example, imagine if you had an inotify-like API that let you receive a new file descriptor every time a process you have a file descriptor for forks a new process.  With that alone, you can manage a whole family of child processes without using cgroups.<br>
+<p>
+And yes, it's possible to send a clonefd over a UNIX socket to some other process, for fun and hijinks. :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638813/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor638791"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 1:54 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/638791/">Link</a>] (29 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I totally love this. Now I would be able to do epoll() loops without the usual write-to-pipe-from-SIGCHLD trick or the ugly epoll_pwait.<br>
+<p>
+A small note, though: clonefd_info needs to have size and version fields for future extensions.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638791/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638795"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 3:24 UTC (Thu)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/638795/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There was always signalfd. However, signalfd requires the signal to be blocked, and only one signalfd will receive the event, so it's not something you could use from a library. But neither can a library install a SIGCHLD handler if it wanted to avoid changing global state.<br>
+<p>
+Kqueue EVFILT_SIGNAL notifies all listeners, whether or not the signal was delivered or blocked. That's nicer, but definitely not as nice as a process FD.<br>
+<p>
+Note that according to the original thread they've made sure to make this useable as a primitive to implement Capsicum's pdfork, which FreeBSD has.<br>
+<p>
+All in all this is a very welcome feature.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638795/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638910"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 15:51 UTC (Thu)
+                               by <b>wodny</b> (subscriber, #73045)
+                              [<a href="/Articles/638910/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Definitely signalfd deserves mentioning. Libevent2 gives similar functionality i.e. running signal handlers from an event loop, but interestingly internally it doesn't seem to use signalfd.<br>
+<p>
+Another thing worth mentioning is that explicitly setting SIGIGN for the SIGCHLD signal prevents zombie creation: "POSIX.1-2001 specifies that if the disposition  of  SIGCHLD  is set to SIG_IGN or the SA_NOCLDWAIT flag is set for SIGCHLD (see sigaction(2)), then children that terminate do not become zombies [...]". I wonder how CLONE_AUTOREAP interacts with that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638910/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638930"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 17:28 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638930/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+CLONE_AUTOREAP has exactly the same effect as setting SIGCHLD to SIG_IGN or setting SA_NOCLDWAIT, except that you don't actually have to ignore the signal, and for that matter, you don't have to use SIGCHLD as the signal (since clone lets you set an arbitrary signal); you can set the signal to 0 instead.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638930/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor638811"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 5:10 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638811/">Link</a>] (25 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; without the usual write-to-pipe-from-SIGCHLD trick</font><br>
+<p>
+That's actually the original motivation for this patch.  Thiago Macieira has a userspace library that emulates a subset of clonefd by installing a SIGCHLD handler and sending clonefd_info over a pipe.  Having clone4 available allows that library to work in a race-free way, and not take over process-wide SIGCHLD handling.<br>
+<p>
+<font class="QuotedText">&gt; A small note, though: clonefd_info needs to have size and version fields for future extensions.</font><br>
+<p>
+That doesn't necessarily help, especially for a first version: nothing forces userspace to actually *check* those fields, and if they don't, then they'll end up being immutable anyway because the kernel can't break old userspace.<br>
+<p>
+So our current plan is to require applications that can handle reading other structures from the clonefd to opt-in by passing an appropriate flag to clone4.  Suggestions welcome, though.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638811/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638812"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 5:22 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/638812/">Link</a>] (20 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; That doesn't necessarily help, especially for a first version: nothing forces userspace to actually *check* those fields, and if they don't, then they'll end up being immutable anyway because the kernel can't break old userspace.</font><br>
+Certainly. But it would make it easier for me to simply read the whole packet and transmit it to another part of my program for more detailed parsing. Having a length field would help here.<br>
+<p>
+<font class="QuotedText">&gt;  So our current plan is to require applications that can handle reading other structures from the clonefd to opt-in by passing an appropriate flag to clone4. Suggestions welcome, though.</font><br>
+That as well. But simply adding a length field and a bitmask with enabled options shouldn't be too hard and it might help people.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638812/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638814"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 5:30 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638814/">Link</a>] (19 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Certainly. But it would make it easier for me to simply read the whole packet and transmit it to another part of my program for more detailed parsing. Having a length field would help here.</font><br>
+<p>
+Note that clonefd behaves like a UDP socket here, in that you have to read the entire clonefd_info structure in one read() call, and any unread bits are lost.  We chose that behavior because in theory, you could hand the clonefd to multiple threads or processes, all of which can call read() in parallel, and they shouldn't race or receive partial data even if they don't read a complete structure.<br>
+<p>
+So, in effect, there *is* a length field: it's the return value from read().  If you understand a longer structure, read() a longer structure, and on older kernels you'll get a short read.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638814/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638822"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 6:13 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/638822/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's interesting. <br>
+<p>
+But this design seem to make it impossible to pass large data (command line arguments, for example).<br>
+<p>
+On the other hand, if the corresponding /proc directory could stay alive while there are open FDs to its process, then there's little need to have more information.<br>
+<p>
+Perhaps you could at least add a 'flags' field so the library code could inspect what extra fields are available?<br>
+<p>
+Also, what about getting a FD of an already running process?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638822/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638824"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 6:18 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638824/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  On the other hand, if the corresponding /proc directory could stay alive while there are open FDs to its process, then there's little need to have more information.</font><br>
+<p>
+We've actually talked about adding an API that would get you from a clonefd to the dirfd of the corresponding /proc directory, from which you could use openat to open the proc files of that process.<br>
+<p>
+<font class="QuotedText">&gt;  Perhaps you could at least add a 'flags' field so the library code could inspect what extra fields are available?</font><br>
+<p>
+Something like that might happen the first time clonefd_info gets extended, depending on the added fields.<br>
+<p>
+<font class="QuotedText">&gt; Also, what about getting a FD of an already running process?</font><br>
+<p>
+Planned for a subsequent patch.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638824/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638825"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 6:30 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/638825/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  We've actually talked about adding an API that would get you from a clonefd to the dirfd of the corresponding /proc directory, from which you could use openat to open the proc files of that process.</font><br>
+Why not just let the /proc entry to stick around? Kernel can't reuse a PID while it's still held by an open FD or am I wrong?<br>
+<p>
+<font class="QuotedText">&gt;  Something like that might happen the first time clonefd_info gets extended, depending on the added fields.</font><br>
+Oh well... I guess it's OK, but I'd definitely prefer to have a straightforward "features" flag as the first member of the structure. It'll also condition clients to the fact that the structure might get extended someday.<br>
+<p>
+<font class="QuotedText">&gt;  Planned for a subsequent patch.</font><br>
+Thanks!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638825/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638835"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 7:43 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638835/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  Why not just let the /proc entry to stick around? Kernel can't reuse a PID while it's still held by an open FD or am I wrong?</font><br>
+<p>
+Among other reasons, because file descriptors are unique system-wide, while if you have a PID, you have to know what PID namespace it's relative to.  If the process the clonefd refers to is in another PID namespace from you, and for that matter if you've passed it around via UNIX pipes, the clonefd can still hand you a dirfd that unambiguously refers to the correct /proc directory, without any PIDs or translation involved.  That seems far cleaner than, for instance, using an ioctl to get the PID from the clonefd, sprintf-ing that into a filename, and opening a file in /proc.<br>
+<p>
+Ideally, it ought to be possible to operate on processes without ever using a PID.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638835/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638836"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 7:57 UTC (Thu)
+                               by <b>iq-0</b> (subscriber, #36655)
+                              [<a href="/Articles/638836/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Radical idea: Make the filedescriptor actually be a the proc directory?<br>
+<p>
+This would mean that opening that directory directly would automatically mean that you get an equivalent handle. That multiple processes can wait on the exit of that process (and receive basic accounting information). And if the filehandle isn't opened with 'O_PATH' than the task directory would stick around, otherwise it may be automatically cleaned up.<br>
+<p>
+And why not use include the more verbose "getrusage" stats but only the "times" one?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638836/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638931"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 17:31 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638931/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  Radical idea: Make the filedescriptor actually be a the proc directory?</font><br>
+<p>
+We did consider that during the design.  We also considered making the "get file descriptor for existing process" mechanism be open("/proc/$PID/clonefd") or similar.  However, that approach would require that /proc is mounted, and would raise interesting interaction issues with containers.  The kernel has been moving in the opposite direction; for instance, see execveat, which was created specifically as an alternative to execve of /proc/self/fd/N because the latter requires a mounted /proc.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638931/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638979"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2015 7:04 UTC (Fri)
+                               by <b>iq-0</b> (subscriber, #36655)
+                              [<a href="/Articles/638979/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not saying it should be mounted, but I must admit that I don't know enough about the internals of procfs to know if you could open an fd internally.<br>
+<p>
+I guess it would be a security risk, because a process could this way get a procfs handle, follow that to '..' and have access to it's entire procfs even if the admin chose not to mount it (chroot escaping for root processes would probably become easier this way, though that is officially not considered a security mechanism).<br>
+<p>
+But I don't see how the 'open(/proc/$pid/clonefd)' would introduce a dependency on procfs. Only the feature "open a process fd for an existing process" would require that. The fd itself wouldn't necessarily have to be tied to procfs in this case (as it would in the fd for task directory).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638979/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor638934"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 17:40 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638934/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; And why not use include the more verbose "getrusage" stats but only the "times" one?</font><br>
+<p>
+clonefd_info closely matches the information available in the siginfo structure that you receive when you get SIGCHLD.  siginfo doesn't include the rusage information either.  And including the full rusage information would make the structure *much* larger.  Most callers are not likely to need that information, because they'll only care that the process exited and perhaps what exit code it exited with.<br>
+<p>
+I would propose, instead, adding a version of getrusage that takes a clonefd.  Since the task_struct will stick around as long as the clonefd remains open, those stats remain available.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638934/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638980"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2015 7:16 UTC (Fri)
+                               by <b>iq-0</b> (subscriber, #36655)
+                              [<a href="/Articles/638980/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+SIGCHLD is a relic and it's interface reflects what was available at the time.<br>
+<p>
+Most programs only care about exit status. But for anybody who is interested in resource usage, I think nobody want to know only the cpu timings. Most programs make do with it, but that is more a case of what they got, not what they want.<br>
+<p>
+We are talking about 144 bytes vs 32 bytes per exited process that has not been reaped. The pointers inside the kernel for basic administration are probably more expensive to keep around.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638980/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638982"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2015 7:35 UTC (Fri)
+                               by <b>iq-0</b> (subscriber, #36655)
+                              [<a href="/Articles/638982/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not to say that getrusage may not be the best alternative perse, pherhaps BSD process accounting of similar structure might be a better match.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638982/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor638995"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2015 8:20 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638995/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's making me tempted to just drop the CPU usage numbers and only keep the status and code, with getrusage available for anything else.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638995/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638999"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2015 8:49 UTC (Fri)
+                               by <b>iq-0</b> (subscriber, #36655)
+                              [<a href="/Articles/638999/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sure, accounting information could easily be envisioned as a future improvement when the need arises (and when the need arises it will be much clearer what kind of information is desired).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638999/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor638854"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 10:13 UTC (Thu)
+                               by <b>drysdale</b> (guest, #95971)
+                              [<a href="/Articles/638854/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; you could hand the clonefd to multiple threads or processes, all of which can call read() in parallel</font><br>
+<p>
+By the way, I'm don't think this works with v2 of the patchset (presumably because of the code with the "EOF after first read" comment and the ppos update from simple_read_from_buffer).<br>
+<p>
+(I'll send an email separately)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638854/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638863"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 10:46 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638863/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can still have multiple processes or threads read() in parallel; one of them will get a clonefd_info, and the rest will get nothing.  Same as if you handed a pipe end to multiple processes and wrote a byte to it.  That's the intended behavior.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638863/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638868"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 11:41 UTC (Thu)
+                               by <b>drysdale</b> (guest, #95971)
+                              [<a href="/Articles/638868/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, OK, I misread/misunderstood your earlier comment.<br>
+<p>
+However, I wonder if it might be more helpful for each reader to get its own clonefd_info.  That would be more consistent with the behaviour of other special-FDs (timerfds, eventfds) and I suspect it would also make it easier to implement pdwait4()-compatible behaviour in the future (where I believe the FreeBSD folk intend for multiple callers each to get their own copy of the returned information).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638868/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638936"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 17:46 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638936/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't think that's consistent with timerfd or eventfd (or signalfd for that matter); those file descriptors become readable once the desired time or event occurs, and once you read the structure, it's no longer available for other readers.<br>
+<p>
+If multiple readers each want to read their own clonefd_info, I would suggest that they should each open an independent fd for the process.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638936/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638954"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 20:44 UTC (Thu)
+                               by <b>wodny</b> (subscriber, #73045)
+                              [<a href="/Articles/638954/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; If multiple readers each want to read their own clonefd_info, I would suggest that they should each open an independent fd for the process.</font><br>
+<p>
+How can one do that? If clone() has to be used to open an fd and at the same time it creates a new process?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638954/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638956"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 20:49 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638956/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+See comments elsewhere in this thread; we're going to add a new call in the future to get an fd for an existing process (given either a PID or an existing clonefd).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638956/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor638958"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 20:58 UTC (Thu)
+                               by <b>wodny</b> (subscriber, #73045)
+                              [<a href="/Articles/638958/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      OK, I've missed the <a href="http://lwn.net/Articles/638824/">638824</a> comment.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638958/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor638941"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 18:34 UTC (Thu)
+                               by <b>hmh</b> (subscriber, #3838)
+                              [<a href="/Articles/638941/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you're going to [in the future] have more than one type of message (struct) going through the channel, won't that at least require a common header for every message, that has the message type (please, at least 32 bits worth of it) and total size (so that it can be skipped/ignored when unknown) ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638941/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638953"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 20:43 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638953/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Total size is the value returned from read(); always read the size of the structure you understand, and then process the size of the structure you get back, which may be smaller.<br>
+<p>
+Additional information to distinguish between structures would depend on the structures.  For example, if we added a flag to obtain SIGSTOP/SIGCONT information for children (as you can currenly obtain via SIGCHLD), we'd just return exactly the same clonefd_info structure, with CLD_STOPPED or CLD_CONTINUED in the code field; no need to add types or flags for that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638953/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638965"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 21:48 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/638965/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+using the length as the only version indicator is a clever hack, but it only works well as long as you never end up abandoning/depreciating any data. If you do, you end up having to pad the messages with bogus backwards compatibility data, or some rough approximation of it.<br>
+<p>
+I would have thought that the problem with /proc, specifically with slabinfo data that continues to need to be faked by slab replacements, even when it doesn't actually mean anything, would have shown this to be an "anti-pattern"<br>
+<p>
+yes, including version info wastes a little space from the beginning, but it means that you can actually eliminate fields in the future if you find that you should.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638965/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638966"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 21:53 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638966/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The length isn't the only version indicator; if we need to change something more fundamental, we can use an explicit flag for that.<br>
+<p>
+And no, we can't ever eliminate a field even with a version number, unless we have backward compatibility code to return old versions to old userspace.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638966/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor638809"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 5:11 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/638809/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for reporting on this effort!<br>
+<p>
+A correction: this patch series was co-developed with Thiago Macieira.  Please credit both of us for the patch series, not just me.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638809/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor638847"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 9:03 UTC (Thu)
+                               by <b>lkundrak</b> (subscriber, #43452)
+                              [<a href="/Articles/638847/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <dl>
+<dt><strong>SEE ALSO</strong></dt>
+<dd>FreeBSD's <a href="https://www.freebsd.org/cgi/man.cgi?query=pdfork&sektion=2">pdfork(2)</a></dd>
+</dl>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638847/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638858"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 9:53 UTC (Thu)
+                               by <b>justincormack</b> (subscriber, #70439)
+                              [<a href="/Articles/638858/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed, one of the great things about Capsicum is support for process descriptors. And allegedly it is being ported to Linux (by Google), so it would be far preferable to get process descriptors via porting Capsicum, which is a well designed nice system rather than just ad hoc adding them.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638858/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638860"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 10:28 UTC (Thu)
+                               by <b>drysdale</b> (guest, #95971)
+                              [<a href="/Articles/638860/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It turns out that implementation-wise, the process descriptor parts of Capsicum are fairly orthogonal to the capabilities/capability-mode parts of it.  (For example, I keep a topic branch in my git repo for each, and merging the two branches together only requires 3 small diffs, basically adding the Capsicum rights checks for CAP_PDGETPID/CAP_PDKILL/CAP_PDWAIT.)<br>
+<p>
+And, as is pointed out above, Josh and Thiago have been very receptive to making sure that the FreeBSD process descriptor primitives can be implemented in terms of the clonefd functionality (and future extensions to it).  So I'm optimistic that we're going to end up with the best of both worlds -- clonefd functionality as a Linux primitive that can be lightly-wrapped to be compatible with the FreeBSD process descriptor API.<br>
+<p>
+  <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638860/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor638861"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2015 10:32 UTC (Thu)
+                               by <b>justincormack</b> (subscriber, #70439)
+                              [<a href="/Articles/638861/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's great news. Looking forward to seeing it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638861/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor639003"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2015 10:07 UTC (Fri)
+                               by <b>sasha</b> (guest, #16070)
+                              [<a href="/Articles/639003/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+clonefd_info does not looks like a good API design.  If the fd is supposed to be extended to other process management facilities, read() should return a structure like this:<br>
+struct process_event {<br>
+  int type;<br>
+#define PROCESS_EVENT_TYPE_EXITED 1<br>
+ union {<br>
+   struct clonefd_info exited;<br>
+ } u;<br>
+};<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/639003/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor639357"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2015 13:52 UTC (Tue)
+                               by <b>kjp</b> (guest, #39639)
+                              [<a href="/Articles/639357/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Getting rid of PIDs and their wrap around race conditions would be awesome.  But, with this 'descriptor' to a process, how can I serialize it to disk (like a .pid file) and read it back in later?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/639357/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor639474"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2015 0:02 UTC (Wed)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/639474/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+PID files are a design smell. Any halfway-competent process supervision system (anything but sysvinit) provides a way to uniquely identify running services, usually by associating them with a file on disk.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/639474/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor639595"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Attaching file descriptors to processes with CLONE_FD</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2015 18:22 UTC (Wed)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/639595/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+After re-reading this it sounds a bit ridiculous without context, I should be more clear: the "uniqueness" comes from an inode&lt;-&gt;pid association and/or an open fd, held by the parent of the process in question, not just the contents of a file.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/639595/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

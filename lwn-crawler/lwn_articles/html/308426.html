@@ -1,0 +1,254 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Driver API: sleeping poll(), exclusive I/O memory, and DMA API debugging [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/308426/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/307993/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/308426/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Driver API: sleeping poll(), exclusive I/O memory, and DMA API debugging</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Please consider subscribing to LWN</b>
+<p>
+Subscriptions are the lifeblood of LWN.net.  If you appreciate this
+content and would like to see more of it, your subscription will
+help to ensure that LWN continues to thrive.  Please visit
+<a href="/Promo/nst-nag1/subscribe">this page</a> to join up and keep LWN on
+the net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 24, 2008</br>
+           </div>
+There are currently a number of proposed driver API changes being discussed
+on the lists.  None of them are major, but they are worth being aware of.
+<p>
+<h3>poll()</h3>
+<p>
+Most of the functions in the <tt>file_operations</tt> structure are
+concerned with I/O.  So it is not surprising that these functions are
+allowed to sleep.  Except that, as it turns out, one of them -
+<tt>poll()</tt> - cannot.  There is nothing inherent in the <tt>poll()</tt>
+or <tt>select()</tt> system calls which would require the driver
+<tt>poll()</tt> callback to be nonblocking; this requirement is, instead, a
+result of the implementation.  In essence, the core <tt>poll()</tt>
+implementation looks like this:
+<p>
+<pre>
+    for (;;)
+        set_current_state(TASK_INTERRUPTIBLE)
+    	for each fd to poll
+	    ask driver if I/O can happen
+	    add current process to driver wait queue
+        if one or more fds are ready
+	    break
+ 	schedule_timeout_range(...)
+</pre>
+<p>
+The problem is relatively straightforward: if a specific driver chooses to
+sleep in its <tt>poll()</tt> callback, the current task state will get set
+back to TASK_RUNNING and <tt>schedule_timeout_range()</tt> will return
+immediately.  So a sleeping driver turns the main loop into a busy-wait.
+<p>
+The <a href="http://lwn.net/Articles/308243/">solution</a>, as developed by
+Tejun Heo, is also straightforward.  His patch causes
+<tt>sys_poll()</tt> to define a custom wakeup function which, in turn, sets
+a new <tt>triggered</tt> flag when called.  That eliminates the need to put
+the process into <tt>TASK_INTERRUPTIBLE</tt> for the duration of the main
+loop; that can be done, instead, right before actually sleeping.
+<p>
+Most driver writers can remain unaware of this change, which looks highly
+likely to be merged for 2.6.29.  But, for those who need it, there will be
+one more degree of flexibility in the implementation of <tt>poll()</tt>
+callbacks.
+<p>
+<h3>Exclusive I/O memory</h3>
+<p>
+For a while, developers involved in the <a
+href="http://lwn.net/Articles/304105/">hunt for the e1000e corruption
+bug</a> thought that the X server might be the problem.  The real bug
+turned out to be elsewhere, but the suspicion cast upon X led to the
+development of a new API designed to make it harder for user-space programs
+to interfere with the operation of an in-kernel driver.  
+<p>
+In particular, it seemed sensible to prevent user space from manipulating
+I/O memory which has been allocated by device drivers.  This can be
+achieved by not allowing an <tt>mmap()</tt> call on <tt>/dev/mem</tt> to
+map regions already given to drivers.  If the <tt>STRICT_DEVMEM</tt>
+configuration option is set, the kernel will protect its own memory from
+mapping by user space; protecting I/O memory is really just a matter of
+extending that mechanism.
+<p>
+Arjan van de Ven has implemented that feature in his <a
+href="http://lwn.net/Articles/308348/">MMIO exclusivity</a> patch.  He
+chose, however, not to make this protection the default.  Instead, drivers
+which want exclusive access to an I/O memory region should call one of
+these new functions:
+<p>
+<pre>
+    int pci_request_region_exclusive(struct pci_dev *pdev, int bar, 
+                                     const char *res_name);
+    int pci_request_regions_exclusive(struct pci_dev *pdev, 
+                                      const char *res_name);
+    int pci_request_selected_regions_exclusive(struct pci_dev *pdev,
+				               int bars, 
+					       const char *res_name);
+</pre>
+<p>
+There is also a new, low-level allocation macro:
+<p>
+<pre>
+    request_mem_region_exclusive(start, n, name);
+</pre>
+<p>
+In each case, these functions are equivalent to their non-exclusive
+cousins, except for the changed name and the resulting exclusive
+allocation.
+<p>
+There may be cases where a developer wants to be able to map a region from
+user space on a development system, regardless of what the driver thinks.
+For such situations, there is a new <tt>iomem=relaxed</tt> boot parameter.
+When <tt>relaxed</tt> is selected, exclusive allocations are not enforced.
+Clearly this is not an option which one would want to set on a production
+system, but it may be useful in development environments.
+
+<p>
+<h3>DMA API debugging</h3>
+<p>
+The last topic is not actually an API change, but it's worth a look
+anyway.  The kernel provides a nice API for setting up DMA operations.  In
+many cases, the associated functions do little or no work; the system they
+are running on does not require any additional effort.  The result is that
+a lot of "tested" driver code may, in fact, have serious errors in its use
+of the DMA API.  When those drivers are run on a different system - one
+with an I/O memory management unit (IOMMU) in particular - those errors
+could lead to no end of unpleasant behavior.
+<p>
+Kernel developers like the idea of finding bugs before they bite users on
+remote systems.  To help make that happen with the DMA API, Joerg Roedel
+has posted <a href="http://lwn.net/Articles/308237/">a new DMA API
+debugging facility</a>.  This feature, when built into the kernel, should
+make it possible to find a number of previously-hidden bugs in device
+drivers.  It has, in fact, already turned up a few problems with in-tree
+drivers, mostly in the networking subsystem.
+<p>
+Use of this facility simply requires enabling a configuration option; the
+API itself does not change.  Once it's enabled, this code will check for a
+number of problems, including freeing DMA buffers with a different size
+than was given at allocation time, freeing buffers which were never
+allocated at all, mixing coherent and non-coherent functions on the same
+buffer, confusion over I/O directions, and more.  Each of these problems
+might slip by on a developer's test system, but might create havoc where an
+IOMMU is being used.  When a problem is found, a warning and stack
+traceback are logged.
+<p>
+The response to this API has been positive.  The biggest complaint seems to
+be about the fact that this API is implemented as an x86-specific feature.
+So it will probably have to be made generic before merging - after all,
+developers on other platforms are entirely capable of introducing
+DMA-related bugs too.  Once it goes in, this feature should probably be
+enabled on any system used for driver development.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Device_drivers-Support_APIs">Device drivers/Support APIs</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Direct_memory_access">Direct memory access</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#IO_memory">I/O memory</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#poll">poll()</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/308426/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2008, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

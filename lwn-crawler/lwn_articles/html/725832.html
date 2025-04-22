@@ -1,0 +1,1722 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Preventing stack guard-page hopping [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/725832/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/725472/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/725832/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Preventing stack guard-page hopping</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 19, 2017</br>
+           </div>
+Normally, the -rc6 kernel testing release is not the place where one would
+expect to find a 900-line memory-management change.  As it happens, though,
+such a change was quietly merged immediately prior to the <a
+href="/Articles/725786/">4.12-rc6</a> release; indeed, it may have been the
+real reason behind 4.12-rc6 coming out some hours later than would have
+been expected.  This change is important, though, in that it addresses a
+newly publicized security threat that, it seems, is being actively
+exploited.
+<p>
+
+<div class="tlr">
+<b>A correction</b>: Ben Hutchings pointed out that the Qualys analysis is
+based on the "main thread" stack, not any other thread stacks which, with glibc
+at least, are not allowed to grow.  Apologies for the confusion.
+</div>
+
+The stack area in a running process is, on most architectures, placed at a
+relatively high virtual address; it grows downward as the process's stack
+needs increase.  A virtual-memory region that automatically grows as a
+result of page faults brings some inherent risks; in particular, it must be
+prevented from growing into another memory region placed below it.  In a
+single-threaded process, the address space reserved for the stack can be
+large and difficult to overflow.  Multi-threaded processes contain multiple
+stacks, though; those stacks are smaller and are likely to be placed
+between other 
+virtual-memory areas of interest.  An accidental overflow could corrupt the
+area located below a stack; a deliberate overflow, if it can be arranged,
+could be used to compromise the system.
+<p>
+The kernel has long placed a guard page — a page that is inaccessible to
+the owning process — below each stack area.  (Actually, it hasn't been all
+that long; the guard page <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=320b2b8de12698082609ebbc1a17165727f4c893">was
+added in 2010</a>). A process that wanders off the
+bottom of a stack into the guard page will be rewarded with a
+segmentation-fault signal, which is likely to bring about the process's
+untimely end.  The world has generally assumed that the guard page is
+sufficient to protect against stack overflows but, it seems, the world was
+mistaken.
+<p>
+On June 19, Qualys <a
+href="https://blog.qualys.com/securitylabs/2017/06/19/the-stack-clash">disclosed</a>
+a set of vulnerabilities that make it clear that a single guard page is not
+sufficient to protect against stack overflow attacks.  These
+vulnerabilities have been dubbed "Stack Clash"; the associated domain name,
+logo, and line of designer underwear would appear to not have been put in
+place yet.  This problem has clearly been discussed in private channels for
+a while, since a number of distributors were immediately ready with kernel
+updates to mitigate the issue.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+The fundamental problem with the guard page is that it is too small.  There
+are a number of ways in which the stack can be expanded by more than one
+page at a time.  These include places in the GNU C Library that make large
+<a
+href="http://man7.org/linux/man-pages/man3/alloca.3.html"><tt>alloca()</tt></a>
+calls and programs with large variable-length arrays or 
+other large on-stack data structures.  It turns out to be relatively easy
+for an attacker to cause a program to generate stack addresses that hop
+over the guard page, stomping on whatever memory is placed below the
+stack.  The proof-of-concept attacks posted by Qualys are all local
+code-execution exploits, but it seems foolhardy to assume that there is no
+vector by which the problem could be exploited remotely.
+<p>
+<a
+href="https://git.kernel.org/linus/1be7107fbe18eed3e319a6c3e83c78254b693acb">The
+fix merged for 4.12</a> came from Hugh Dickins, with credit to Oleg
+Nesterov and Michal Hocko.  It takes a simple, arguably brute-force
+approach to the problem: the 4KB guard page is turned into a 1MB guard
+region on any automatically growing virtual memory area.  As the patch
+changelog notes: "<q>It is obviously not a full fix because the problem is
+somehow inherent, but it should reduce attack space a lot.</q>"  The
+size of the guard area is not configurable at run time (that can wait until
+somebody demonstrates a need for it), but it can be changed at boot time
+with the <tt>stack_guard_gap</tt> command-line parameter.
+<p>
+The 1MB guard region should indeed be difficult to jump over.  It is (or
+should be) a rare program that attempts to allocate that much memory on the
+stack, and other limits (such as the limit on command-line length) should
+make it difficult to trick a program into making such an allocation.
+On most 64-bit systems, it should be possible to make the guard region
+quite a bit larger if the administrator worries that 1MB is not enough.
+Doubtless there are attackers who are feverishly working on ways to hop
+over those regions but, for a while at least, they may well conclude that
+there are easier ways to attack any given system.
+<p>
+The real problem, of course, is that a stack pointer can be abused to
+access memory that is not the stack.  Someday, perhaps, we'll all have
+memory-type bits in pointers that will enable the hardware to detect and
+block such attacks.  For now, though, we all need to be updating our
+systems to raise the bar for a successful compromise.  Distributors have
+updates now, and the fix is in the queue for the next round of stable
+kernel updates due on June&nbsp;21.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Vulnerabilities">Security/Vulnerabilities</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Linux_kernel">Linux kernel</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/725832/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor725839"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 19:55 UTC (Mon)
+                               by <b>tux3</b> (subscriber, #101245)
+                              [<a href="/Articles/725839/">Link</a>] (34 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wouldn't it be fair to say that increasing the guard page's size is only a mitigation to a fundamental issue?<br>
+If the only full fix is currently recompiling the world with something expensive like -fstack-check or the various sanitizers, that is awfully worrying.<br>
+<p>
+I wouldn't be surprised to learn that there is a whole lot of software out there at various level of openness that will happily allocate a handful of MBs on demand, and that will probably never be recompiled with those options.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725839/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725844"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 20:13 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/725844/">Link</a>] (17 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A better change is to modify alloca() in libc to touch at least one byte on each allocated page. But it'll take some time to percolate through the userspace software.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725844/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725845"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 20:26 UTC (Mon)
+                               by <b>cpitrat</b> (subscriber, #116459)
+                              [<a href="/Articles/725845/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This would protect remote attacks but wouldn't prevent an attacker to write his own stack allocation for local privilege escalation​.<br>
+<p>
+I'm surprised a 900 lines patch is only about increasing the size of the page guard. Isn't there more in it ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725845/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725859"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 21:09 UTC (Mon)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/725859/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; This would protect remote attacks but wouldn't prevent an attacker to write his own stack allocation for local privilege escalation​.</font><br>
+<p>
+The local privilege escalation threat assumes that the high-privilege C code is trusted, and then exploits it.<br>
+<p>
+If the attacker can write high-privilege C code, you've already lost.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725859/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725911"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 9:43 UTC (Tue)
+                               by <b>moltonel</b> (guest, #45207)
+                              [<a href="/Articles/725911/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The libc isn't high-privilege/trusted, and any local attacker can use his own vulnerable libc-equivalent routines instead. So a protection at libc-level would only protect against remote attacks, where the attacker has to contend with the local libc or use a different vulnerability to bring his own libc-equivalent.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725911/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725914"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 10:13 UTC (Tue)
+                               by <b>matthias</b> (subscriber, #94967)
+                              [<a href="/Articles/725914/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are certainly some suid binaries linking against libc. Thus the libc is high-privilege code. The local attacker can only use the code/libraries linked into suid binaries.<br>
+<p>
+If the attacker has the ability to run his own code with privileges, everything is already lost. No need for an exploit.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725914/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor725905"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 6:54 UTC (Tue)
+                               by <b>vbabka</b> (subscriber, #91706)
+                              [<a href="/Articles/725905/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I'm surprised a 900 lines patch is only about increasing the size of the page guard. Isn't there more in it ?</font><br>
+<p>
+Well, it's 900 lines of .patch file text, but the diffstat is around 300 added+deleted, so not that much.<br>
+<p>
+It's large because, as explained in the commit log, the old 1 stack guard page code simply extended to N pages made many accounting issues visible, because the guard page(s) were part of the VMA's [start, end] addresses. The patch deletes that approach and replaces it so that the gap is always between VMA boundaries. That means adjusting the code to check allowed VMA placement/enlargement so that it maintains the gap if the next/prev VMA is a stack one.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725905/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor725913"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 9:55 UTC (Tue)
+                               by <b>moltonel</b> (guest, #45207)
+                              [<a href="/Articles/725913/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; A better change is to modify alloca() in libc to touch at least one byte on each allocated page.</font><br>
+<p>
+That's going to mess up with the performance profile (allocating pages earlyer than expected) and decrease total performance in case the app wasn't going to touch those pages at all.<br>
+<p>
+<font class="QuotedText">&gt; This would protect remote attacks but wouldn't prevent an attacker to write his own stack allocation for local privilege escalation​.</font><br>
+<p>
+Assuming we accept the performance hit, can we use the same technique in the kernel ? Disable overcommit ? Or is the kernel not aware of what the app is considering its stack space ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725913/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725915"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 10:39 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/725915/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; That's going to mess up with the performance profile (allocating pages earlyer than expected) and decrease total performance in case the app wasn't going to touch those pages at all.</font><br>
+<p>
+It's... not common for applications to allocate page-size structures on the heap that are not optimized out and then not use them for anything. I suppose functions that have big local variables and then do early exit based only on the parameters, but in that case the compiler can adapt to adjust the stack only after the early exits, if this is really significant (which I very much doubt).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725915/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725926"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 15:15 UTC (Tue)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/725926/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It's... not common for applications to allocate page-size structures on the [stack] that are not optimized out and then not use them for anything.</font><br>
+<p>
+In one project I found an innocuous-looking state structure that turned out to have ~5MB of unused bytes in the middle, buried under a pyramid of macro expansion, arrays, nested members, and unreadable coding style.  The code did use all the other members in the struct, on both sides of the hole.<br>
+<p>
+Also it's fairly common in userland to do IO to a buffer on the stack, where the buffer is huge and the IO is tiny.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725926/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726000"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 16:30 UTC (Tue)
+                               by <b>gutschke</b> (subscriber, #27910)
+                              [<a href="/Articles/726000/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Most programs that I see have relatively manageable buffers on the stack. Often, it is just a handful of bytes for state machines that try to read things line by line. And at other times, it might be as much as maybe a handful of kilobytes. That usually faults in no more than an extra page or two. And that's well within the normal variation of stack depth. So, performance impact should be zero.<br>
+<p>
+Do you really commonly see programs allocate many hundred of kilobytes if not many megabytes on the stack? That's not a pattern that I have encountered frequently. Buffers this large are more commonly allocated on the heap.<br>
+<p>
+I am not saying it doesn't happen. Anything stupid that you can think of, somebody else probably thought of before. But common? Hopefully not.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726000/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726058"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2017 11:14 UTC (Wed)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/726058/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+besides C and buffers/alloca there's also C++ and classes instantiated as local variables, so code can inadvertantly require larger than usual stack frames that way.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726058/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor726071"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2017 11:24 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/726071/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Besides, I never said it didn't happen -- just that most functions don't do it and those that do take so long that a bit of extra page touching is irrelevant (doing I/O into big buffers was what I was thinking of: any function that does I/O is going to have the I/O dominate its performance profile.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726071/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726092"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2017 14:57 UTC (Wed)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/726092/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the program uses the huge thing it allocated on the stack then it's going to fault in all the pages anyway, and that's a pretty big hit the first time around, much larger than the cost of the probe.<br>
+<p>
+On the other hand, if a function is being called in a loop then the probes keep happening over and over even though the page faults don't, so the probing gets expensive.<br>
+<p>
+For programs that handle toxic data there might not be a quick and easy solution--they might just have to suck up the cost of doing probes all the time, or use other techniques (e.g. constant-stack algorithm proofs, coding standards forbidding alloca() and sparse structures, etc.) to make sure stack overflows don't happen.<br>
+<p>
+Since changes to alloca require recompiling the program, it's up to individual applications to make the performance/security tradeoff anyway.  Isn't there already a compiler option to do this?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726092/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726284"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2017 22:37 UTC (Thu)
+                               by <b>mikemol</b> (guest, #83507)
+                              [<a href="/Articles/726284/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+They could also tune these performance/security trade-offs on a routine-by-routine basis, by stuffing sensitive routines in their own compilation unit.<br>
+<p>
+LTO will need to be careful to let these considerations bubble up to the final binary, however.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726284/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor801188"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 3, 2019 13:18 UTC (Thu)
+                               by <b>ychevali</b> (guest, #134753)
+                              [<a href="/Articles/801188/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+when you allocate a large array on the stack, initialization (from index 0) starts on the far end and thus jumps over all the pages in between. Case in point: for some programs, it makes a lot of sense to start by computing an array of ``small'' prime numbers (say up to 100,000 or 1,000,000) by Eratosthene sieve. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/801188/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor726422"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 26, 2017 9:25 UTC (Mon)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/726422/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+<blockquote>A better change is to modify alloca() in libc to touch at least one byte on each allocated page.</blockquote>
+
+That's going to mess up with the performance profile (allocating pages earlyer than expected) and decrease total performance in case the app wasn't going to touch those pages at all.
+</blockquote>
+
+I don't think that that's a significant issue, but anyway:  You just need to read the byte (the guard page is not readable, is it?).  So all the not-yet-used stack pages can be the same page containing zeroes (which also means that the same cache line will be used for all these reads in a physically-tagged (i.e., normal these days) cache).  Only when it is used for real, a physical page is allocated.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726422/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor726421"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 26, 2017 9:09 UTC (Mon)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/726421/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+This would protect remote attacks but wouldn't prevent an attacker to write his own stack allocation for local privilege escalation​.
+</blockquote>
+
+I don't think that preventing this attack scenario prevents any halfway-competent attack.  If the attacker can write his own stack allocation, he can write it to jump over guard regions of any size; actually, he can put the memory writes to the area below the stack in his otherwise-regular stack-allocation code directly.  In other words: If you allow the attacker to execute his code in a setting that can escalate priviledges, you are already owned, guard page or not.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726421/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor725928"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 14:50 UTC (Tue)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/725928/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p><tt>alloca()</tt> can't be implemented as a real function, so it's only "in" glibc in the sense that the definition is in a glibc header. Further, that definition just defers to the compiler's pseudo-function <tt>__builtin_alloca()</tt>. So even rebuilding against an updated glibc isn't enough to fix this. glibc <em>has</em> been updated to make its own use of <tt>alloca()</tt> safer, though.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725928/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor725853"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 21:01 UTC (Mon)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/725853/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+-fstack-check can do a variety of things. It's often configured to insert a stack-overflow-check prologue at the start of each function, which is expensive, but all that's needed here to is to insert a one-byte write per page for functions whose stack frames require &gt;= 4096 bytes. Does anyone have a reference to a measurement of the overhead of that approach? I couldn't find one with a quick search.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725853/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725855"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 21:02 UTC (Mon)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/725855/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, <a href="https://gcc.gnu.org/ml/gcc-patches/2017-06/msg01343.html">https://gcc.gnu.org/ml/gcc-patches/2017-06/msg01343.html</a> explains why current -fstack-check doesn't suffice.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725855/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor725864"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 21:45 UTC (Mon)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/725864/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Anyway, the important thing is that the overhead of inserting stack page probes should be pretty low compared to what's been measured for -fstack-check in the past.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725864/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725879"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 23:31 UTC (Mon)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/725879/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's not even one byte per page. It's one byte per page for all pages but the last. (So nearly all functions need no probe at all, and the ones that do will probably be fairly slow monsters anyway.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725879/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor726007"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 18:54 UTC (Tue)
+                               by <b>dd9jn</b> (<b>&#x272D; supporter &#x272D;</b>, #4459)
+                              [<a href="/Articles/726007/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If my memory serves me right, the OS/2 compilers inserted stack probes by default --- more than 25 years ago.  I am baffled to learn that gcc doesn't default to this simple robustness feature.  (Fortunately I am in the habit of avoiding alloca or possible large stack reservations.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726007/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726279"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2017 22:02 UTC (Thu)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/726279/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From what I understand of what I've read on Raymond Chen's blog, Windows compilers must insert stack probes, since the stack will only grow if the guard page is hit (<a href="https://blogs.msdn.microsoft.com/oldnewthing/20060927-07/?p=29563/">https://blogs.msdn.microsoft.com/oldnewthing/20060927-07/...</a>); Linux seems to be able to grow the stack for a hit anywhere in the stack VMA. OS/2 is probably similar to Windows, so its compilers must also implement stack probing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726279/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor725843"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 22:31 UTC (Mon)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/725843/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One obvious implication of having threads in a common address space and (naive) alloca() at the same time is that you can guide one thread's stack into another thread's address space no matter how far apart they are in memory.  I learned this the hard way in 1998 as I was debugging a Linux program that was doing this accidentally across almost 2MB-wide stack gaps.<br>
+<p>
+In userland, if alloca() wants more than a page, it can run a heaver stack-smashing check, like probing each page of the allocated area in stack-growth order, or checking some data in the heap about the current thread's stack limits.  Not doing that in the kernel is perhaps understandable due to the cost, but the capability should be there for those who need it.<br>
+<p>
+I've occasionally wondered what would happen if stacks were not accessible to other threads in the same process (assuming the VM context thrashing involved was magically zero cost, which probably pushes this paragraph into the realm of wishful thinking).  Obviously it would break some existing programs, but it smells like bad practice in general (I see student programmers pass pointers to ephemeral variables from the caller's stack to threads all the time, with immediately disastrous results).  There might be some simple heuristic (e.g. if thread A creates or joins thread B, let thread B access thread A's stack in case thread B has been given a pointer to a result A needs to store there) that's good enough for current defensible program behavior.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725843/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725876"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 23:26 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/725876/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Obviously it would break some existing programs, but it smells like bad practice in general</font><br>
+A fairly common practice is to allocate some data, launch several worker threads to compute its parts and then join all the threads to get the final result. It's not uncommon for it to be allocated or have parts of on-stack data.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725876/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725886"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 1:40 UTC (Tue)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/725886/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; launch several worker threads to compute its parts and then join all the threads to get the final result</font><br>
+<p>
+That's pretty much how C++11 async functions work, and should be covered by the heuristic exception for "thread A creates thread B".<br>
+<p>
+It wouldn't work if there was a persistent worker thread pool (i.e. the functions are executed by previously existing threads that continue to exist after the result is computed, so there is no creator/created or join relationship).  It might be possible to infer data dependencies from mutex locks or higher-level objects (promise/future pairs) but maybe there's too many false positives.  Or one could mark worker pool threads differently (e.g. some new pthread_attr) wrt access to other threads' stacks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725886/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor725878"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 23:32 UTC (Mon)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/725878/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I've occasionally wondered what would happen if stacks were not accessible to other threads in the same process</font><br>
+<p>
+I think that would break reasonable code like:<br>
+<p>
+std::atomic_int n;<br>
+run_in_worker_threads_and_wait_for_them_all(iters, [&amp;n] { n++; });<br>
+<p>
+which passes a pointer to n (on the current thread's stack) to a bunch of worker threads (that probably weren't created by this thread).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725878/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor725880"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 23:36 UTC (Mon)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/725880/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+One obvious implication of having threads in a common address space and (naive) alloca() at the same time is that you can guide one thread's stack into another thread's address space no matter how far apart they are in memory. I learned this the hard way in 1998 as I was debugging a Linux program that was doing this accidentally across almost 2MB-wide stack gaps.
+</blockquote>
+Indeed. The "Cheney on the MTA" paper describes a remarkable way of using this sort of alloca() abuse to implement a copying garbage collector using only the C stack: you write your C program in continuation-passing style, with GCed data in functions that never return but only call on to others that do the same, and then when you want to do a GC your collector copies the relevant data into a new "stack" on the heap and alloca()s to it (finding the right alloca() value via trivial pointer arithmetic from a variable on the local stack frame), then free()s the old stack.
+<p>
+I alternate between thinking this scheme is wonderful and should be widely emulated, and thinking it is insane and its authors should be punished by being forced to debug programs written this way (but then, they already have been).
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725880/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725927"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 15:08 UTC (Tue)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/725927/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; you write your C program in continuation-passing style, with GCed data in functions that never return but only call on to others that do the same, and then when you want to do a GC your collector copies the relevant data into a new "stack" on the heap and alloca()s to it</font><br>
+<p>
+That is... diabolical. Genius, but diabolical. A similar concept employed by Chicken Scheme is to start out the same way, using CPS and allocating on the C stack, but then after copying the live data to the heap just perform a longjmp() to unwind back to a trampoline function at the top of the original stack. That seems slightly saner than abusing alloca() to set the stack pointer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725927/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726072"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2017 11:26 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/726072/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Chicken Scheme actually uses the same scheme (derived directly from the paper). :) I guess they shifted from alloca() to longjmp() at some point, probably some compatibility problem which would make my head melt to think about.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726072/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726091"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2017 14:41 UTC (Wed)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/726091/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; they shifted from alloca() to longjmp() at some point, probably some compatibility problem...</font><br>
+<p>
+...like some eager tools maintainer implementing alloca() parameter sanity checks, perhaps?  ;)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726091/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor725921"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 13:10 UTC (Tue)
+                               by <b>niner</b> (subscriber, #26151)
+                              [<a href="/Articles/725921/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Garbage collectors in multi threaded programs would be a use case for a thread accessing another thread's stack to look for pointers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725921/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725996"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 16:20 UTC (Tue)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/725996/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I keep trying to forget that C garbage collectors exist (or at least the ambiguous ones).  If there's a single thread doing GC it could use an "accesses all thread stacks" pthread attribute.<br>
+<p>
+It seems to me there's more fundamental problems to be solved before this one.  How does a garbage collecting thread handle ordinary race conditions when accessing data on other thread stacks?  Invasive locking?  Indirect references through forwarding objects?<br>
+<p>
+I'm not sure I like the idea of solving that case, largely because the difference between "frees approximately the right memory" and "frees exactly the right memory" can be pretty huge when there are adversaries throwing pointy things into your stack and heap.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725996/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor725841"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 20:17 UTC (Mon)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/725841/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+here's a bit more about the history of this problem: <a href="https://grsecurity.net/an_ancient_kernel_hole_is_not_closed.php">https://grsecurity.net/an_ancient_kernel_hole_is_not_clos...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725841/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor725849"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping in GCC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 20:47 UTC (Mon)
+                               by <b>mjw</b> (subscriber, #16740)
+                              [<a href="/Articles/725849/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Here is a proposal by Jeff Law for stack/heap collision mitigation in GCC (-fstack-check improvements): <a href="https://gcc.gnu.org/ml/gcc-patches/2017-06/msg01343.html">https://gcc.gnu.org/ml/gcc-patches/2017-06/msg01343.html</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725849/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725899"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping in GCC</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 6:04 UTC (Tue)
+                               by <b>cpitrat</b> (subscriber, #116459)
+                              [<a href="/Articles/725899/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the link, very interesting reading.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725899/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor725874"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2017 23:40 UTC (Mon)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/725874/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;Someday, perhaps, we'll all have memory-type bits in pointers that will enable the hardware to detect and block such attacks.</font><br>
+<p>
+Maybe the i286's segmented memory model wasn't all that useless! Set %cs, %ds and %ss to non-overlapping regions of memory, and if %sp overflows, it will just wrap back onto the same stack you already had, not touching other regions or threads. The proposed memory-type bits are implicit and sort of given by way of the selectors.<br>
+<p>
+So… let's extend that to 64 bits? The segment registers appear to already be 64 bit in LM (they were not renamed like ax-&gt;eax-&gt;rax was). One extra thing is needed, an MSR, or TSS field/CR reg, to configure a modulus for %rsp, so that it wraps at a set boundary (e.g. 21 bit) on ADD/SUB/PUSH/POP instructions.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725874/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725894"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 5:18 UTC (Tue)
+                               by <b>eru</b> (subscriber, #2753)
+                              [<a href="/Articles/725894/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <i>Maybe the i286's segmented memory model wasn't all that useless! Set %cs, %ds and %ss to non-overlapping regions of memory, and if %sp overflows, it will just wrap back onto the same stack you already had, not touching other regions or threads. </i>
+<p>
+Actually the stack overflow probably traps, because it goes out of the size allocated for the stack segment. At least if you use it on 386/486/Pentium, where wrapping completely around is less likely. This has been used in a proprietary OS I have worked with. Almost everything there is in separately allocated, 386- supported segments (probably one of the very few OS'es to use the segmentation features as Intel designers intended!), but all the other pain caused by segmented memory probably makes this not worthwhile.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725894/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor725908"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 8:47 UTC (Tue)
+                               by <b>jikos</b> (subscriber, #43140)
+                              [<a href="/Articles/725908/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Set %cs, %ds and %ss to non-overlapping regions of memory, and if %sp overflows, it will just wrap back onto the same stack you already had, not touching other regions or threads</font><br>
+<p>
+That would not really make the situation any better, as that'd effectively allow the attacker to overflow the stack using the same attack vector and manipulate contents of the stack, turning this into a rather boring and easy to exploit stack overflow.<br>
+<p>
+Fortunately that's not how x86 behaves with respect to segment limits; as long as the address goes over the limit, it faults.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725908/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor727253"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 6, 2017 3:37 UTC (Thu)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/727253/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My understanding of the Mill architectures is that they handle the stack themselves. There are no stack pointers at all either (I suspect "large" arrays move out to elsewhere). It's not something really feasible for the existing arches, but it seems much better than going back to segmentation to me.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727253/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor725890"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Maximum number of threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 3:50 UTC (Tue)
+                               by <b>ikm</b> (guest, #493)
+                              [<a href="/Articles/725890/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wouldn't this limit the maximum number of threads which can be created in a 32-bit address space to something smaller than 3072? Is it unreasonable to ask for more threads than that, given their stacks are all small?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725890/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725895"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Maximum number of threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 5:34 UTC (Tue)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/725895/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+32-bit glibc gives each thread a whopping 2MB stack by default (per `man pthread_create`), so you'll run out of address space long before then.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725895/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725904"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Maximum number of threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 6:39 UTC (Tue)
+                               by <b>thestinger</b> (guest, #91827)
+                              [<a href="/Articles/725904/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It only uses that 2M value if the stack rlimit is set to unlimited. Secondary stack size is usually 8M because the rlimit for the main thread stack is usually 8M, not unlimited.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725904/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor725932"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Maximum number of threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 15:01 UTC (Tue)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/725932/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      No, this only affects the main thread stack. glibc does not use the kernel's <tt>MAP_GROWSDOWN</tt> feature for new thread stacks. The stack guard size for new threads is controlled using <tt>pthread_attr_setguardsize()</tt>.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725932/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725990"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Maximum number of threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 15:37 UTC (Tue)
+                               by <b>ikm</b> (guest, #493)
+                              [<a href="/Articles/725990/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hmm, the parent article specifically mentions that the main thread stack is generally not a problem, but the ones of the rest of the threads are:<br>
+<p>
+<font class="QuotedText">&gt; In a single-threaded process, the address space reserved for the stack can be large and difficult to overflow. Multi-threaded processes contain multiple stacks, though; those stacks are smaller and are likely to be placed between other virtual-memory areas of interest. An accidental overflow could corrupt the area located below a stack; a deliberate overflow, if it can be arranged, could be used to compromise the system.</font><br>
+<p>
+So, if I understood things right, the change was about growing the guard size of all of the program's threads.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725990/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725993"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Maximum number of threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 15:46 UTC (Tue)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/725993/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Right, the article is incorrect on this point.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725993/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor725922"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 14:05 UTC (Tue)
+                               by <b>NightMonkey</b> (subscriber, #23051)
+                              [<a href="/Articles/725922/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Howdy. I'm a Gentoo user. Yes, still, and love it. No I'm not compiling all day and reading the output. Just part of the day. Okay, I'm reading it. But, I put the shades up so the sun can creep in. Sometimes. (Shout-out to ChromeOS, ChromiumOS, CoreOS to building whole OSes on Gentoo and whispering about it.) And I'm REALLY not cooking marshmallows over my 8 core laptop while it compiles.<br>
+ <br>
+I'd love to protect my systems from this problem while we wait for a stable kernel release in 4.12 (though I usually wait for 4.*.2). Is there a nice three-step combo I can perform to mitigate this in the interim? Yes, I'm crazy enough to add a gcc flag and rebuild all my binaries. Yes, I'm crazy enough to disable or enable experimental kernel features. Of course, I read that -fstack-* gcc flags apparently don't work. Thanks in advance.<br>
+<p>
+P.S. Hire me if you need a nice Gentoo guy on your side. ;)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725922/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726070"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2017 11:20 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/726070/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's in the stable queue for 4.11: &lt;<a href="https://git.kernel.org/pub/scm/linux/kernel/git/stable/stable-queue.git/commit/?id=989c7ef8fe750b8e307b36c97c2d7d1b8b3795c4">https://git.kernel.org/pub/scm/linux/kernel/git/stable/st...</a>&gt;<br>
+<p>
+You can apply it directly from there if you want, or wait a few hours.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726070/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor726288"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2017 23:49 UTC (Thu)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/726288/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+github.com/zen-kernel seems to be keeping up with this incident so far - they've accumulated four patches for it on top of 4.11.6 at the time of writing. (hmm, there was only one there yesterday... guess I get to reboot again.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726288/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor725942"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">For added fun...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 15:27 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/725942/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      It would appear that the fix merged in 4.12-rc (and queued for stable) has a couple of problems.  Dave Jones <a href="/Articles/725943/">found an oopsable bug</a>; the problem seems to be understood and a fix is in the works.  The change in accounting for the guard region also <a href="/Articles/725944/">broke checkpoint/restore in user space (CRIU)</a>.  In this case, it's not yet clear how things can be fixed.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725942/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725994"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">For added fun...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 15:46 UTC (Tue)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/725994/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So users of upstream kernels essentially don't have a working patch yet? I see at least Debian's 4.9 kernels have an extra patch for fixing THP (it can seemingly optimize away the guard page).<br>
+<p>
+/* Steinar */<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725994/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725998"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">For added fun...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 16:10 UTC (Tue)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/725998/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We applied an earlier patch set that accounts all the guard pages, which has its own compatibility problems. We'll probably replace this with Hugh's version once its regressions have been dealt with.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725998/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor725999"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">For added fun...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 16:11 UTC (Tue)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/725999/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Any change to stack guards was pretty much bound to break CRIU and rr, unfortunately.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725999/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor726016"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">For added fun...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2017 20:32 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/726016/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Actually rr should be fine because during recording we disable MAP_GROWSDOWN and emulate it ourselves. This lets us observe and record every stack-growth event. For a while we tried to detect the kernel's stack-growth activity after the fact but that was a bit of a nightmare.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726016/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor726075"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preventing stack guard-page hopping</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2017 13:03 UTC (Wed)
+                               by <b>arekm</b> (guest, #4846)
+                              [<a href="/Articles/726075/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is there 4.1.x backport of this patch/fix anywhere?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/726075/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2017, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

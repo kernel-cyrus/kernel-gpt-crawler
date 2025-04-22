@@ -1,0 +1,725 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Rethinking the Stack Clash fix [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/727703/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/727823/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/727703/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Rethinking the Stack Clash fix</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Please consider subscribing to LWN</b>
+<p>
+Subscriptions are the lifeblood of LWN.net.  If you appreciate this
+content and would like to see more of it, your subscription will
+help to ensure that LWN continues to thrive.  Please visit
+<a href="/Promo/nst-nag1/subscribe">this page</a> to join up and keep LWN on
+the net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 13, 2017</br>
+           </div>
+It has been nearly one month since the <a href="/Articles/725832/">Stack
+Clash vulnerability</a> was disclosed and some hardening measures were
+rushed into the 4.12 kernel release.  Since then, a fair amount of work has
+gone into fixing problems caused by those measures and porting the result back
+to stable kernel releases.  Now, it seems, the kernel developers are
+considering taking a different approach entirely.
+<p>
+Stack Clash is generally seen as a user-space problem: a combination of
+large on-stack allocations and the lack of stack probing open up
+opportunities for an attacker to jump over the guard page at the end of the
+stack.  Fixing those problems (and deploying the fixes widely) will take
+some time; meanwhile, it was thought, systems can be protected by replacing
+the kernel-provided guard page with a 1MB (or larger) guard region that,
+hopefully, cannot be jumped over.
+<p>
+That guard region should be invisible to most programs, but it has created
+a surprising number of problems for some applications.  A number of those
+issues have been worked around, but one 
+has proved difficult to fix;  unfortunately, that one is LibreOffice, which
+can crash on 32-bit systems when running Java components.  The issue is a
+bit complicated but, in short, Java
+wants to enable code execution in memory located immediately below the
+stack, which runs afoul of the guard region.  This, as Linus Torvalds <a
+href="/Articles/727705/">noted</a>, is a problem:
+<p>
+<div class="BigQuote">
+	We really can't be breaking libreoffice. That's like a big classic
+	no-no - it affects normal users that simply cannot be expected to
+	work around it. For them, it's a "my office application no longer
+	works" situation, and they just think the system is flaky.
+</div>
+<p>
+There is also the lingering fear that other, not-yet-discovered regressions
+lurk in user-space applications, regressions that might not surface until
+somebody does a kernel upgrade months or years from now.  So, perhaps,
+adding a large guard region to 
+work around a user-space problem is not the best answer.
+<p>
+On most systems, the resource limit (rlimit) mechanism restricts the stack
+to a maximum of 8MB of memory.  The hard limit tends to be much larger,
+though, so any unprivileged process can raise the effective stack limit to
+a larger value — as
+high as "infinite".  The posted exploits for Stack Clash work by raising
+the stack rlimit, then running a setuid program with a vast array of
+arguments to fill that huge stack.  If that program can be prodded into
+overflowing the stack 
+without hitting the guard page, it may be possible to overwrite heap data
+beyond the stack and, from there, take over the program and make use of its
+privileges.
+<p>
+There may be other ways to get a setuid program to exhaust its stack, but
+the command-line arguments method is easy and readily under the control of
+an attacker.  (Note: the overflow is relatively easy; a successful exploit
+is harder).  That suggests that the bulk of the Stack Clash exploits can
+be headed off by preventing the execution of setuid programs with a stack
+that's both (1)&nbsp;close to the heap area and (2)&nbsp;nearly full at the
+outset.
+<p>
+Kees Cook took a stab at that problem with <a href="/Articles/727274/">this
+patch</a> attacking the first of those two points.  The idea was that, when
+a process is about to run a setuid program, the stack limit should be reset
+to a reasonable value; the value Cook chose was whatever the <tt>init</tt>
+process has.  This patch would not prevent stack exhaustion (indeed, it
+might cause it if there are setuid programs needing a huge stack), but it
+would keep the stack from growing large enough to impinge on a heap area.
+<p>
+That patch didn't get far, though, since Torvalds <a
+href="/Articles/727707/">disliked it</a>.
+One of his complaints was that special-casing setuid programs would be
+likely to lead to bugs or inadequate protection, since the relevant code
+would see relatively little use.  So Cook's <a
+href="/Articles/727709/">next attempt</a> took a different tack: it
+places an upper bound on the amount of stack memory that can be occupied by
+a program's arguments at <tt>exec()</tt> time.  In particular, that limit
+is 75% of the default stack limit, or 6MB, regardless of the current stack
+limit.  This patch <a
+href="https://git.kernel.org/linus/da029c11e6b12f321f36dac8771e833b65cec962">has
+been merged</a> for 4.13; it's not clear whether this change will find its
+way into the stable updates to earlier kernel releases.
+<p>
+Limiting stack use by arguments should suffice to block a lot of attacks
+but, as it turns out, there's still a desire to enforce a limit on the size
+of the stack for setuid programs.  One reason for that might be fears of
+some sort of pathological behavior that could be exploited to force a
+setuid program to overflow even a huge and mostly empty stack.  But it also
+turns out that, if the stack rlimit is set to "infinity", the kernel will
+change the layout of a program's memory areas.  A large stack limit
+suggests that the stack itself is likely to be large, so the kernel maps
+other memory areas low in the address space to preserve room for the stack to
+grow into.  If, instead, the stack is limited, the kernel will map those areas at
+higher locations.  As a result, the stack rlimit gives an attacker a bit of
+control over how the target program's memory is laid out — not a desirable
+thing to do.
+<p>
+Thus <a href="/Articles/727714/">this patch series</a>, which applies a
+maximum 8MB stack limit on setuid programs.  These patches, posted on
+July&nbsp;10, have not yet been merged; applying this limit required a
+surprising number of changes to the core <tt>exec*()</tt> system-call code,
+so more than 
+the usual amount of review is indicated.  There would appear to be general
+agreement on the goal, though, so this change seems likely to find its way
+into the mainline eventually.  There has been some talk of allowing a
+larger stack via an annotation in the binary file, but that has not been
+implemented and may not be without a demonstrated need.
+<p>
+At this point, nobody has said whether these changes will be enough to
+allow the removal of the larger guard region from the stack.  Returning to
+the previous layout semantics would ease a lot of worries about regressions
+that might turn up months or years in the future, though, so it's not hard
+to see why the idea has appeal.  It would seem that at least some of the
+kernel's internal memory-layout policies have become a part of the
+user-space ABI, so they need to be preserved if possible.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Development_model-User-space_ABI">Development model/User-space ABI</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Vulnerabilities">Security/Vulnerabilities</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Linux_kernel">Linux kernel</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/727703/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor727856"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2017 21:49 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/727856/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As Linus noted, a maximum limit on arg size (or stack size!) for non-setuid programs is seriously problematic. I routinely use &gt;32MiB arg lists (wildcards with lots and lots of files in them) and stacks exceeding 20MiB (deep recursion) and would be most unhappy to find that blocked on 64-bit systems in which you could easily have gigabytes of both without coming close to exhausting even physical RAM, let alone address space.<br>
+<p>
+Arbitrary limits for security reasons are one thing. Tiny ones on huge systems are another.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727856/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor727862"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2017 23:28 UTC (Thu)
+                               by <b>foom</b> (subscriber, #14868)
+                              [<a href="/Articles/727862/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Um...how come nobody has noted that this new patch totally breaks the userspace API promises?
+<p>
+There is an API for getting the max argument size, sysconf(_SC_ARG_MAX). Documented in man sysconf:
+<pre>
+       ARG_MAX - _SC_ARG_MAX
+              The maximum length of the arguments to the exec(3) family of functions.  Must not be less than _POSIX_ARG_MAX (4096).
+</pre>
+<p>
+Implemented in glibc as:
+<pre>
+    case _SC_ARG_MAX:
+      /* Use getrlimit to get the stack limit.  */
+      if (__getrlimit (RLIMIT_STACK, &amp;rlimit) == 0)
+        return MAX (legacy_ARG_MAX, rlimit.rlim_cur / 4);
+
+      return legacy_ARG_MAX;
+</pre>
+<p>
+With this kernel patch, that is now a complete lie, and any program depending on it in order to decide whether the arguments can be passed on the commandline (vs., say, in a response file) are now broken. The clang compiler is one such program I know of, but I'm sure there are others...
+<p>
+WTF?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727862/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor727873"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2017 4:49 UTC (Fri)
+                               by <b>areilly</b> (subscriber, #87829)
+                              [<a href="/Articles/727873/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Pretty sure that clang is not usually installed setuid.  My reading of the article suggested that those are the only ones getting the proposed limit.<br>
+I'm not sure how well an suid limit like this would interact with something like xargs, that presumably knows similar things about allowable argument sizes.  It would seem to require xargs to be aware of the setuid-nature of its client program.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727873/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor727883"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2017 11:20 UTC (Fri)
+                               by <b>foom</b> (subscriber, #14868)
+                              [<a href="/Articles/727883/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The article discussed and links to (see part that says "This patch has been merged") a patch that applies a 6MB ARG_MAX maximal limit /regardless/ of suid or not. That results in sysconf lying if the stack rlimit has been set to 24MB or higher.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727883/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor727889"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2017 12:23 UTC (Fri)
+                               by <b>joey</b> (guest, #328)
+                              [<a href="/Articles/727889/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The canonical example of using ARG_MAX is xargs. This is going to cause massive breakage if it slips in.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727889/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor727890"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2017 12:39 UTC (Fri)
+                               by <b>jchaxby</b> (subscriber, #63942)
+                              [<a href="/Articles/727890/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And find ... -exec {} +<br>
+<p>
+And I'm pretty sure there are other perfectly legitimate uses, as nix suggests, of very large arg sizes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727890/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor729058"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Argument list too long&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2017 16:46 UTC (Thu)
+                               by <b>geuder</b> (guest, #62854)
+                              [<a href="/Articles/729058/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In an up-to-date OpenSUSE 42.2 I got "Argument list too long" when using "xargs -0" today for the first time after I don't know how many years. So I remembered this discussion.<br>
+<p>
+I have not tweaked ulimit in anyway, the stack size is 8192.<br>
+<p>
+Luckily "find ... -exec ... {} +" worked without the error. Was just a bad old habit to use xargs in this case, where exec + was possible, too. But there might be some more legitimate use cases of "xargs -0"  <br>
+<p>
+Unluckily that means that I have not digged any deeper whether it was really a stack clash fix that introduced the "argument list too long" problem. Would be be quite weird coincidence if it weren't.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729058/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor729073"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Argument list too long&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2017 18:11 UTC (Thu)
+                               by <b>mbunkus</b> (subscriber, #87248)
+                              [<a href="/Articles/729073/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; But there might be some more legitimate use cases of "xargs -0"</font><br>
+<p>
+Parallel execution, for example: `… | xargs -0 --max-args=1 --max-procs=$(getconf _NPROCESSORS_ONLN) the-program-to-parallelize`<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729073/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor727905"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2017 15:06 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/727905/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Perhaps, but remember that, unless you've tweaked the stack limit yourself, the limit was (and remains) 2MB.  Are there really "massive" numbers of users who have changed the stack limit for the purposes of enabling a much larger args array?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727905/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor727992"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2017 0:46 UTC (Sat)
+                               by <b>foom</b> (subscriber, #14868)
+                              [<a href="/Articles/727992/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I suspect it's not a massive number of people with large or unlimited stack size, unless some distro has done so by default.<br>
+<p>
+But, once you have increased it for *any* purpose, this kernel change will break programs attempting to choose the right number of args to pass on the command line via calling sysconf. You don't need to be actively requiring or even desiring a large args array...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727992/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor728095"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 17, 2017 14:21 UTC (Mon)
+                               by <b>NightMonkey</b> (subscriber, #23051)
+                              [<a href="/Articles/728095/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe those same users who pushed for the ext4 "largefile" limit increase to 2 billion files? ;)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728095/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor727955"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2017 18:03 UTC (Fri)
+                               by <b>Frogging101</b> (guest, #113180)
+                              [<a href="/Articles/727955/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Methinks someone should reply and point out that this is broken.<br>
+<p>
+I would do it but I don't want to butt in without really knowing what I'm talking about.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727955/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor727857"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 13, 2017 21:58 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/727857/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I really wish the kernel didn't have to be involved in this at *all*. In an ideal world, the stack (and heap, and memory layout in general) would be set up entirely by userspace in its loader (e.g. ld-linux), and the kernel would just say "here's some address space".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727857/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor727864"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2017 0:45 UTC (Fri)
+                               by <b>eru</b> (subscriber, #2753)
+                              [<a href="/Articles/727864/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How about doing it like in the bad old days of MS-DOS programming: have the compiler insert a stack overflow check at each function entry and into specials like alloca(), at least when compiling sensitive code. MS-DOS compilers did this because there was no other way to attempt memory protection, but the article gives the impression Linux actually is not so much better in this respect!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727864/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor727866"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2017 1:06 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/727866/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The compiler has code to do exactly that, though it turns out that wasn't sufficient (see the various discussions about the compiler needing to probe each page).<br>
+<p>
+But you also can't count on all of userspace using a reasonable compiler.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727866/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor727876"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2017 7:59 UTC (Fri)
+                               by <b>mjw</b> (subscriber, #16740)
+                              [<a href="/Articles/727876/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+See Jeff Law's GCC RFC patch set: <a href="https://gcc.gnu.org/ml/gcc-patches/2017-07/msg00556.html">https://gcc.gnu.org/ml/gcc-patches/2017-07/msg00556.html</a><br>
+<p>
+This series introduces -fstack-check=clash which is a variant of<br>
+-fstack-check designed to prevent "jumping the stack" as seen in the<br>
+stack-clash exploits.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727876/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor727976"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2017 21:51 UTC (Fri)
+                               by <b>eru</b> (subscriber, #2753)
+                              [<a href="/Articles/727976/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sounds complicated. The old MS-DOS compilers just compared SP - required size against the stack limit before allocation. What is wrong with that?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727976/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor727980"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking the Stack Clash fix</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2017 22:16 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/727980/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Additional comparison - it's not free.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/727980/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2017, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

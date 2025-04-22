@@ -1,0 +1,2286 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Rethinking race-free process signaling [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/784831/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/784932/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/784831/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Rethinking race-free process signaling</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Please consider subscribing to LWN</b>
+<p>
+Subscriptions are the lifeblood of LWN.net.  If you appreciate this
+content and would like to see more of it, your subscription will
+help to ensure that LWN continues to thrive.  Please visit
+<a href="/Promo/nst-nag1/subscribe">this page</a> to join up and keep LWN on
+the net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 4, 2019</br>
+           </div>
+One of the new features in the 5.1 kernel is the
+<tt>pidfd_send_signal()</tt> system call.  Combined with the (also new)
+<a href="/Articles/773459/">ability to create a file descriptor referring
+to a process</a>  (a "pidfd") by
+opening its directory in <tt>/proc</tt>, this system call allows for
+the sending of signals to processes in a race-free manner.  An extension to
+this feature proposed for 5.2 has, however, sparked a discussion that has
+brought the whole concept into question.  It may yet be that the pidfd
+feature will be put on hold before the final 5.1 release while the API around
+it is rethought.
+<p>
+The fundamental problem being addressed by the pidfd concept is process-ID
+reuse.  Most Linux systems have the maximum PID set to 32768; if lots of
+processes (and threads) are created, it doesn't take a long time to use all
+of the available PIDs, at which point the kernel will cycle back to the
+beginning and start reusing the ones that have since become free.  That
+reuse can happen quickly, and
+processes that work with PIDs might not notice immediately that a PID they
+hold referred to a process that has exited.  In such conditions, a stale
+PID could be used to send a signal to the wrong process.  As Jann Horn <a
+href="/ml/linux-kernel/CAG48ez2gb94SqS30Ai4+VBHhnzBp5Po9_u00nMrvUW6Wqq6hPA@mail.gmail.com/">pointed
+out</a>, real vulnerabilities have resulted from this problem.
+<p>
+A pidfd is a file descriptor that is obtained by opening a process's
+directory in the <tt>/proc</tt> virtual filesystem; it functions as a
+reference to the process of interest.  If that process exits, its PID might
+be reused by the kernel, but any pidfds referring to that process will
+continue to refer to it.  Passing a pidfd to <tt>pidfd_send_signal()</tt> will
+either signal the correct process (if it still exists), or return an error
+if the process has exited; it is guaranteed <i>not</i> to signal the wrong
+process.  So it would seem that this problem has been solved.
+<p>
+<h4>Not so fast</h4>
+<p>
+In late March, Christian Brauner posted <a
+href="/ml/linux-kernel/20190329155425.26059-1-christian@brauner.io/">a
+patch set</a> adding another new system call:
+<p>
+<pre>
+    int pidfd_open(pid_t pid, unsigned int flags);
+</pre>
+<p>
+This system call will look up the given <tt>pid</tt> in the current
+namespace, then return a pidfd referring to it.  This call was proposed to
+address cases where <tt>/proc</tt> is not mounted in a given namespace.
+For cases where <tt>/proc</tt> <i>is</i> available, though, the patch set
+also implements a new <tt>PIDFD_GET_PROCFD</tt> <tt>ioctl()</tt> call that
+takes a pidfd, opens the associated process's <tt>/proc</tt> directory, and
+return a file
+descriptor referring to it.  That descriptor, which functions as a pidfd as
+well, could then be used to read
+other information of interest out of the <tt>/proc</tt> directory.
+<p>
+Linus Torvalds <a
+href="/ml/linux-kernel/CAHk-=wjq4dTPcz-qsvhpm5F42SDHCoqEWv1V=rs_kt6MC=ZThA@mail.gmail.com/">had
+no fundamental problem</a> with <tt>pidfd_open()</tt>, but he was rather
+less pleased with the <tt>ioctl()</tt> command.  The core of his
+disagreement had to do with the creation of a second type of pidfd: one
+created by <tt>pidfd_open()</tt> would have different semantics than one
+created by opening the <tt>/proc</tt> directory or by calling
+<tt>ioctl()</tt>.  In <a
+href="/ml/linux-kernel/CAHk-=wiaLtH41Mc5qAjOeCWavPqV0DhS581KYa0QBt8uraTK1Q@mail.gmail.com/">his
+view</a>, either creation path should yield the same result on systems
+where <tt>/proc</tt> is mounted; there should be no need to convert
+between two types of pidfd.
+<p>
+Brauner was not immediately accepting of that idea.  He <a
+href="/ml/linux-kernel/20190331211041.vht7dnqg4e4bilr2@brauner.io/">worried</a>
+that the equivalence would force a dependency on having <tt>/proc</tt>
+enabled (a concern that Torvalds <a
+href="/ml/linux-kernel/CAHk-=wi3AE1-iRQ_7LOeSMNAMrGxRdC=gTjD30duVw4XRchcNQ@mail.gmail.com/">dismissed</a>),
+and that <a
+href="/ml/linux-kernel/20190331220259.qntxynluk765hpnt@brauner.io/">it
+could expose information in <tt>/proc</tt></a> that might otherwise be
+hidden from a <tt>pidfd_open()</tt> caller.  Torvalds <a
+href="/ml/linux-kernel/CAHk-=wh0jgRkZiNdFD96Zpjx+_G+NVSHieAt+QgWCQBJ2A-5Aw@mail.gmail.com/">suggested</a>
+tightening the security checks in that latter case.  Even then, Andy
+Lutomirski <a
+href="/ml/linux-kernel/18C7FCB9-2CBA-4237-94BB-9C4395A2106B@amacapital.net/">worried</a>,
+"<q>/proc has too much baggage</q>" to be made secure in this setting.
+It might be necessary, he said, to create a separate view of <tt>/proc</tt>
+that would be provided with pidfds.
+<p>
+<h4>clone()</h4>
+<p>
+As the conversation went on, though, it became increasingly clear that
+<tt>pidfd_open()</tt> was not the end goal.  That call is still racy — a
+PID could be reused in the time between when a caller learns about it and
+when the <tt>pidfd_open()</tt> call actually completes.  There are ways of
+mitigating this problem, but it does still exist.  The only truly race-free
+way of getting a reference to a process, it was agreed, is to create that
+reference as part of the work of creating the process itself.  That means
+it should be created as part of a <a
+href="http://man7.org/linux/man-pages/man2/clone.2.html"><tt>clone()</tt></a>
+call.
+<p>
+That could be made possible by adding a new flag (called something like
+<tt>CLONE_PIDFD</tt>) to <tt>clone()</tt>
+that would return a pidfd to the parent rather than a
+PID.  There were some worries that <tt>clone()</tt> has run out of space
+for new flags, necessitating a new system call, but Torvalds 
+indicated that there is still at least one bit available.  As a result of the
+discussion, it seems likely that a patch implementing the new
+<tt>clone()</tt> behavior will be posted in the near future.
+<p>
+That, however, leaves open the question of <tt>pidfd_open()</tt> and how
+pidfds should work in general.  At one point, Brauner <a
+href="/ml/linux-kernel/20190331150507.zpyugdvtmr6rgpda@brauner.io/">suggested</a>
+breaking the connection with <tt>/proc</tt> entirely: a pidfd could be used
+for sending signals (or, in the future, waiting for a process), but its
+creation would not be tied to a <tt>/proc</tt> directory in any way.  That
+would
+involve disabling the functionality in 5.1, something that can still be done
+since it is not yet part of an official kernel release.  The problem of
+opening the correct <tt>/proc</tt> directory (to read information about the
+process) could be addressed by adding a
+field to the <tt>fdinfo</tt> file for the pidfd; the information there
+could be used to verify that a given <tt>/proc</tt> directory refers to the
+same process as the pidfd.
+<p>
+It eventually became clear, though, that Torvalds instead favored retaining
+the tie between a pidfd and the <tt>/proc</tt> directory; he <a
+href="/ml/linux-kernel/CAHk-=wgjndAqzMBxgXZxbSRXLRqdXtNM3aHc9X-xj+Px1fsG-Q@mail.gmail.com/">called
+it</a> "<q>the most flexible option</q>".  So, one day later, Brauner
+came back with <a
+href="/ml/linux-kernel/20190401194214.4rbvmwogpke3cjcx@brauner.io/">another
+plan</a>: the connection with <tt>/proc</tt> would remain, but the
+<tt>pidfd_open()</tt> system call would be dropped since there would no
+longer be any real need for it.  Should this plan be followed,
+which seems to be the most likely outcome, the existing 5.1 pidfd work could
+remain, since it is still a part of the final vision.
+<p>
+If things play out this way, the new <tt>clone()</tt> option will likely
+appear in 5.2 or 5.3.  Process-management systems that are concerned about
+races will then be able to use pidfds for safe process signaling.  If
+nothing else, this discussion shows the value of having many developers
+looking at proposed API additions.  In a setting where mistakes are hard to
+correct once they get out into the world, one wants to get things right
+from the outset if at all possible.
+<p>
+<h4>A postscript</h4>
+<p>
+A contributing factor to the problem of PID reuse is the fact that the PID
+space is so small; for compatibility with ancient Unix systems (and the
+programs that ran on them), it's limited to what can be stored in a signed
+16-bit value.  That was a hard limit until the 2.6.10 release in 2002, when
+Ingo Molnar added a flexible limit capped at 4,194,304; the default
+limit remained (and remains) 32768, but it can be changed with the
+<tt>kernel/pid_max</tt> sysctl knob.
+<p>
+
+At the time, Molnar placed a comment reading "<q>a maximum of 4 million
+PIDs should be enough for a while</q>" that endures to this day.  Over
+16&nbsp;years later, it's clear that he was right. But as part of this
+discussion, Torvalds <a
+href="/ml/linux-kernel/CAHk-=wiZ40LVjnXSi9iHLE_-ZBsWFGCgdmNiYZUXn1-V5YBg2g@mail.gmail.com/">said</a>
+that perhaps the time has come to raise both the default and the limit.
+Setting the maximum PID to <tt>MAXINT</tt> would, he said, make a lot of
+the attacks harder.  Whether such a change would break any existing
+software remains to be seen; it seems unlikely in 2019 but one never knows.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#pidfd">pidfd</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#System_calls-pidfd_send_signal">System calls/pidfd_send_signal()</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/784831/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor784978"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2019 22:33 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/784978/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've seen software using bitmasks for processes. 4 million processes is just 512kb, bumping this by 1024 times might cause issues.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/784978/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor784979"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2019 22:52 UTC (Thu)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/784979/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Aren't they already broken on systems with a raised sysctl setting?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/784979/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor784981"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2019 22:57 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/784981/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, they read the sysctl setting. They probably can be broken if it changes when the program is launched, but nobody really does that.<br>
+<p>
+I'm not saying that such a design is a good idea, it's just that I've seen it used.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/784981/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor784989"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 0:24 UTC (Fri)
+                               by <b>Fowl</b> (subscriber, #65667)
+                              [<a href="/Articles/784989/">Link</a>] (27 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Instead of creating a whole new set of syscalls that deal with PIDFDs, couldn't having an open PIDFD just prevent the PID from being reused? Then all the existing tools would "just work".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/784989/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor784993"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 1:45 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/784993/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Might be a DDoS vector. Even with the low 1024 file descriptor limit just 32 processes can eat up the whole default PID namespace.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/784993/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785069"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 16:40 UTC (Fri)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/785069/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How is that different from just accumulating 32700 zombie child processes, which you can do right now anyway?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785069/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785108"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2019 1:09 UTC (Sun)
+                               by <b>stephen.pollei</b> (subscriber, #125364)
+                              [<a href="/Articles/785108/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder why distributions don't set limits that work for at least 99% of people.<br>
+70% of people would be ok with max login of 3<br>
+95% of people would be ok with max login of 8<br>
+99% of people would be ok with max login of 13<br>
+70% of people should be ok with a max of 89 processes per login<br>
+95% of people should be ok with max of 144 processes per login<br>
+99% of people should be ok with max of 377 processes per login<br>
+<p>
+4901 processes ought to be enough for most people.<br>
+If you raise pid_max to 99999 on small system and set these limits does it strongly reduce the issues?<br>
+<p>
+Lager systems might need to increase pid_max further, and have bigger rlimits. <br>
+<p>
+In either case it seems like it can mostly be solved with saner configuration.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785108/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785145"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 1:21 UTC (Mon)
+                               by <b>dvdeug</b> (guest, #10998)
+                              [<a href="/Articles/785145/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Those are among the most annoying limits. If 99% of the people will never hit them, then 1% will. Because they are distribution-set, they will be hard to figure out what's wrong unless there's the clearest error messages. In the case of a process limit, I bet very few programs handle that properly, and forcing a bunch of users to try and figure out why their programs are crashing, especially because 4901 is a "random" number; if I hit 32,000 PIDs before a crash, I'd realize the problem much faster than 4901.<br>
+<p>
+Arbitrary limits are a pain in the ass, and increasing the number of them and the odds you're going to hit them is not user-friendly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785145/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785148"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 1:59 UTC (Mon)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/785148/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My rule of thumb are limits like that should only be low enough to catch buggy programs,<br>
+not properly running programs that consume a few more resources than normal.<br>
+<p>
+There is the other issue with more pids that if they get too large they get ungainly and difficult<br>
+to use.  Which argues against making 4 million the default.  But otherwise something like 4 million<br>
+would probably be a fine default for a limit like that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785148/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785150"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 5:54 UTC (Mon)
+                               by <b>eru</b> (subscriber, #2753)
+                              [<a href="/Articles/785150/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      If the pid limit is 4 million, problems due to wraparound are rare, but they may occasionally happen, causing hard to trace bugs. Same with MAXINT. But if pid were a 64-bit number, and the limit the maximum of that, wraparound would never happen, so software could safely assume that pids are always unique.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785150/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785156"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 7:27 UTC (Mon)
+                               by <b>rbanffy</b> (guest, #103898)
+                              [<a href="/Articles/785156/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <pre>
+&gt; But if pid were a 64-bit number, and the limit the maximum of that, wraparound would never happen
+
+Cue to a meeting room with a dozen people dressed like <a href="http://3.bp.blogspot.com/-xK9TrQqiSlc/UN4Q8NETddI/AAAAAAAAM6k/hSv3DDT1XFc/s640/scifipep3.jpg">characters from Things to Come</a> trying to figure out why The Google stopped answering their questions.
+
+Fine. It'll be a looooong time.
+</pre>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785156/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785414"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2019 5:15 UTC (Wed)
+                               by <b>eru</b> (subscriber, #2753)
+                              [<a href="/Articles/785414/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Before posting, I calculated that if the kernel creates one process every microsecond, it takes about 290 000 years for the 64-bit signed maxint to be reached. I don't think any system will have that kind of uptime.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785414/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785498"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2019 18:07 UTC (Wed)
+                               by <b>rbanffy</b> (guest, #103898)
+                              [<a href="/Articles/785498/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You have to let your imagination fly higher, eru. 290,000 years is a blink of an eye in cosmic terms and it's entirely possible a vast distributed and multiply redundant computer doing a Very Important Job for its users would both live that long (and be that reliable) it'd reach that limit well after everyone who designed it (and who would think fashion went too far this time) are dead or, at least, have moved on to more interesting pursuits. Also, if it's a thousand times faster, it'll get there much faster too.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785498/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785783"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 6:19 UTC (Fri)
+                               by <b>massimiliano</b> (subscriber, #3048)
+                              [<a href="/Articles/785783/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+<i>
+You have to let your imagination fly higher, eru. 290,000 years is a blink of an eye in cosmic terms...
+</i>
+</p>
+
+<p>
+If I let my imagination fly <i>just</i> a bit higher, in such a system this issue will be solved just like the current 2038 problem.
+</p>
+
+<p>
+At some point the system will do a live migration to a 128 bit architecture, with conversion of the persistent state to appropriately sized values, and the "actor IDs" in the distributed systems will get a bit of fresh air with a wraparound time of 2^32*290k years, whatever that means...
+</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785783/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor784997"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 4:24 UTC (Fri)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/784997/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You would still need a race-free way to acquire a pidfd, so the changes to clone() are still required at an absolute minimum. But if you're going to be handing out a pidfd-like-thing from clone(), then you don't have the original PID. So now you need an ioctl() to convert the pidfd back into a PID. Then, this would be just about as powerful, at the expense of consuming an extra PID slot until you close the fd, and at the expense of userspace needing to juggle two opaque integers instead of one. Both of those are mild drawbacks, but not necessarily fatal on their own; Linux already has issues with PID exhaustion and userspace already juggles lots of opaque kernel nonsense anyway.<br>
+<p>
+But wait! If you want to prevent the PID from being reused, and you're the one calling clone() in the first place, all you have to do is *not* call wait(), and then the PID will zombify in an entirely race-free fashion. That doesn't require the use of a pidfd at all. So the only "interesting" functionality we would be adding via a pidfd-that-holds-a-PID-open is the ability to transfer stewardship of a possibly-zombie process to a new "owner"(via SCM_RIGHTS over an AF_UNIX socket, or via fd inheritance), but without changing its PPID. That is such a niche usage that I'm not certain it's actually helpful, especially since you can create a subreaper via prctl(), and thereby actually reparent the process as needed.<br>
+<p>
+(TL;DR: Because then it wouldn't be complicated and/or "interesting" enough to be worth doing.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/784997/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785013"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 12:56 UTC (Fri)
+                               by <b>jgg</b> (subscriber, #55211)
+                              [<a href="/Articles/785013/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I had the same feeling, what is the race here? clone -&gt; zombie -&gt; wait is the usual way UNIX has avoided races with PIDs. Is there some way the sub process can skip being zombie'd?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785013/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785075"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 18:32 UTC (Fri)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/785075/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It can double fork and when the parent exits the child is reparented to init (or to the subreaper if it exists). init is very quick at reaping zombies, and that can cause PID reuse.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785075/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786319"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2019 18:12 UTC (Fri)
+                               by <b>mixi</b> (guest, #131542)
+                              [<a href="/Articles/786319/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It can't make the kernel reuse the original child's PID, as it will hang around as zombie process until the creator executes any of the wait* functions.<br>
+<p>
+It could exit in the grandchild, which would cause the grandchild to be reaped by init, but won't have any effect on the child's PID.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786319/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor785065"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 16:27 UTC (Fri)
+                               by <b>thiago</b> (guest, #85680)
+                              [<a href="/Articles/785065/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+When Josh and I first proposed the pidfd from clone (then called "clonefd") a few years ago, our objective had nothing to do with PID reuse, though we knew that issue. Our biggest problem was the inherent race conditions related to signal handling and the absolute impossibility of getting it right inside userspace libraries. So getting a file descriptor from clone() is an absolute necessity, as is the ability to select()/poll() on that file descriptor and get the information wait() would have given us. Configuring the child process not to send SIGCHLD is already part of the clone() API -- set the notification signal to 0.<br>
+<p>
+The problem we faced then was exactly the problem of reparenting when the file descriptor is passed onwards via AF_UNIX. Especially when that is coupled with ptrace(), which appears to do a fake-reparenting to the tracer process. No one could explain to us back then what the issue was, so we couldn't fix and the matter was dropped.<br>
+<p>
+Here's to hoping this feature is useful for userspace.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785065/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785116"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2019 10:40 UTC (Sun)
+                               by <b>meuh</b> (guest, #22042)
+                              [<a href="/Articles/785116/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+The problem we faced then was exactly the problem of reparenting when the file descriptor is passed onwards via AF_UNIX.
+</blockquote>
+
+I think file descriptor sent through SCM_RIGHT should not imply reparenting process to the reader, just like file descriptor inherited through fork() don't imply reparenting process to the newly created one. The semantic of those operations is "copy" ... but "copying" parent relationship doesn't make sense for me: in Unix a process can only have a single parent.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785116/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785131"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2019 18:19 UTC (Sun)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/785131/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Besides, SCM_RIGHTS doesn't "copy" anything. It's pass-by-reference, not pass-by-value.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785131/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor785074"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 20:24 UTC (Fri)
+                               by <b>jkowalski</b> (guest, #131304)
+                              [<a href="/Articles/785074/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; So the only "interesting" functionality we would be adding via a pidfd-that-holds-a-PID-open is the ability to transfer stewardship of a possibly-zombie process to a new "owner"(via SCM_RIGHTS over an AF_UNIX socket, or via fd inheritance), but without changing its PPID.</font><br>
+<p>
+You don't do anything like this really, you can actually set the process cloned using CLONE_PIDFD to deliver no signal to the parent on termination (by setting it to null), which means everyone having a copy of the same file descriptor can poll on it to know when it dies. That also means the process cannot be waited upon, which is what you want when you use this API from inside libraries.<br>
+<p>
+It happens as a side effect of using descriptors, since the parent will get a readable instance (however it is still not clear to me this is something the patch author will support, here's to hoping that), it can pass a copy of its descriptor to others, then perhaps close it, and allow the other process to essentially poll on it, know when the process is gone, and get back the exit status.<br>
+<p>
+The same could be done using references to external processes using pidfd_open, you pass a flag that requests the kernel to give you a readable instance, and if you're a real_parent or parent (as in ptrace terms), you get one. It also has the nice property of the mount namespace not being the one where you acquire pidfds, but limited to the scope of your PID namespace (which I think is a very important point that has been overlooked thus far).<br>
+<p>
+Scoping the opening and adding a system call with extendable flags would allow you to lift checks in pidfd_send_signal to signall across namespaces, exactly because without userspace doing it on its own, a process can only open a pidfd to something it can address inside its PID namespace. It is otherwise a layering violation (literally) that I can use the mount namespace to circumvent this, if iy is opened up in the future. I also object to being able to peek into process state through such descriptors, that capability should be orthogonal, not bound to the pidfd, even if I have the authority to read through. *Therefore, using /proc dir fds comes with a big downside to all of this.*<br>
+<p>
+The nice delegation model allows you to extend pidfd_open with, say, PRIV_KILL that allows you to bind CAP_KILL privs to a pidfd, assuming you have CAP_KILL in the owning userns, which would allow you to pass this pidfd and let the receiver signal across namespace boundaries without restrictions (it has to be opt-in as this is not what you want by default).<br>
+<p>
+You could add a similar flag to bind ptrace privs of the opener, though that is a lot more involved and I have not mentioned it anywhere thus far.<br>
+<p>
+Thus, you can think of the pidfd as a stable reference to the process, and such flags depending on the authority of the opener (if parent, readable, if CAP_KILL, killable, if CAP_SYS_PTRACE, ptraceable, etc) allow you to open up methods to operate on it, and since they are bound to the descriptor, it is limited in scope to the said process only. Such intent cannot be expressed when using /proc. It also does not play well with hidepid=2 (invisible dirs mean you cannot take a reference), and hidepid=1 (dirs you cannot enter mean you cannot reference threads you can see).<br>
+<p>
+The whole reparent on fd-passing however is broken. There can be multiple processes keeping it open at a time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785074/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785117"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2019 10:42 UTC (Sun)
+                               by <b>meuh</b> (guest, #22042)
+                              [<a href="/Articles/785117/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+The whole reparent on fd-passing however is broken. There can be multiple processes keeping it open at a time.
+</blockquote>
+
+I agree: through fork(), exec(), and SCM_RIGHTS, file descriptor can be duplicated in many processes.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785117/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785129"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2019 16:12 UTC (Sun)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/785129/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Capabilities to do things to processes are a great model, and they make sense on Windows, L4-like microkernels, and many other systems. They’re rather busted on POSIX, though, since a process can execute a setuid program or an LSM-labeled program can gain privilege.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785129/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785132"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2019 19:31 UTC (Sun)
+                               by <b>jkowalski</b> (guest, #131304)
+                              [<a href="/Articles/785132/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+... which is why if you want to do this with pidfds, you really want CAP_KILL on part of the opener (or cloning entity) in the owning userns.<br>
+<p>
+You could also make it available to things with NNP set, and when cloning children, the PRIV_KILL, then pass it around, send signals. These all checks happen when the flag is used during pidfd_open or clonefd or whatever.<br>
+<p>
+Do you see other cases where it could be a problem?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785132/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor785086"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 21:49 UTC (Fri)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/785086/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One use-case for pidfds that isn't just "avoid pid reuse" occurs in the rr debugger: the ability to `waitpid` on a selected subset of rr's ptraced processes.<br>
+<p>
+When a traced process is killed by signal or `exit_group`, or does an `execve`, its threads exit in some unknown order. rr wants to clean them all up at once by `wait`ing for those specific threads but NOT receiving notifications for other threads it may be tracing. We currently have no way to do that. AIUI with pidfds we would be able to use, say, `poll` to wait for the exit notifications of a specific set of threads.<br>
+<p>
+You might think we could handle`SIGCHLD` to know when notifications are pending for a traced thread, and use `waitpid` to grab the results for each traced thread after it exits, but that isn't reliable because multiple pending `SIGCHLD`s can be coalesced. Even with `signalfd` :-(.<br>
+<p>
+This is a problem for libraries in general. If you have a library that wants to manage some child processes without interfering with other code (including on other threads) managing other child processes, that's really hard without pidfds.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785086/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785269"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 19:59 UTC (Mon)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/785269/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is also desirable to be able to have a poll()able equivalent to waitpid() for ptracers so that one thread can ptrace things on behalf of other threads and/or processes, polling on fds that represent the processes being waited on and also on fds that represent ordinary pipes or something like that, that are used to transmit requests that the ptracer should fulfill. The waitfd() patches from Casey Dahlin at RH that would have allowed that were shot down many years ago on the grounds that you could always do what waitfd() did by creating another thread and waitpid()ing from that, and doing the poll and waitpid in separate threads.<br>
+<p>
+I revived and unbroke them as part of DTrace for Linux (see e.g. <a href="https://oss.oracle.com/git/gitweb.cgi?p=dtrace-linux-kernel.git;a=commit;h=13846ed654c644213e70aa9b6924471cc32ecd93">https://oss.oracle.com/git/gitweb.cgi?p=dtrace-linux-kern...</a>) because this argument only applies to process-directed waitpid() results: ptrace() is thread-directed, so if you kick off a new thread to handle the requests from other threads it cannot see any of the waitpid() results, and the thread that can see the waitpid() results isn't able to poll on the requests because it's too busy doing a waitpid() :( you'd have to busywait, or poll with pauses, and thus add huge latencies to signal handling in all your traced children: no thanks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785269/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785279"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 20:41 UTC (Mon)
+                               by <b>jkowalski</b> (guest, #131304)
+                              [<a href="/Articles/785279/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There were plans of making the non-proc pidfds pollable and readable, but if you go with /proc descriptors you need to implement all of that over the dir fd's file ops.<br>
+<p>
+That's not very problematic (from an API perspective it is very weird, but not internally), but my idea was pidfd_open could take some wait flags as waitfd did (and check if you're one of parent or real_parent, and only return a readable descriptor), among other things, and that intent cannot be described easily when opening a directory in /proc. This means everyone can poll but perhaps only parents (real or tracing) would be able to open a readable instance.<br>
+<p>
+I can only hope this is taken into consideration (I raised this exact problem as I ran into it as well), and /proc descriptor stuff be removed, as it brings more problems for future extensions.<br>
+<p>
+You could ofcourse resurrect a waitfd too, again, but I see no point when you could return a pollable/readable descriptor from clone and pidfd_open (and possibly even disable termination signals and autoreap them - the whole act of waiting is asynchronous). It also has a nice touch of consistency to it (and the fact that resources in a different namespace suddenly aren't addressable and can be taken a reference to from a different namespace - the filesystem), in that sense pidfd_open isn't very different from open, but it works like open only on PIDs you can *see* (unlike /proc, which is leaky across shared mount namespaces but separate PID namespaces).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785279/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785314"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2019 3:54 UTC (Tue)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/785314/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For the moment, Linus seems to be of the opinion that pidfd_open would be redundant. I can't say I disagree.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785314/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785378"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2019 15:12 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/785378/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can use pidfd for reaping, but can you use it for waitpid() in particular? ptrace() results are not only thread-directed but also only defined in terms of waitpid() output: most of the other wait-a-likes will not suffice (e.g. waitid() throws too much information away).<br>
+<p>
+(If pidfds also wake you up when non-termination waitpid() results would be returned iff you did a waitpid(.., WNOHANG), then they do seem like a complete replacement for waitfd, which is great because it means I can drop another annoying invasive patch!)<br>
+<p>
+btw, this does mean that you'd need to be able to get a pidfd not only at clone time but also at PTRACE_SEIZE time, or tracers could never get hold of a useful pidfd at all...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785378/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor785312"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2019 3:52 UTC (Tue)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/785312/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That work is underway. I'm *very* interested in pollable processes. :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785312/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor785009"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 11:33 UTC (Fri)
+                               by <b>mezcalero</b> (subscriber, #45103)
+                              [<a href="/Articles/785009/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The kernel.pid_max sysctl appears to be capped at 2^22, not at 2^31 or 2^32 as the text suggests. At least I couldn't write any value higher than 2^22 into it, without getting EINVAL.<br>
+<p>
+Lennart<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785009/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785014"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 13:03 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/785014/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      That's the four million mentioned in the text; it is indeed explicitly capped at that size.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785014/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785018"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 13:44 UTC (Fri)
+                               by <b>mezcalero</b> (subscriber, #45103)
+                              [<a href="/Articles/785018/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, indeed, I read 4 billion when you correctly wrote 4 million, and in my mind 2^32 formed. Ignore me then. Sorry for the confusion. Still weird though that this is capped at 2^22. (And the MAXINT reference is misleading still, as you couldn't set that without reworking the kernel substantially.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785018/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785638"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 14:35 UTC (Thu)
+                               by <b>kmweber</b> (guest, #114635)
+                              [<a href="/Articles/785638/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Still weird though that this is capped at 2^22.</font><br>
+<p>
+So on an unrelated topic, but similar issue...years ago, the Madden series of American football games had a hard limit of 255 points that could be scored in a game and 1023 rushing yards that could be gained (I assume other stats were similarly capped, but these were the ones I noticed) (these limits may or may not still be there, it's been years since I played).  For those of you who aren't familiar with American football, those numbers are ridiculously unachievable in any real game, but when playing the video game on easy settings it's quite plausible to reach both of those limits by halftime (particularly with skillful clock management--in short, American football rules specify that whether or not the game clock keeps running between plays is generally contingent upon the outcome of the just-completed play, with some complications for timeouts, penalties, and injuries, and when the end of the half or game is near--manipulating these rules with play-calling is a crucial part of late-game strategy).  The 255-point limit was annoying but straightforward enough to understand, but for the life of me I couldn't understand why accumulated rushing yards was limited at 1023.  This was in the mid-to-late 2000s; it wasn't *that* long ago, and memory certainly wasn't scarce enough that it was worth the extra trouble of using bitfields or implementing an explicit limit in code that was less than the max value of the data type used.<br>
+<p>
+Now that I think of it, maybe this is where those extra ten bits from the PID cap went :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785638/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor787623"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2019 18:25 UTC (Mon)
+                               by <b>mgedmin</b> (subscriber, #34497)
+                              [<a href="/Articles/787623/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The 255-point limit was annoying but straightforward enough to understand, but for the life of me I couldn't understand why accumulated rushing yards was limited at 1023. This was in the mid-to-late 2000s; it wasn't *that* long ago, and memory certainly wasn't scarce enough that it was worth the extra trouble of using bitfields or implementing an explicit limit in code that was less than the max value of the data type used.</font><br>
+<p>
+16-bit fixed point numbers maybe, with 6 bits reserved for the fractional value? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/787623/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor798542"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2019 21:43 UTC (Thu)
+                               by <b>kmweber</b> (guest, #114635)
+                              [<a href="/Articles/798542/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is no fractional member.  American football statistics are counted in whole numbers, and the game reflected that.<br>
+<p>
+Essentially, the number of yards you've gained is equal to the number of yard lines you've crossed.  So if you start from barely past the one yard line and get to just short of the four yard line, you've only officially gained two yards for statistics purposes even though you've actually gained very nearly three.  And on the flip side, if you start from just short of the two yard line and end just past the three yard line, you're credited with a two-yard gain even though you've really covered barely more than one.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/798542/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor785016"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 13:15 UTC (Fri)
+                               by <b>Villemoes</b> (subscriber, #91911)
+                              [<a href="/Articles/785016/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yup, the robust futex implementation means one cannot use all 32 bits for a tid.<br>
+<p>
+/*<br>
+ * A maximum of 4 million PIDs should be enough for a while.<br>
+ * [NOTE: PID/TIDs are limited to 2^29 ~= 500+ million, see futex.h.]<br>
+ */<br>
+#define PID_MAX_LIMIT (CONFIG_BASE_SMALL ? PAGE_SIZE * 8 : \<br>
+        (sizeof(long) &gt; 4 ? 4 * 1024 * 1024 : PID_MAX_DEFAULT))<br>
+<p>
+though uapi/linux/futex.h seems to imply that the actual limit is 30 bits<br>
+<p>
+/*<br>
+ * The rest of the robust-futex field is for the TID:<br>
+ */<br>
+#define FUTEX_TID_MASK          0x3fffffff<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785016/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor785015"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 13:05 UTC (Fri)
+                               by <b>mjthayer</b> (guest, #39183)
+                              [<a href="/Articles/785015/">Link</a>] (23 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What about a system call to send a signal to a (pid, timestamp) pair, where the timestamp is for a time when the process in question was definitely known to be running?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785015/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785146"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 1:06 UTC (Mon)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/785146/">Link</a>] (22 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+TImestamp .... would that be CLOCK_REALTIME, CLOCK_MONOTONIC,  or CLOCK_BOOTTIME?<br>
+<p>
+I agree that having two-factor authentication would be a good approach, I'm not sure that timestamp is best.<br>
+We could add a "pid generation" counter which was incremented whenever the next-pid number restarted from the bottom.  Then you need some way to get the pid generation for a given process, and some way to include it in the signal sent.<br>
+Two new syscalls would do it.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785146/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785249"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 17:58 UTC (Mon)
+                               by <b>perennialmind</b> (guest, #45817)
+                              [<a href="/Articles/785249/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      So add a <code>/proc/$pid/pid-generation</code> symlink or file and some kind of alias to the current <code>/proc/$pid</code> like <code>/proc/pid-gen/$pid-$gen</code>? PID remains a unique candidate key, subject to a version check. Sounds sane to me. I don't have any particular need for 4 million processes running at once.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785249/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785254"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 18:17 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785254/">Link</a>] (20 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Please. Just don't.<br>
+<p>
+Process management has been the most fucked-up part of Unix since forever. Adding FD-based interface will go a long way towards unfucking it. Adding more ad-hoc kludges won't.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785254/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785270"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 19:55 UTC (Mon)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/785270/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I heartily agree.<br>
+<p>
+Though there are some other nasty areas of kernel API that might be worse than process management. Signals themselves, for example. <a href="https://ldpreload.com/blog/signalfd-is-useless">https://ldpreload.com/blog/signalfd-is-useless</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785270/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785273"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 20:04 UTC (Mon)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/785273/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My thoughts exactly. The terminal API is pretty appalling, too, though it's marginally less appalling now that the old ioctl interface to it is thankfully reduced. Even OS/2's Vio*() was cleaner...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785273/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785296"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 22:04 UTC (Mon)
+                               by <b>rweikusat2</b> (subscriber, #117920)
+                              [<a href="/Articles/785296/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This long rant can really be condensed down to "I have no friggin' clue and don't care!".<br>
+<p>
+There's only one case where the behaviour of POSIX calls is undefined wrt signals: If a signal handler which interruped an unsafe function calls an unsafe function. The I/O-multiplexing calls are async signal safe, hence, the usually sensible way to marry signal handling and an I/O multiplexing loop is to block all handled signals, install signal handlers for them and then use pselect/ ppoll/ epoll_pwait to unblock handled signals only while the code is waiting for I/O. Signal handlers are then free to call whatever function they want as the sole interrupted function will be async signal safe. And the only function which can terminate with an EINTR condition will be the multiplexing call. Problem solved[*].<br>
+<p>
+[*] Signals mask are inherited, hence, code creating new process has to deal with that. Just like it has to deal with all other inheritable things. BFD.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785296/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785298"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 22:08 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785298/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Problem solved</font><br>
+Nope. And you haven't even gotten to the interesting stuff - multithreading and realtime signals.<br>
+<p>
+Signals are basically impossible to use correctly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785298/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785336"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2019 14:18 UTC (Tue)
+                               by <b>rweikusat2</b> (subscriber, #117920)
+                              [<a href="/Articles/785336/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Feel free to prove my wrong instead of making (wrong) blanket assertion based on not knowing how to handle something I didn't explicitly mention. Eg, describe specific problem situation. The model I described maps naturally to multithreaded processes as well, it just needs to be applied to all threads --- they either block signals which are supposed to be handled or block inside a multiplexing call which atomically unblocks said signals. There's nothing special about realtime signals beyond that they can be queued and that it's possible to send some data alongside a signal.<br>
+<p>
+With Linux, one can even build programs which are entirely signal-driven by using realtime signals for I/O readiness notification (see fcntl(2)) and sigwaitinfo instead of one of the file descriptor based I/O multiplexing calls. I've used that once for a moderately complex Perl program (about 25 kloc) because it was the easiest to use in this environment.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785336/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785376"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2019 15:04 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/785376/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Let's make it really fun: asynchronous signals and asynchronous cancellation handlers, because having one horrible source of bugs that trigger very rarely when innocent functions like malloc() are called anywhere in the call stack was not enough, so they added another! (Unfortunately asynchronous cancellation handlers *are* used, as Debian code search makes clear, so libc authors have to go through hell making them work right: this is distinct from, say, seekdir(), which appears to be basically unused, with all the codesearch hits being wrappers or parts of the implementation.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785376/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785385"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2019 17:42 UTC (Tue)
+                               by <b>rweikusat2</b> (subscriber, #117920)
+                              [<a href="/Articles/785385/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Signals don't cause "horrible bugs when innocent functions like malloc are being called". Broken code for handling signals might. As I already wrote: A signal handler must not call a function which isn't async signal safe it it interrupted another unsafe function. That's easy enough to guarantee (see other postings),
+
+<blockquote>
+In the presence of signals, all functions defined by this volume of POSIX.1-2017 shall behave as defined when called from or interrupted by a signal-catching function, with the exception that when a signal interrupts an unsafe function or equivalent (such as the processing equivalent to exit() performed after a return from the initial call to main()) and the signal-catching function calls an unsafe function, the behavior is undefined. 
+</blockquote>
+
+That's part of section 2.4.3 of the following page:
+<p>
+http://pubs.opengroup.org/onlinepubs/9699919799/functions/V2_chap02.html#tag_15_04
+<p>
+The three usual approaches would be
+
+<ol>
+<li> call only safe functions from signal handlers (eg, by using a pipe to notify an event loop of a signal)
+<li> keep signals blocked unless a safe function is being executed (what I described)
+<li> keep signals blocked and dequeue them synchronously via sigwait and friends
+</ol>
+
+A UNIX signal is nothing but a level-triggered interrupt emulated in software. A lot of hardware (eg, PCI hardware) has used this model for event notification for an eternity and it's perfectly workable.
+<p>
+IMHO, thread cancellation is a braindead misfeature but that's a completely different discussion.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785385/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785592"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 7:04 UTC (Thu)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/785592/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the better analogy is edge-triggered interrupts. The real headache with signals is setting up the environment as you describe, and that's problematic because the timing and disposition semantics are quite inconvenient.<br>
+<p>
+Once all the boilerplate code is in place it's seems like alot of unnecessary complexity compared to having started with something like a signalfd or eventfd. OTOH, for some things, such as catching SIGSEGV to extend mmap'd stack data structures, or to interrupt and switch program flow without tight, language-level integration of components, the old semantics are indispensable.<br>
+<p>
+Threading semantics compound the headaches. But as for cancelations in particular--I don't think anybody defends the idea any longer. It's almost a strawman at this point as few if applications actually use them and implementations effectively disclaim liability. I'm surprised there's no movement to remove cancellations from implementations, POSIX, or both.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785592/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785929"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 14:59 UTC (Sat)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/785929/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+That's easy enough to guarantee
+</blockquote>
+It's so easy to guarantee that when I looked, every single program that used nontrivial signal handlers (that did more than assigning to a variable or writing to a one-byte pipe) got it wrong, <i>including glibc itself</i>. The latter case is since fixed, but this is clearly <i>not</i> easy to guarantee, given that most uses are faulty and even the implementation gets it wrong. I suspect lack of experience on your part masquerading as arrogance, frankly.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785929/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor785299"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 22:23 UTC (Mon)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/785299/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I like that approach, but it doesn't solve all the problems with signals:<br>
+<p>
+Sometimes it's a problem to delay all signal handling until you return to the event loop; sometimes you really want signal handlers to be able to run during some long synchronous operation.<br>
+<p>
+It doesn't solve the signal coalescing problem at all, making the data in siginfo impossible to use reliably in many situations.<br>
+<p>
+It doesn't solve the problem that there are a finite and rather small set of signals available and you basically have to allocate them statically with no protocol for avoiding or handling conflicting uses of a signal.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785299/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785301"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 22:39 UTC (Mon)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/785301/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Also, even when you can cobble together reliable signal handling out of the available APIs --- the APIs still suck. I just don't think it needs to be this hard.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785301/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor786344"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2019 7:16 UTC (Sat)
+                               by <b>njs</b> (guest, #40338)
+                              [<a href="/Articles/786344/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+With signals at least most of the problems are related to inconvenient aspects of reality (i.e., signals can arrive at any moment, and the kernel can't allocate unbounded amounts of memory for a signal queue). For the core signal use cases like SIGSEGV or SIGTERM, I don't think there's a lot of room for improvement. There are also too many APIs that use signals when it's really not appropriate, but that's not the signal API's fault.<br>
+<p>
+For process management, all the terrible problems that make the APIs impossible to use safely are totally self-inflicted. And probably the worst of those is the choice to use signals!<br>
+<p>
+If we're kvetching about kernel API misdesigns, "non-blocking read from stdin" should also be on the list, probably just below SIGCHLD. The problem is: how do you do a non-blocking read from stdin, like you might want to in an async system like node? You might think "well, just use fcntl on fd 0 to set O_NONBLOCK", but since the O_NONBLOCK flag is stored on the file descript*ion*, this also affects any other processes that might have copies of that fd. Obviously O_NONBLOCK should have been a file-descriptor flag, like O_CLOEXEC, but file-descriptor flags didn't exist when O_NONBLOCK was created, so that's not how it works. Therefore, you can't safely set O_NONBLOCK on stdin without possibly breaking other random programs. djb has some cogent commentary: <a rel="nofollow" href="https://cr.yp.to/unix/nonblock.html">https://cr.yp.to/unix/nonblock.html</a><br>
+<p>
+There are some obscure hacks for specific cases: <a rel="nofollow" href="https://github.com/python-trio/trio/issues/174#issuecomment-314933977">https://github.com/python-trio/trio/issues/174#issuecomme...</a><br>
+Or really *really* obscure hacks: <a rel="nofollow" href="https://gist.github.com/njsmith/235d0355f0e3d647beb858765c5b63b3">https://gist.github.com/njsmith/235d0355f0e3d647beb858765...</a><br>
+<p>
+But fundamentally this is an obvious, common problem that simply can't be solved on popular Unixes.<br>
+<p>
+(Probably the obvious solution for Linux at this point would be to add a RWF_NONBLOCK flag to preadv2/pwritev2, as per djb's suggestion.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786344/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor785294"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 21:51 UTC (Mon)
+                               by <b>rweikusat2</b> (subscriber, #117920)
+                              [<a href="/Articles/785294/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't know where the "pid files" etc hacks originated from but they aren't inherently associated with UNIX process management, just with some people's stubborn refusal to use that properly.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785294/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785295"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 22:03 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785295/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem is not in pidfiles. It's the whole process management thingie, that is impossible to use safely in many cases.<br>
+<p>
+For example, a general-purpose library can't even do something as simple as create a process and wait for it to finish. This is just ridiculous.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785295/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785338"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2019 14:21 UTC (Tue)
+                               by <b>rweikusat2</b> (subscriber, #117920)
+                              [<a href="/Articles/785338/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Different topic.<br>
+<p>
+"A general purpose library", IOW, some random, binary only code with undefined behaviour (in the sense that no specific behaviour is ever defined when this 'argument' shows up) is a situation which cannot be handled.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785338/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785377"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2019 15:08 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/785377/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, a 'general purpose library' is any library which does not know what its caller is and what its caller expects in regard to process-global or thread-global attributes like the file descriptor table or signal dispositions. This includes most if not all core free software libraries. In particular it includes things like glibc, which cannot do a lot of things in the most obvious way because callers expect to have complete control over signals (except for a tiny set which glibc has reserved *forever* so can keep hold of without breaking existing users) and fds ('loop over lots of fds, close() them all, and hope you got them all' is still a thing a huge number of processes do), and processes, and threads... which makes it more or less impossible for glibc to do anything asynchronous without madness like the shared memory regions used by nscd (which have caused bugs in the past due to programs thinking they can MAP_FIXED in the same place and screaming when they couldn't). I do wonder how many programs the gai_*() APIs, which use threads, have broken -- probably not many since those APIs are Linux-specific and not terribly popular.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785377/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785383"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2019 16:39 UTC (Tue)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/785383/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  fds ('loop over lots of fds, close() them all, and hope you got them all' is still a thing a huge number of processes do), </font><br>
+<p>
+I have zero qualms about breaking programs that are so obviously broken themselves. You don't free resources you didn't create: that's a rule for any system, not just unix. Just no. Let's no enable programs that break this rule.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785383/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785395"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2019 19:50 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/785395/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Applications that launch a securely sandboxed child process need to do this in the child process before they exec. Leaking a file descriptor across the sandbox boundary would be devastating.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785395/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785930"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 15:01 UTC (Sat)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/785930/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem is that a loop closing the first 1024 fds before exit is incredibly common. Almost everything written before O_CLOEXEC became commonplace does that. Are you willing to break everything written before then? I'm certainly not. People are using those programs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785930/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785932"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 15:58 UTC (Sat)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/785932/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's less of a problem when the FDs are closed just before exec. Fewer programs randomly close all FDs in steady-state execution, unforked.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785932/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor785026"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 14:54 UTC (Fri)
+                               by <b>amarao</b> (subscriber, #87073)
+                              [<a href="/Articles/785026/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I understand the problem they want to solve, but I feel the whole 'reuse' is a core problem here. Let's for a second imagine reading article on 'UUID reuse'. Sounds creepy, isn't it?<br>
+<p>
+The proper way would be to assure userspace that pids (process uuids, process atoms, you name it) are never reused for system lifetime. If you have id, it's guaranteed to be the ID.<br>
+<p>
+Whole 'pid' thing sounds more like hotel room numbers instead of guest identity.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785026/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785027"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2019 14:58 UTC (Fri)
+                               by <b>walters</b> (subscriber, #7396)
+                              [<a href="/Articles/785027/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Clearly we've been moving to a world where fds are the general way to refer to kernel objects, away from integer approach for PIDs.<br>
+<p>
+However there's an interesting thing here...you still really want a "human readable" and persistent identifier.  With regular files, fds are obviously retrieved via...file names.<br>
+<p>
+But this proposal is adding no such equivalent - /proc/&lt;pid&gt; doesn't solve the problem because it uses integers.<br>
+<p>
+Now one of the core innovations of systemd was using cgroups as a way to just *group* processes.  That model has further extended into modern container systems - e.g. in the model popularized by Docker, a "container" is a grouping of an image with cgroups, namespaces etc.  Put another way...no one using e.g. Kubernetes really ends up thinking in terms of pids - you `kubectl delete pod/X`.<br>
+<p>
+Back to cgroups...I think we can push admins and userspace more to thinking in terms of the cgroups.  What if our identifiers for processes were more like (cgroup ID, u64)?  And we had a system call that took that pair?  It'd greatly ameliorate issues with pid reuse - at least you'd never end up killing a process in another cgroup.<br>
+<p>
+We'd have /usr/bin/kill httpd.service/42 or so.<br>
+<p>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785027/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785104"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 6, 2019 20:05 UTC (Sat)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/785104/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have seen software broken by large PIDs. Arguably though they're just doing it wrong, especially in 2019.<br>
+<p>
+There's no purpose in using "short" to store PIDs when we have "pid_t" and using "char[6]" as string storage for a PID has always been a pretty bad idea. The print formatting that assumes six columns is ugly but not dangerous, and apparently people just don't care, as "vmstat" has had broken column widths for at least ten years (block IO per second and memory sizes are much larger than vmstat originally designed for).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785104/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785119"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2019 13:24 UTC (Sun)
+                               by <b>geuder</b> (guest, #62854)
+                              [<a href="/Articles/785119/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+When building my Yocto image from scratch on my 8 core 16 thread machine PIDs used to wrap around ~100 times during an hour. While I have never explicitly noticed any technical race condition the human race condition was annoying. During debugging I assume that a process with a smaller pid has started first when searching for the root cause of problem. Yocto appends the pid to the names of it log files. With the pids wrapping around so fast, they basically had zero value.<br>
+<p>
+Some what resistingly I changed pid_max to 999999 some months ago. With the 15 bit limit in use for decades I expected something to break. But luckily I have not observed any breakage (although I'm ready to believe those who say they have seen broken SW). Only (command line) user friendliness has suffered a bit. Most of the pids are 6 digits to remember. But hey, that's what I wanted...<br>
+<p>
+It's indeed strange that the 15 bit limit has lived for so long. On the other hand in desktop usage and probably also in many server cases the process creation rate has not increased that drastically as many other performance parameters during the last 20 years.<br>
+<p>
+It can't harm if the kernel hackers fix this issue in any case.When thinking about pid namespaces and mount namespaces involved we can just hope it doesn't get too complicated to be usable in real life...<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785119/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785630"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 14:30 UTC (Thu)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/785630/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A Modest Proposal: give each process a unique IPv6 address, mapped to a 64 bit PID for compatibility.<br>
+<p>
+You might think I'm not serious (and you'd be right), but I can imagine a lot of flamewars wouldn't have happened in a world with this as standard.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785630/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785774"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 3:23 UTC (Fri)
+                               by <b>faramir</b> (subscriber, #2327)
+                              [<a href="/Articles/785774/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I can't figure out how this would work for network based compute clusters that support process migration.  I don't think it would be a good idea to pollute the local systems' routing tables with static routes whenever a process was migrated off of its original host.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785774/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785914"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 10:43 UTC (Sat)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/785914/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>You could use <a href="https://lwn.net/Articles/657012/">identifier-locator addressing</a> to handle that - the upper 64 bits can be the SIR, and the lower 64 bits can be the identifier. Then, the existing ILA mechanisms will convert SIR to locator whenever you need to talk to a process.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785914/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor786828"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2019 22:36 UTC (Thu)
+                               by <b>fest3er</b> (guest, #60379)
+                              [<a href="/Articles/786828/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Or use the time of creation of the process, down to the nanosecond, as the PID, using a kernel thread that serially hands out PIDs on request. This could, of course, cause problems when migrating a process from one system to another. At least on a given system, a PID could never be reused. So how many processes can be created in a given instant of time?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786828/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor787344"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2019 21:18 UTC (Thu)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/787344/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Purely timestamp-based PIDs will never fly because they'll never be able to perform well enough. An x86 HPET, shared between all cores in the system, is only guaranteed to provide 10MHz/100ns granularity and is fairly expensive to access on top of that. TSCs are basically free to read but nigh impossible to read _consistently_ in a frequency-hopping multicore system.<br>
+<p>
+A scheme that encodes the CPU ID and TSC might be pretty efficient and would work, if we were to abandon the guarantee that IDs have any correlation to time. But, this being Linux, someone out there almost certainly depends on that implementation detail.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/787344/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor787986"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking race-free process signaling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 9, 2019 18:38 UTC (Thu)
+                               by <b>mcortese</b> (guest, #52099)
+                              [<a href="/Articles/787986/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How is a time-linked n-bit integer any better than a non-time-linked n-bit integer? In other words, if you can dedicate n bits to a PID with n big enough to measure down to nanoseconds, then why not simply using a n-bit non-wrapping enumerator? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/787986/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2019, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

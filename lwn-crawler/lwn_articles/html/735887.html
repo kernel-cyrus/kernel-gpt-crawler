@@ -1,0 +1,650 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Improving the kernel timers API [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/735887/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/735567/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/735887/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Improving the kernel timers API</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 9, 2017</br>
+           </div>
+The kernel's timer interface has been around for a long time, and its API
+shows it.  Beyond a lack of conformance with current in-kernel interface
+patterns, the timer API is not as efficient as it could be and stands in
+the way of ongoing kernel-hardening 
+efforts.  A late addition to the 4.14 kernel paves the way toward a
+wholesale change of this API to address these problems.
+
+<p>
+It is worth noting that the kernel has two core timer mechanisms.  One of
+those — the high-resolution timer (or "hrtimer") — subsystem, is focused on
+near-term events where the timer is expected to run to completion.  The
+other subsystem 
+is just called "kernel timers"; it offers less precision but is more
+efficient in situations where the timer will probably be canceled before it
+fires.  There are many places in the kernel where timers are used to detect
+when a device or a network peer has failed to respond within the expected
+time; when, as usual, the expected response <i>does</i> happen, the timer
+is canceled.  Kernel timers are well suited to that kind of use.  The work
+at hand focuses on that second type of timer.
+
+<p>
+Kernel timers are described by the <tt>timer_list</tt> structure, defined
+in <a
+href="http://elixir.free-electrons.com/linux/v4.14-rc4/source/include/linux/timer.h"><tt>&lt;linux/timer.h&gt;</tt></a>:
+<p>
+<pre>
+    struct timer_list {
+	unsigned long		expires;
+	void			(*function)(unsigned long);
+	unsigned long		data;
+	/* ... other stuff elided ... */
+    }
+</pre>
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+The <tt>expires</tt> field contains the expiration time of the timer (in
+jiffies); on 
+expiration, <tt>function()</tt> will be called with the given
+<tt>data</tt> value.  It is possible to fill in a <tt>timer_list</tt>
+structure manually, but it is more common to use the <tt>setup_timer()</tt>
+macro:
+<p>
+<pre>
+    void setup_timer(timer, function, data);
+</pre>
+<p>
+There are a number of issues with this API, as <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=686fef928bba6be13cabe639f154af7d72b63120">argued
+by Kees Cook</a>.  The <tt>data</tt> field  bloats the
+<tt>timer_list</tt> structure unnecessarily and, as an unadorned
+<tt>unsigned long</tt> value, it resists any sort of type checking.  It is
+not uncommon for callers to cast pointer values to and from this value, for
+example.  For these reasons, it is far more common in current kernel APIs
+to dispense with the <tt>data</tt> field and, instead, just pass a pointer
+to the relevant structure (the <tt>timer_list</tt> structure in this case)
+to the callback.  Likely as not, that structure is embedded within a larger
+structure containing the information the callback needs anyway, so a simple
+<tt>container_of()</tt> call can replace the casting of the <tt>unsigned
+long</tt> value.
+<p>
+As might be expected, though, Cook has concerns about this API that go
+beyond matching the current kernel style.  One of those is that a buffer
+overflow in the area of a <tt>timer_list</tt> structure may be able to
+overwrite both the function pointer and the data passed to the called
+function, allowing arbitrary calls within the kernel.  That, naturally,
+makes <tt>timer_list</tt> structures interesting to attackers, and explains
+why Cook has been <a href="/Articles/731082/">trying to harden timers</a>
+for a while.  The
+prototype of the timer callback, containing a single <tt>unsigned long</tt>
+argument, is also evidently an impediment to "<q>future control flow
+integrity work</q>".  It would be better if the callback had a unique
+prototype that was visibly different from all of the other kernel functions
+taking an <tt>unsigned long</tt> argument.
+<p>
+Cook has been working on changes to the timer interface for a while in an
+attempt to address these issues.  The core idea is simple: get rid of the
+<tt>data</tt> value and just pass the <tt>timer_list</tt> structure to the
+timeout function.  The actual transition, though, is complicated by the
+existence of 800 or so <tt>setup_timer()</tt> call sites in the kernel
+now.  Trying to change them all at once would not be anybody's idea of fun,
+so a phased approach is needed.
+<p>
+In this case, Cook has introduced a new function for the initialization of
+timers:
+<p>
+<pre>
+    void timer_setup(struct timer_list *timer, void (*callback)(struct timer_list *),
+		     unsigned int flags);
+</pre>
+<p>
+For the time being, <tt>timer_setup()</tt> simply stores a pointer to
+<tt>timer</tt> in the <tt>data</tt> field.  Note that the prototype of the
+callback has changed to expect the <tt>timer_list</tt> pointer.
+<p>
+With that function in place, calls to <tt>setup_timer()</tt> can be
+replaced at leisure, as long as each corresponding timer callback function
+is adjusted accordingly.  For the most part, as can be seen in <a
+href="/Articles/735892/">this example</a>, the changes are trivial.  Many
+timer callbacks already were casting the <tt>data</tt> value to a pointer
+to the structure they needed; they just need a one-line change to obtain
+that from the <tt>timer_list</tt> pointer instead.  A new
+<tt>from_timer()</tt> macro has been added to make those conversions a bit
+less verbose.
+<p>
+The addition of <tt>timer_setup()</tt> was merged just prior to the
+4.14-rc3 release — rather later in the release cycle than one would
+ordinarily expect to see the addition of new interfaces.  The purpose of
+this timing was clear enough: it clears the way for the conversion of all
+of those <tt>setup_timer()</tt> calls, a task which, it is hoped, will be
+completed for the 4.15 kernel release.  Once that is done, the underlying
+implementation can be changed to drop the <tt>data</tt> value and the
+<tt>setup_timer()</tt> interface can be removed entirely.  At the end,
+the kernel will
+be equipped with a timer mechanism that is a little bit more efficient,
+more like other in-kernel APIs, and easier to secure.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Kernel_hardening">Security/Kernel hardening</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Timers">Timers</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/735887/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor735953"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving the kernel timers API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2017 16:48 UTC (Tue)
+                               by <b>jhoblitt</b> (subscriber, #77733)
+                              [<a href="/Articles/735953/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Another win for weakly typed languages...<br>
+<p>
+Seriously, why does C allow casting between non-pointer and pointers types?  It would be nice if there was a gcc pragma to disable that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/735953/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor735970"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving the kernel timers API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2017 20:25 UTC (Tue)
+                               by <b>mpr22</b> (subscriber, #60784)
+                              [<a href="/Articles/735970/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>Seriously, why does C allow casting between non-pointer and pointers types?</blockquote>
+<p>Because in a lot of the environments where people still think using C makes sense, sometimes you <em>need</em> to be able to compose an integer from part of a pointer, or a pointer from parts of integers.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/735970/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor736001"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving the kernel timers API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2017 7:17 UTC (Wed)
+                               by <b>walken</b> (subscriber, #7089)
+                              [<a href="/Articles/736001/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Seriously, why does C allow casting between non-pointer and pointers types?</font><br>
+<p>
+So that you can implement malloc().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736001/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor736006"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving the kernel timers API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2017 9:57 UTC (Wed)
+                               by <b>sdalley</b> (subscriber, #18550)
+                              [<a href="/Articles/736006/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Use of malloc should never require a cast, if it is prototyped to return a pointer to void.<br>
+<p>
+The under-the-hood implementation of malloc might require casting between integers and pointers, although I've always managed with just pointers and pointer arithmetic.<br>
+<p>
+Use of C casts is almost always a sign of poor programming and potential bugs, and/or lingering heritage of code before prototypes or const qualifiers etc were a thing. The need for casts very often goes away with correct prototyping, or judicious use of a union.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736006/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor737054"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving the kernel timers API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 20, 2017 19:53 UTC (Fri)
+                               by <b>Jandar</b> (subscriber, #85683)
+                              [<a href="/Articles/737054/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; implement malloc()</font><br>
+<p>
+!=<br>
+<p>
+<font class="QuotedText">&gt; Use of malloc</font><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/737054/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor768188"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving the kernel timers API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2018 3:07 UTC (Fri)
+                               by <b>samiam95124</b> (guest, #120873)
+                              [<a href="/Articles/768188/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is nothing preventing you from encapsulating malloc() specific to your application. Thus:<br>
+<p>
+struct timer_list {<br>
+<p>
+...<br>
+<p>
+}<br>
+<p>
+struct timer_list *get_timer_list(void) { return (struct timer_list*) malloc(sizeof(timer_list)); }<br>
+<p>
+etc. <br>
+<p>
+I come from a strongly typed language background, so I use that paradigm a lot in my code.<br>
+<p>
+The reason why you cast from malloc, even though it returns void, is so you have some idea what type is being converted into, not just leaving it implicit.<br>
+<p>
+PS if you use the get_xxx_entry() and put_xxx_entry() paradigm in your code, you create a centerpoint for the allocation and deallocation of types, and can do advanced things based on that. For example, I typically count my structures by type, +1 for each get() and -1 for each put(). This allows you to assert() for things like underflow (more puts than gets), and non-zero counts after clean up/shutdown routines.<br>
+<p>
+In addition, probably because I distrust storage allocators, I keep most of my structures in a free list on put(), and pass them out again in get(). This reduces fragmention, as well as supporting the idea that if you use a certain data structure once, you are probably going to use them again (and again). Finally, using a single #ifdef flag you can turn off reuse/recycle in the get()/put() routines and use that to trace down use after dispose and similar bugs. If you turn off recycle and your bug goes away, there you go.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768188/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor768279"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving the kernel timers API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2018 19:10 UTC (Fri)
+                               by <b>sdalley</b> (subscriber, #18550)
+                              [<a href="/Articles/768279/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hmm, that's all rather neat and tidy. You're using the cast in a self-documenting way.<br>
+<p>
+And I share your preference for pre-allocating free lists for specific things. This kind of thing comes into its own in hard-realtime programming, when you can't afford to have non-deterministic mallocs inserting random delays in high priority threads.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768279/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor736111"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving the kernel timers API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2017 6:02 UTC (Thu)
+                               by <b>error27</b> (subscriber, #8346)
+                              [<a href="/Articles/736111/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The funny thing is that I had just added support for tracking function pointers stored as unsigned long to Smatch.  I wonder if any other code does this or it can be removed?<br>
+<p>
+<a href="http://repo.or.cz/smatch.git/commitdiff/5fe8df0add883597c317b47e4fe405804c7feb59">http://repo.or.cz/smatch.git/commitdiff/5fe8df0add883597c...</a><br>
+<p>
+It was part of infrastructure to link function pointers to their data arg...<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736111/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor736121"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving the kernel timers API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2017 7:46 UTC (Thu)
+                               by <b>iq-0</b> (subscriber, #36655)
+                              [<a href="/Articles/736121/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Seriously, why does C allow casting between non-pointer and pointers types? It would be nice if there was a gcc pragma to disable that.</font><br>
+<p>
+Because it lacks generics and generic types and most uses are in some way of storing or passing along some unknown thing. Some uses might be handled through 'union's, but those are hardly better and won't work in truly generic decoupled code.<br>
+<p>
+The fact that some uses in the kernel are extremely sensitive to how large some variables are only makes it worse.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736121/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor735959"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving the kernel timers API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2017 18:07 UTC (Tue)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/735959/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At the risk of bikeshedding, it seems odd and confusing to redesign setup_timer and call the new interface timer_setup.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/735959/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor735960"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timer_setup()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2017 18:28 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/735960/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      It needed a new name so it could coexist with the old interface, and subsystem_action() is the preferred pattern these days.  I'm not sure what a better choice would have been.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/735960/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor735967"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timer_setup()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2017 20:09 UTC (Tue)
+                               by <b>dc123</b> (guest, #117760)
+                              [<a href="/Articles/735967/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is there a convention for marking deprecated APIs in the kernel?<br>
+<p>
+Maybe a comment added to the deprecated function definition would help folks sort out the difference between timer_setup() and setup_timer() more effectively.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/735967/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor735969"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">timer_setup()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2017 20:11 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/735969/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      There is a <tt>__deprecated</tt> marker, but it is kind of deprecated itself because it creates too much warning noise.  In this case, the old interface should simply disappear in 4.15, so the opportunity for confusion should be somewhat limited.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/735969/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor736135"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Automating conversion to the new kernel timers API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2017 10:09 UTC (Thu)
+                               by <b>jnareb</b> (subscriber, #46500)
+                              [<a href="/Articles/736135/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if it would be possible to convert old API to new API automatically, for example using Coccinelle: <a href="http://coccinelle.lip6.fr/">http://coccinelle.lip6.fr/</a> . <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736135/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor736823"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Automating conversion to the new kernel timers API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 19, 2017 6:21 UTC (Thu)
+                               by <b>kees</b> (subscriber, #27264)
+                              [<a href="/Articles/736823/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Of the 900ish timer callsites, 600ish can (and will) be converted with Coccinelle. However, the rest need special care. One thing blocking better Coccinelle handling is shown in the conversion linked in the article: having the timer callback defined in a different file than the setup_timer(). Those I had to get creative with.<br>
+<p>
+Not mentioned in the article is the even earlier API, init_timer(), which left the function and data fields to be assigned separately, open-coded. This is all getting cleaned up too. And finally, there were init_*_timer(), setup_*_timer(), and TIMER_*_INITIALIZER() variants which all just set flags on the timer. Those are also being removed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736823/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2017, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

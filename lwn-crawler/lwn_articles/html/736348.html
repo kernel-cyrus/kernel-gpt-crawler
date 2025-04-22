@@ -1,0 +1,700 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>unsafe_put_user() turns out to be unsafe [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/736348/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/736178/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/736348/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>unsafe_put_user() turns out to be unsafe</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 13, 2017</br>
+           </div>
+When a veteran kernel developer introduces a severe security hole into the
+kernel, it can be instructive to look at how the vulnerability came about.
+Among other things, it can point the finger at an API that lends itself
+toward the creation of such problems.  And, as it turns out, the knowledge
+that the API is dangerous at the outset and marking it as such may not be
+enough to prevent problems.
+<p>
+Back in late 2015, kernel developers were looking for ways to speed up the
+movement of data between user space and kernel space.  Accessing user data
+from the kernel, whether for reading or writing, has clear security
+implications, so the kernel must ensure that the requested access is
+something that the requester is allowed to do.  That involves checking that
+the intended area of memory is indeed accessible; on newer hardware, it can
+also require temporarily disabling mechanisms like <a
+href="/Articles/517475/">supervisor mode access prevention (SMAP)</a>.
+Those preparations are expensive relative to a simple data copy, and they
+can add up if the kernel must perform a sequence of several reads and/or
+writes to user space.
+<p>
+The obvious solution is to do the preparations once for a series of operations,
+then perform the operations themselves directly; that amortizes the cost of
+a single set of checks across multiple accesses.  To that end, Linus
+Torvalds <a
+href="https://git.kernel.org/linus/5b24a7a2aa2040c8c50c3b71122901d01661ff78">added
+a new set of access functions</a> for the 4.5 kernel:
+<p>
+<pre>
+    unsafe_get_user(value, source);
+    unsafe_put_user(value, destination);
+</pre>
+<p>
+These "functions" are actually macros that expand differently depending on
+the type of <tt>source</tt> or <tt>destination</tt>.  If, for example,
+<tt>source</tt> is a pointer to a <tt>u16</tt> value, then
+<tt>unsafe_get_user()</tt> will fetch an unsigned 16-bit value from that
+location and store it in <tt>value</tt>.  These functions are thus like the
+traditional <tt>get_user()</tt> and <tt>put_user()</tt> macros, but with
+one change: they dispense with the normal permission checking.
+<p>
+The lack of checks is the clear motivation for the "unsafe" naming, even
+if, according to <a
+href="http://elixir.free-electrons.com/linux/latest/source/arch/x86/include/asm/uaccess.h#L689">the
+comments in the code</a>, that term does not really apply:
+<p>
+<pre>
+    /*
+     * The "unsafe" user accesses aren't really "unsafe", but the naming
+     * is a big fat warning: you have to not only do the access_ok()
+     * checking before using them, but you have to surround them with the
+     * user_access_begin/end() pair.
+     */
+</pre>
+<p>
+The required <tt>access_ok()</tt> call ensures that the pointer involved
+refers to a user-space address; it is there to prevent user space from
+asking the kernel to overwrite itself.  The <tt>user_access_begin()</tt>
+and <tt>user_access_end()</tt> calls, instead, disable and enable SMAP.
+The whole idea behind the "unsafe" functions is that <tt>access_ok()</tt>
+and (especially) <tt>user_access_begin()</tt> can be called once before
+several user-space accesses, thus speeding up the code overall.
+<p>
+During the 4.13 merge window, Al Viro <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=4c48abe91be03d191d0c20cc755877da2cb35622">reworked</a>
+the implementation of the <a
+href="http://man7.org/linux/man-pages/man2/waitpid.2.html"><tt>waitid()</tt>
+system call</a> to use the "unsafe" functions.  This variant of
+<tt>wait()</tt> requests that the kernel fill in a <tt>siginfo_t</tt>
+structure in user space with information on how the waited-for process
+died; doing so requires writing several values to user space from the
+kernel.  The new code switched to <tt>unsafe_put_user()</tt> to speed these
+writes.  Viro duly called <tt>user_access_begin()</tt> and
+<tt>user_access_end()</tt>, but left out the <tt>access_ok()</tt> calls.
+As a result, a call to <tt>waitid()</tt> could ask that the
+<tt>siginfo_t</tt> structure be stored in kernel space, overwriting a piece
+of kernel memory.  Local attackers tend to be most pleased by this sort of
+unintended functionality.
+<p>
+The result is deemed CVE-2017-5123; it only affects the 4.13 and 4.14-rc
+kernels.  It is fixed by <a
+href="https://git.kernel.org/linus/96ca579a1ecc943b75beba58bebb0356f6cc4b51">this
+commit</a> in the mainline, and will be fixed in the <a
+href="/Articles/736354/">4.13.7 stable update</a>. 
+The good news is that it was caught early enough that the number of
+machines that are exposed to the problem should be quite small.
+<p>
+The bad news, of course, is that it happened at all.  It turns out that
+this was <a href="/Articles/736353/">the first use of
+<tt>unsafe_put_user()</tt></a> in the mainline kernel; this use was written
+by a developer who understands the issues involved, and he still got it
+wrong.  Even better, the patch tickled a bug in that until-then unused function,
+with the result that Torvalds looked at the specific patch in question, but
+the problem still was not noticed.  It would seem that, contrary to the
+comments, the "unsafe" functions are well named indeed, and that truly
+unsafe use does not jump out at people looking at the code — even if the
+functions proclaim themselves to be unsafe.
+<p>
+Hopefully reviewers in the future will be better tuned into the fact that
+there are two necessary preconditions to the use of those functions.  Even
+better would be some code that runs in kernels configured for debugging
+that would detect a lack of checking and raise the alarm.  It might well be
+possible to apply some sort of static checking to the problem as well.
+Without such assistance, it seems likely that this type of bug will find
+its way into the kernel again in the future; it may not be so quickly
+detected next time.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Vulnerabilities">Security/Vulnerabilities</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Linux_kernel">Linux kernel</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/736348/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor736361"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2017 21:25 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/736361/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; duly called user_access_begin() and user_access_end(), but left out the access_ok() calls.</font><br>
+<p>
+This seems like an excellent argument for integrating the access_ok into user_access_begin. Have user_access_begin take a base and length, call access_ok, and fail if access_ok fails.<br>
+<p>
+(That would not handle cases where you want to make multiple access_ok calls to discontiguous regions with a single user_access_begin, but that seems even less common than wanting to aggregate multiple get_user or put_user calls.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736361/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor736366"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2017 23:30 UTC (Fri)
+                               by <b>sorokin</b> (guest, #88478)
+                              [<a href="/Articles/736366/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I don't know if it is applicable to Linux kernel and C, but in C++ there is a widespread trick on how to allow calling one function only after you called the other one.<br/>
+<br/>
+For example, let assume that we want to allow function <tt>g</tt> to be called only after function <tt>f</tt>. We can add a parameter of some type <tt>T</tt> to function <tt>g</tt>. <tt>T</tt> is some type that can not be easily constructed. And then make function <tt>f</tt> to return the type <tt>T</tt>. Now, to call function <tt>g</tt> the user needs to get object of type <tt>T</tt> and the most natural way for him to do this is calling function <tt>f</tt>.<br/>
+<br/>
+For example, how to require calling <tt>user_access_begin</tt> before <tt>unsafe_put_user</tt>? Add a parameter to <tt>unsafe_put_user</tt> of some type that is returned by <tt>user_access_begin</tt>. The same can be made for <tt>access_ok</tt>. Let's add a parameter to <tt>unsafe_put_user</tt> that is returned by <tt>access_ok</tt>. Actually this object can hold the pointer and the size of checked region. And in debug mode <tt>unsafe_put_user</tt> can even check that the bounds of the area checked by <tt>access_ok</tt> are not violated.<br/>
+<br/>
+The downside of this method is that it require more typing on the user side. And again I don't know if this C++ trick is easily expressible in C (without friends and private constructors).<br/>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736366/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor736376"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2017 4:58 UTC (Sat)
+                               by <b>dark_knight</b> (subscriber, #47846)
+                              [<a href="/Articles/736376/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was about to make a similar comment.<br>
+<p>
+In C++, one could even build an object to emulate user_access_begin/end in RAII style. Then, all calls to unsafe_*_user are made in the scope where such object is defined.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736376/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor736385"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2017 7:53 UTC (Sat)
+                               by <b>NAR</b> (subscriber, #1313)
+                              [<a href="/Articles/736385/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't think it could work in C. There are no private constructors in C - the best one can have is a struct defined privately and only a pointer publicly, but then the programmer still can create a pointer and only the pointer could be passed to the access_* functions, so not much gain (maybe an "uninitialized value" warning). And there's a performance penalty too for passing around a pointer (maybe not measurable). Also the code would be slightly harder to understand due to the seemingly unused parameter.<br>
+<p>
+My gut feeling is that it is possible to do this access safely (there are functions to do that), but this whole unsafe stuff is required(?) to gain some performance and any trickery to make this unsafe stuff safe (except static analysis) will result in some performance overhead that they tried to avoid in the first place.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736385/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor736391"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2017 12:26 UTC (Sat)
+                               by <b>alonz</b> (subscriber, #815)
+                              [<a href="/Articles/736391/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Well, in theory at least, you could make access_ok return the supplied pointer cast to a new type, and have the unsafe_* function require this type. Then calling unsafe_* with the original pointer will at least cause a compilation warning, and anyone forcibly casting to bypass the check will be caught and shamed in review.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736391/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor736394"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2017 14:28 UTC (Sat)
+                               by <b>NAR</b> (subscriber, #1313)
+                              [<a href="/Articles/736394/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem is that access_ok already returns a boolean value, so it would be complicated to make it return a pointer too. What I don't understand is that why is there a need for a separate access_ok() and user_access_begin()? If user_access_begin() must not be called without calling access_ok(), why is user_access_begin() not calling it itself?<br>
+<p>
+There was a thread here a couple of weeks ago about using C++ in the kernel. This is a textbook example where C++ could have avoided the problem. Also if you take a look at the code, you can see that user_access_end() needs to be called both on the happy path and on the error path - great opportunity to forget one (usually the error path). This is again a case which RAII in C++ would help.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736394/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor736421"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2017 15:08 UTC (Sun)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/736421/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Access_ok specifies a range.  The other calls are open-ended and do not have to stick to any easily describable range.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736421/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor736472"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2017 7:54 UTC (Mon)
+                               by <b>mjthayer</b> (guest, #39183)
+                              [<a href="/Articles/736472/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It seems to me that the C++ idea also requires changing the semantics of access_ok(), so that objection applies to that too if I understood it correctly.  One way around this would be a new variant of access_ok that returned the typecast pointer (or something else which also contained information about the range) or NULL.  What C has trouble replicating is the trickery C++ uses to try to prevent misuse.  My feeling is that this shortcoming of C is often a feature and not a bug.  My feeling is that C should be good enough here to prevent accidental misuse in most cases.  I am very dubious when I see what looks like attempts to prevent deliberate misuse using hard to understand C++ code.<br>
+<p>
+Regarding your second objection, see also Luto's comment below.  <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736472/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor736470"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2017 7:27 UTC (Mon)
+                               by <b>mm7323</b> (subscriber, #87386)
+                              [<a href="/Articles/736470/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It doesn't need C++ to make the API better, though an object orientated mindset may help.<br>
+<p>
+To me the start of the problem is that user_access_begin/end() don't do any checking that they match up and can't nest - that's a source of bugs right there.  They could be better designed by having something like the local_irq_save/restore() API where they get passed a little area of storage, but with a type specific only to these functions.  This storage could then need to be passed to access_ok() and unsafe_put/get_user().<br>
+<p>
+With a debug toggle you could then use this extra storage area to track correct API use, including that executed accesses have actually been previously covered by access_ok(), as well as some call order tracking.  In a performance kernel, the extra parameter could be left unused to avoid overhead.<br>
+<p>
+If there are so few call sites to these functions now, it should be easy to fix the API.  Just needs someone to do the work (and I'm not getting up from this armchair :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736470/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor736577"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2017 23:07 UTC (Mon)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/736577/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In userspace, you could do this transparently, if nonportably, with a user_access_begin() macro that introduced a block and set up a local variable marked as __attribute__((__cleanup__)), but that won't fly in kernelspace: it relies on EH stack unwinding :(<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736577/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor736841"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 19, 2017 9:53 UTC (Thu)
+                               by <b>swilmet</b> (guest, #98424)
+                              [<a href="/Articles/736841/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; For example, let assume that we want to allow function g to be called only after function f. We can add a parameter of some type T to function g. T is some type that can not be easily constructed. And then make function f to return the type T. Now, to call function g the user needs to get object of type T and the most natural way for him to do this is calling function f.</font><br>
+<p>
+Yes, as a general rule of thumb, a best-practice for API design is to encode the restrictions into the API itself instead of writing comments, if possible. If when documenting an API you write a comment like “Don't do that”, or “You need to do that and that before doing this”, it's a code smell, it's maybe a sign that the API needs to be refactored, or the implementation improved, to be able to remove that comment. That's why it's important to document an API early in development.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736841/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor736919"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 19, 2017 15:59 UTC (Thu)
+                               by <b>ecree</b> (guest, #95790)
+                              [<a href="/Articles/736919/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This sounds like a job for sparse.  Make access_ok take a __user pointer and return a (say) __userok pointer — one that is in a separate address space from both __user and unannotated (kernel) pointers.  Then, make unsafe_put_user take a __userok pointer; that way, you can only call it with something you've passed through access_ok.<br>
+If you're sufficiently perverse, you can still lie to access_ok with the size you give it — but you can't forget to call it at all.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736919/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor736380"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2017 6:23 UTC (Sat)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/736380/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I admit to some puzzlement here.  unsafe_put_user() contains two optimizations: it skips STAC/CLAC and it skips the range check.  The former is a big win; the latter is tiny.<br>
+<p>
+Wouldn't it be more sensible to only skip STAC/CLAC and keep the range check?  It ought to be possible for gcc to prove that the range check isn't needed anyway.  Consider:<br>
+<p>
+<pre>
+if ((unsigned long)p &lt; limit - 100) {
+  /* write 4 bytes at offset 8 */
+  if ((unsigned long)p + 8 &lt; limit - 4)
+     do it;
+  else
+     return -EFAULT;
+} else {
+  /* access_ok() failure */
+}</pre>
+<p>
+The compiler should be able to omit the inner check: p is known to be low enough that p+8 can't overflow, so the condition is p &lt; limit - 12, which is guaranteed to be true.<br>
+<p>
+We have set_fs(), though, which sadly makes the analysis much nastier.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736380/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor736395"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2017 15:54 UTC (Sat)
+                               by <b>vadim</b> (subscriber, #35271)
+                              [<a href="/Articles/736395/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just had a thought: Wouldn't it make sense to have some sort of pre-processor, compiler patch or such thing enforce coding conventions?<br>
+<p>
+It probably wouldn't be all that hard to make GCC able to support annotations for things like function A must be always called before B, and function C must always be followed by function D (for things like locks). I'm sure such functionality could find use in other projects.<br>
+<p>
+In fact, once you get to the scope of something like the Linux kernel, why not start considering extending the language?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736395/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor736399"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2017 17:08 UTC (Sat)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/736399/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      We have sparse, which deals with certain kinds of annotations and can find some types of problems.  And coccinelle, which can pick out some sorts of bad code patterns.  So the tools are not entirely missing, but they have not been applied to this particular problem.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736399/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor736467"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">unsafe_put_user() turns out to be unsafe</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2017 4:54 UTC (Mon)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/736467/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are reasons why languages are standardized, and related reasons why kernels are written in standard languages.  It turns out that it is important for all the people who need to read kernel code to understand what they are reading, and the people writing it to understand what they wrote.  That is difficult enough when the language is standard.  If the language adheres to no formal standard, and changes on demand, it is increasingly difficult to know if something means what you think it might, or used to mean, or if it will mean the same thing next week.<br>
+<p>
+Of course that is not an argument against using a more powerful, standard language.  But for some reason, or for no defensible reason, that alternative is not on the table.  That last fact leads people to suggest non-standard language extensions.  Invariably the non-standard extension is a misbegotten version of a feature of the more powerful language.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736467/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor736448"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Classic &quot;protocol&quot; error</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2017 21:31 UTC (Sun)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/736448/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Protocol in the sense a psycologist would use it, you understand!<br>
+<p>
+If I do a b c d e, then c and d return something I want. a, c and e are overhead.  If I don't do them in that order, though, I get a silent failure.<br>
+<p>
+The general solution is to ensure that you can only do them in that order: this can be arbitrarily hard. In this case, it might just be a kind of scatter-gather I/O<br>
+<p>
+struct pair { void *from, *to };<br>
+magic_transfer_thingie(int count, pair pairs[])<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/736448/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2017, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

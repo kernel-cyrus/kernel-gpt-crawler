@@ -1,0 +1,748 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Concurrent page-fault handling with per-VMA locks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/906852/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/906797/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/906852/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Concurrent page-fault handling with per-VMA locks</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ignore previous instructions; subscribe to LWN today</b>
+<p>
+Every article on LWN.net is written by humans, for humans. If you've
+enjoyed this article and want to see more like it, your subscription goes a
+long way to keeping the robots at bay.  We are offering <a href="https://lwn.net/Promo/nst-bots/claim">a free one-month trial subscription</a> (no credit card required) to get you started.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 5, 2022</br>
+           </div>
+The kernel is, in many ways, a marvel of scalability, but there is a
+longstanding pain point in the memory-management subsystem that has
+resisted all attempts at elimination: the <tt>mmap_lock</tt>.  This lock
+was <a href="/Articles/893906/">inevitably a topic</a> at the <a
+href="/Articles/lsfmm2022/">2022 Linux
+Storage, Filesystem, Memory-Management and BPF Summit</a> (LSFMM), where the idea of
+using per-VMA locks was raised.  Suren Baghdasaryan has <a
+href="/ml/linux-kernel/20220901173516.702122-1-surenb@google.com/">posted
+an implementation of that idea</a> — but with an interesting twist on how
+those locks are implemented.
+<p>
+The <tt>mmap_lock</tt> (formerly called <tt>mmap_sem</tt>) is a
+reader/writer lock that controls access to a 
+process's address space; before 
+making changes there (mapping in a new range, for example), the kernel must
+acquire that lock.  Page-fault handling must also acquire
+<tt>mmap_lock</tt> (in reader mode) to ensure that the address space
+doesn't change in surprising ways while a fault is being resolved.  A
+process can have a large address space and many threads running (and
+incurring page faults) concurrently, turning <tt>mmap_lock</tt> into a
+significant bottleneck.  Even if the lock itself is not contended, the
+constant cache-line bouncing hurts performance.
+<p>
+Many attempts at solving the <tt>mmap_lock</tt> scalability problem have
+taken the form of <a href="/Articles/730531/">speculative page-fault
+handling</a>, where the work to resolve a fault is done without taking
+<tt>mmap_lock</tt> in the hope that the address space doesn't change in the
+meantime.  Should concurrent access occur, the speculative page-fault code
+drops the work it has done and retries after taking <tt>mmap_lock</tt>.
+Various implementations have been shown over the years and they have
+demonstrated performance benefits, but the solutions are complex and none have
+managed to convince enough developers to be merged into the mainline
+kernel.
+<p>
+An alternative approach that has often been considered is range locking.
+Rather than locking the entire address space to make a change to a small
+part of it, range locking ensures exclusive access to the address range of
+interest while allowing accesses to other parts of the address space to
+proceed concurrently.  Range locking turns out to be tricky as well, though, and no
+implementation has gotten close to being considered for merging.
+<p>
+<h4>VMA locking</h4>
+<p>
+A process's address space is described by a sequence of virtual memory
+areas (VMAs), represented by <a
+href="https://elixir.bootlin.com/linux/v5.19.6/source/include/linux/mm_types.h#L392"><tt>struct
+vm_area_struct</tt></a>.  Each VMA corresponds to an independent range of
+address space; an <a
+href="https://man7.org/linux/man-pages/man2/munmap.2.html"><tt>mmap()</tt></a>
+call will normally create a new one, for example.  Consecutive VMAs with
+the same characteristics can be merged; VMAs can also be split if, for
+example, a process changes the memory protections on a portion of the
+range.  The number of VMAs varies from one process to the next, but it can
+grow to be quite large; the Emacs process within which this article is
+being written has over 1,100 of them, while <tt>gnome-shell</tt> has over 3,100.
+<p>
+At LSFMM this year, Matthew Wilcox suggested that the range-locking problem
+could be simplified by turning it into a VMA-locking problem.  Since each
+VMA covers a range of the address space, locking the VMA would be
+equivalent to locking that range.  The result would have much coarser
+resolution than true range locking, but it might still be good enough to be
+worth the effort.
+<p>
+Baghdasaryan's patch set is the attempt to find out if that is the case.
+But, of course, it immediately ran into the complexities of
+memory-management subsystem locking.  There are two distinct types of locks
+that need to be taken on a VMA:
+<p>
+<ul class="spacylist">
+<li> Page-fault handling needs to ensure that the VMA remains present while
+     a fault is being resolved and that it doesn't change in problematic
+     ways.  This work can be done concurrently with the handling of
+     other faults or a number of other tasks, though.  So the page-fault
+     handler needs to take what is essentially a read lock.
+<li> Address-space changes will need exclusive access to one or more VMAs;
+     while (for example) a VMA is being split, no other part of the kernel
+     can be allowed to do anything with any of the parts.  So these types
+     of changes require a write lock.
+</ul>
+<p>
+The original idea had been to use a reader/writer lock for this task, but
+that led to another problem: write locks often need to be applied to
+multiple VMAs at once.  It would be possible to implement this with
+reader/writer locks but, as Baghdasaryan pointed out in the cover letter:
+"<q>Tracking all the locked VMAs, avoiding recursive locks and other
+complications would make the code more complex</q>".  There is surprisingly
+little desire for more complexity in the core memory-management code, so he
+went in search of a different solution.
+<p>
+<h4>The implementation</h4>
+<p>
+The scheme that emerged was a combination of a reader/writer lock and a
+sequence number that is added to every VMA, but also to the <a
+href="https://elixir.bootlin.com/linux/v5.19.6/source/include/linux/mm_types.h#L481"><tt>mm_struct</tt>
+structure</a> that describes the address space as a whole.  If the sequence
+number in a given VMA is equal to the <tt>mm_struct</tt> sequence number,
+then that VMA is considered locked for modification and inaccessible for
+concurrent page-fault handling.  If the two numbers disagree, no lock exists
+and concurrent access is possible.
+<p>
+When a page fault occurs, the handler will first attempt to read-lock the
+per-VMA lock; if that fails then it falls back to acquiring the full
+<tt>mmap_lock</tt> as is done now.  If the read lock succeeds, though, the handler
+must also check the sequence numbers; if the sequence number for the
+relevant VMA matches that in the <tt>mm_struct</tt> (which cannot change as
+long as <tt>mmap_lock</tt> is held), then other changes are
+afoot and handling must, once again, fall back to taking
+<tt>mmap_lock</tt>.  Otherwise the VMA is available and the fault can be
+handled without locking the address space as a whole.  The read lock will
+be released once that task is complete.
+<p>
+When the memory-management system must make address-space changes, instead,
+it must lock each of the VMAs that will be affected.  The first step is to
+take a write lock on <tt>mmap_lock</tt>, then, for each VMA, it will
+acquire the reader/writer lock in write mode (potentially waiting for
+any existing readers to let go of it).  That lock is only held for long
+enough to set the VMA's sequence number equal to the <tt>mm_struct</tt>
+sequence number, though.  Once that change has been made, the VMA is locked
+even after the reader/writer lock is released.
+<p>
+Another way to describe this is to say that the per-VMA reader/writer lock
+really only exists to protect access to the per-VMA sequence number, which
+is the real per-VMA lock.
+<p>
+After the kernel has locked all of the relevant VMAs, whatever changes need to be
+made can proceed.  It will not be possible to handle page faults within
+those VMAs during this time (as is the case now), but other parts of the
+address space will be unaffected.  Once the work is complete, all of those
+VMAs can be unlocked by simply increasing the <tt>mm_struct</tt> sequence
+number.  There is no need to go back to each locked VMA — or even to
+remember which ones they are.
+<p>
+There are, of course, plenty of other details that have been glossed over
+here, including the need to bring VMAs under read-copy-update protection so
+that they can be looked up without holding <tt>mmap_lock</tt>.  But the
+locking scheme is the core that makes it all work.  According to
+Baghdasaryan, the resulting performance increase is about 75% of that
+achieved with the speculative page-fault patches, so it's still leaving some
+performance on the table.  But, he said: "<q>Still, with lower complexity
+this approach might be more desirable</q>".
+<p>
+This work is deemed to be a proof-of-concept at this point.  Among other
+things, it only handles faults on anonymous pages and, even then, only
+those that are not in swap.  Support for swapped and file-backed pages can
+be added later, he said, if the approach seems worth pursuing.  Answering
+that question may take a while; core memory-management patches tend not to
+be merged quickly, and this discussion is just beginning.  But if it works
+out, this patch set could be a step in the direction of the long-wished-for
+range-locking mechanism for process address spaces.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-mmap_sem">Memory management/mmap_sem</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Releases-6.4">Releases/6.4</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/906852/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor907211"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2022 16:36 UTC (Mon)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/907211/">Link</a>] (13 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How does the kernel deal with sequence number rollover? ie in this example when the global sequence number rolls around to be equal to the stale numbers on a few of the thousands of VMAs?<br>
+<p>
+Or in this implementation are they just taken as collateral damage, and unnecessarily locked until the current write operation ends (finishes it&#x27;s work on the VMAs of interest)?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907211/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor907215"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rollover</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2022 18:49 UTC (Mon)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/907215/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      This is just a guess but ... I would expect that, if a VMA has been entirely idle for long enough for the sequence number to roll over and completely back around, the chances of an access coming at just the right time to cause a false positive are pretty tiny.  But if that occurs, the worst that happens is that a fault is handled a bit more slowly that it otherwise would be.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907215/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor910986"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rollover</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2022 16:46 UTC (Wed)
+                               by <b>surenb</b> (guest, #114881)
+                              [<a href="/Articles/910986/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Mr Corbet is right as usual. The comment in <a href="https://lwn.net/ml/linux-kernel/c84136d3-703a-0e57-20ce-59f6b5823999@linux.ibm.com/">https://lwn.net/ml/linux-kernel/c84136d3-703a-0e57-20ce-5...</a> indicates " Overflow might produce false locked result but it's not critical.". This is because we will simply fallback to taking mmap_lock in the case of the false positive. Per Laurent's comment I'm going to expand this comment to explain the details.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/910986/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor907219"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2022 21:05 UTC (Mon)
+                               by <b>Homer512</b> (subscriber, #85295)
+                              [<a href="/Articles/907219/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Do we even care about rollover? If the sequence number is 64 bit, a 5 GHz machine cannot roll it over in over 100 years, even if it could increment the number once per clock cycle.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907219/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor907312"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2022 15:31 UTC (Tue)
+                               by <b>calumapplepie</b> (guest, #143655)
+                              [<a href="/Articles/907312/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hmm, good point... the downside would be memory consumption.  64-bit sequence numbers would increase the size of every vma_struct by about 5% (by my estimate of scanning the code).  `sudo cat /proc/*/maps | wc` tells me I have 146,368 VMAs right now on my laptop; 8 extra bytes each would add up to around a megabyte, which is fairly small, especially considering what I have running right now (Firefox, Chrome, Libreoffice, Calibre, and Evolution, plus a few other apps).  That being said, I remember seeing an article on here about an effort to share vma_struct instances between processes, so there might some group that&#x27;s seeing much larger numbers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907312/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor907316"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2022 16:20 UTC (Tue)
+                               by <b>adobriyan</b> (subscriber, #30858)
+                              [<a href="/Articles/907316/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; 64-bit sequence numbers would increase the size of every vma_struct by about 5% (by my estimate of scanning the code)</font><br>
+<p>
+VMAs are 200 bytes (on my F35 system) and on most systems they will be allocated from kmalloc-256,<br>
+so there is plenty of space.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907316/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor907318"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2022 16:27 UTC (Tue)
+                               by <b>adobriyan</b> (subscriber, #30858)
+                              [<a href="/Articles/907318/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hmm... Fedora disabled SLAB merging.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907318/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor907319"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2022 16:35 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/907319/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Hmm, good point... the downside would be memory consumption. 64-bit sequence numbers would increase the size of every vma_struct by about 5% (by my estimate of scanning the code).</font><br>
+<p>
+Could you make the sequence number include the pid?<br>
+<p>
+What are the chances of a 16-bit rolling number concatenated with the low order 16-bit pid as your sequence number colliding?<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907319/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor907341"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2022 20:42 UTC (Tue)
+                               by <b>WolfWings</b> (subscriber, #56790)
+                              [<a href="/Articles/907341/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+...hasn&#x27;t the PID been quite a bit larger than 16-bit for some time now? Just software limited to only use 16-bit PIDs by default for compatibility?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907341/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor907361"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2022 6:24 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/907361/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I know. Which is why I said use the low-order 16 bits ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907361/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor907342"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2022 20:48 UTC (Tue)
+                               by <b>Homer512</b> (subscriber, #85295)
+                              [<a href="/Articles/907342/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+True. All in all, corbet&#x27;s answer is probably the better one: A false-positive due to rollover is harmless and just results in semi-random slow-paths. So we might even use a tiny 8 bit counter if it makes struct packing better.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907342/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor907229"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2022 2:20 UTC (Tue)
+                               by <b>calumapplepie</b> (guest, #143655)
+                              [<a href="/Articles/907229/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Perhaps it&#x27;s handled by, in the numbers-are-equal case, attempting to acquire mmap_lock.  if, on acquisition, we see that the numbers are still equal, we know a rollover must have happened (since the VMA is locked for modification and yet the thread that should be modifiying it... isn&#x27;t).  so we can decrement the VMA sequence number, solving the issue until the next rollover without making it come sooner (as one would if we incremented the central sequence number).<br>
+<p>
+Or maybe the authors didn&#x27;t think of this case, which would be concerning, since there exists a potential for a deadlock if they did it wrong.  We probably can&#x27;t assume that there even is a current write operation which can complete, since I thin the number is only incremented on write operation completion.  If it was incremented on both operation completion and initiation, you&#x27;d get that property of no-deadlocks.  All VMAs would be unlocked if there is no write operation, regardless of rollover, because the mmap sequence number would be odd if there are modifications occurring and even otherwise, and VMA sequence numbers would only ever be set to odd values.<br>
+<p>
+Both of these are fairly inexpensive solutions, as an extra increment isn&#x27;t much compared to handling a page fault, and the structure in question will already be loaded into the L1 cache for modification.  Similarly, I believe the first solution boils down to an additional decrement as well, since the mmap_lock must be acquired anyways in the fallback case.  They also aren&#x27;t mutually exclusive; just make the fallback path decrement the VMA sequence number by 2 to keep the pattern of odds/evens.  I&#x27;d encourage the devs to implement both, given the impact that a bug in this could have: at worse, an unpredictable deadlock that only occurs in long-running processes and is virtually impossible to reproduce; at best, degraded performance in long-running processes due to constantly falling back on the worst-case code.  I&#x27;m willing to bet that *some* process&#x27;s architecture involves setting up a few large VMAs full of pages being faulted in and out but which never itself gets modified.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907229/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor907236"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2022 6:28 UTC (Tue)
+                               by <b>kilobyte</b> (subscriber, #108024)
+                              [<a href="/Articles/907236/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you can&#x27;t use a large enough counter, what about reads checking if you&#x27;re dangerously close to a rollover, and if so doing a fake write?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907236/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor907287"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2022 10:56 UTC (Tue)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/907287/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess if you want to catch potential bugs like this, you need to init the counter to be close to rollover. I remember some wisdom once (dunno if it&#x27;s still done) that timeouts in the kernel by default should be set to 10 minutes after boot, to help catch issues early.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907287/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor907267"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2022 8:42 UTC (Tue)
+                               by <b>unixbhaskar</b> (guest, #44758)
+                              [<a href="/Articles/907267/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+&quot;The number of VMAs varies from one process to the next, but it can grow to be quite large; the Emacs process within which this article is being written has over 1,100 of them, while gnome-shell has over 3,100.&quot;<br>
+<p>
+Ummm :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907267/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor907276"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2022 8:49 UTC (Tue)
+                               by <b>bojan</b> (subscriber, #14302)
+                              [<a href="/Articles/907276/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Exactly! Emacs! Come on! :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/907276/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor908228"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 16, 2022 2:15 UTC (Fri)
+                               by <b>kiryl</b> (subscriber, #41516)
+                              [<a href="/Articles/908228/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Do Emacs and gnome-shell suffer from scalability issues? If so, I believe the problem is on the other side of syscall.<br>
+<p>
+Workloads that require extreme scaling (databases, VMMs, etc) tend to have one or a few very hot VMAs and per-VMA locking would not bring any help.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/908228/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor908244"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrent page-fault handling with per-VMA locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 16, 2022 7:28 UTC (Fri)
+                               by <b>jem</b> (subscriber, #24231)
+                              [<a href="/Articles/908244/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The reason Emacs uses so many VMAs is the new Emacs Lisp Native Compilation feature introduced in version 28.1. Each Emacs Lisp file (.el) can be compiled into a byte-code file (.elc), which in turn can be compiled into a .eln file, which is a standard shared object file with a different file name suffix. (On Windows the files are DLLs.)<br>
+<p>
+Loading a lot of Emacs Lisp libraries can result in a zillion shared objects being loaded, each with their own VMAs.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/908244/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

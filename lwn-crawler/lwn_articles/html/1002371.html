@@ -1,0 +1,2502 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Process creation in io_uring [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/1002371/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1002828/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/1002371/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Process creation in io_uring</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Benefits for LWN subscribers</b>
+<p>
+The primary benefit from <a href="/Promo/nst-nag5/subscribe">subscribing to LWN</a>
+       is helping to keep us publishing, but, beyond that, subscribers get
+       immediate access to all site content and access to a number of extra
+       site features.  Please sign up today!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>December 20, 2024</br>
+           </div>
+Back in 2022, Josh Triplett <a href="/Articles/908268/">presented a
+plan</a> to implement a "spawn new process" functionality in the io_uring
+subsystem.  There was a fair amount of interest at the time, but developers
+got distracted, and the work did not progress.  Now, Gabriel Krisman
+Bertazi has returned with <a
+href="/ml/all/20241209234316.4132786-1-krisman@suse.de">a patch series</a>
+updating and improving Triplett's work.  While interest in this
+functionality remains, it may still take some time before it is ready for
+merging into the mainline.
+<p>
+A new process in Linux is created with one of the variants of the <a
+href="https://man7.org/linux/man-pages/man2/clone.2.html"><tt>clone()</tt></a>
+system call.  As its name suggests, <tt>clone()</tt> creates a copy of the
+calling process, running the same code.  Much of the time, though, the
+newly created process quickly calls <a
+href="https://man7.org/linux/man-pages/man2/execve.2.html"><tt>execve()</tt></a>
+or <a
+href="https://man7.org/linux/man-pages/man2/execveat.2.html"><tt>execveat()</tt></a> 
+to run a different program, perhaps after performing a bit of cleanup.
+There has long been interest in a system call that would combine these
+operations efficiently, but nothing like that has ever found its way into
+the Linux kernel.  There is a <a
+href="https://man7.org/linux/man-pages/man3/posix_spawn.3.html"><tt>posix_spawn()</tt></a>
+function, but that is implemented in the C library using <tt>clone()</tt>
+and <tt>execve()</tt>.
+<p>
+Arguably, part of the problem is that, while the
+<tt>clone()</tt>-to-<tt>execve()</tt> pattern is widespread, the details of
+what happens <i>between</i> those two calls can vary quite a bit.  Some
+files may need to be closed, signal handling changed, scheduling policies
+tweaked, environment adjusted, and so on; the specific pattern will be
+different for every case.  <tt>posix_spawn()</tt> tries to provide a
+general mechanism to specify these actions but, as can be seen by looking
+at the function's argument list, it quickly becomes complex.
+<p>
+Io_uring, meanwhile, is primarily thought of as a way of performing
+operations asynchronously.  User space can queue operations in a ring
+buffer; the kernel consumes that buffer, executes the operations
+asynchronously, then puts the results into another ring buffer (the
+"completion ring") as each operation completes.  Initially, only basic I/O
+operations were supported, but the list of operations has grown over the
+years.  At this point, io_uring can be thought of as a sort of alternative
+system-call interface for Linux that is inherently asynchronous.
+<p>
+An important io_uring feature, for the purposes of implementing something
+like <tt>posix_spawn()</tt>, is the ability to create chains of linked
+operations.  When the kernel encounters a chain, it will only initiate the
+first operation; the next operation in the chain will only run after the
+first completes.  The failure of an operation in a chain will normally
+cause all remaining operations to be canceled, but a "hard link" between
+two operations will cause execution to continue regardless of the success
+of the first of the two.  Linking operations in this way essentially allows
+simple programs to be loaded into the kernel for asynchronous execution;
+these programs can run in parallel with any other io_uring operations that
+have been submitted.
+<p>
+The new patch set creates two new io_uring operations, each with some
+special semantics.  The first of those is <tt>IORING_OP_CLONE</tt>, which
+causes the creation of a new process to execute any operations that follow
+in the same chain.  In a difference from a full <tt>clone()</tt> call,
+though, much of the calling task's context is unavailable to the process
+created by <tt>IORING_OP_CLONE</tt>.  Without that context, io_uring
+operations in the newly created process can no longer be asynchronous;
+every operation in the chain must complete immediately, or the chain will
+fail.  In practice, that means that operations like closing files can be
+executed, but complicated I/O operations are no longer possible.  Krisman
+hopes to be able to at least partially lift that constraint in the future.
+<p>
+Once the chain completes, the new process will be terminated, with one
+important exception: if it invokes the second new operation,
+<tt>IORING_OP_EXEC</tt>, which performs the equivalent of an
+<tt>execveat()</tt> call, replacing the running program with a new
+executable.  At this point, the new process is completely detached from the
+original, is running its own program, and the processing of the io_uring
+chain is complete; the process will, rather than being terminated, go off
+to run the new program.  Placing any other operations after
+<tt>IORING_OP_EXEC</tt> in the chain usually makes no sense; any operations
+after a successful <tt>IORING_OP_EXEC</tt> will be canceled.  It also does
+not make sense to use <tt>IORING_OP_EXEC</tt> in any context other than a
+new process created with <tt>IORING_OP_CLONE</tt>, so that usage is not
+allowed.
+<p>
+There is one case where it can be useful to link operations into the chain
+after <tt>IORING_OP_EXEC</tt> — efficiently implementing a path search in
+the kernel.  Often, the execution of a new program involves searching for
+it in a number of directories, usually specified by the <tt>PATH</tt>
+environment variable.  One way of doing this in the io_uring context, as
+shown in <a href="/ml/all/20241209234421.4133054-3-krisman@suse.de">this
+test program</a>, is to enqueue a series of <tt>IORING_OP_EXEC</tt>
+operations, each trying a different location in the path.  If hard links
+are used to chain these operations, execution will continue past failed
+operations until the one that actually finds the target program succeeds;
+after that, any subsequent operations will be discarded.  The entire search
+runs in the kernel, without the need to repeatedly switch between kernel
+and user space.
+<p>
+Most of the comments on the proposal so far have come from Pavel Begunkov,
+who has <a
+href="/ml/all/fd219866-b0d3-418b-aee2-f9d1815bfde0@gmail.com">expressed
+some concerns</a> about it.  He did not like some aspects of the
+implementation, the special quirks associated with <tt>IORING_OP_CLONE</tt>
+and the process it creates, and the use of links, "<q>which already a bad
+sign for a bunch of reasons</q>"  (he did not specify what the reasons
+are).  He suggested that io_uring might not be the best place for this
+functionality; perhaps a list of operations could be passed to a future
+version of <tt>clone()</tt> instead, mirroring how the
+<tt>posix_spawn()</tt> interface works.
+<p>
+Krisman <a href="/ml/all/87wmg3tk7j.fsf@mailhost.krisman.be">answered</a>
+that combining everything into a single system call would add complexity
+while making the solution less flexible.  Io_uring makes it easy to put
+together a set of operations to be run in the kernel in an arbitrary order.
+The hope is to increase the set of possible operations over time, enabling
+the implementation of complex logic for the spawning of a new task.  It is
+hard to see how combining all of this functionality into a single system
+call could work as well.
+<p>
+In any case, this is early-stage work; getting it to a point
+where it can be considered for the mainline will require smoothing a number
+of the rough edges and reducing the number of limitations.  It will also
+certainly require wider review; this work is proposing a significant
+addition to the kernel's user-space ABI that would have to be supported
+indefinitely.  The developers involved will surely want to get the details
+right before committing to that support.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#io_uring">io_uring</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/1002371/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor1003051"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2024 16:32 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1003051/">Link</a>] (23 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Clearly the right solution is to load a BPF program into the kernel to do the clone and setup.<br>
+<p>
+/s in case it wasn't clear.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003051/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003056"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2024 17:47 UTC (Fri)
+                               by <b>gutschke</b> (subscriber, #27910)
+                              [<a href="/Articles/1003056/">Link</a>] (20 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am not even sure the "/s" is warranted.<br>
+<p>
+clone()/exec() is a very powerful pattern that nicely fits in with how POSIX has designed its API. The ability to customize the newly launched process prior to loading the binary is crucial in a lot of scenarios. And I don't see that going away.<br>
+<p>
+But ever since the advent of threads (and possibly even in the presence of signals), this has gotten incredibly difficult to do correctly. There are just too many subtle race conditions that involve hidden state in the various run-time libraries or even in the dynamic link loader. If there was a way to do everything that you can currently do with systemcalls from userspace, but it instead moved entirely into the kernel, most of these problems would immediately go away. So, I see a lot of value with being able to call clone() and exec() from a BPF program, or maybe from io_uring. The elephant in the room with BPF is that this new API would then likely be limited to privileged processes.<br>
+<p>
+You can approximate a solution in userspace by very carefully picking what system calls you invoke, and by avoiding any calls into libc, including accidental calls into the dynamic link loader. This involves some amount of assembly code to get 100% reliable. It's very tedious and extremely fragile. It is often not worth the effort and instead you have to live with the occasional random crash.<br>
+<p>
+In some cases, a possible work-around is to launch a "zygote" helper process that executes before any threads are created. The latter is difficult to ensure though, as some libraries create threads when they are loaded into memory.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003056/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003068"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2024 19:05 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1003068/">Link</a>] (17 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; clone()/exec() is a very powerful pattern that nicely fits in with how POSIX has designed its API. The ability to customize the newly launched process prior to loading the binary is crucial in a lot of scenarios. And I don't see that going away.</span><br>
+<p>
+POSIX's API is badly designed. clone() creates a copy of the entire VM and then just discards it. It's a lot of uselessly wasted work.<br>
+<p>
+A better API would create an "empty shell" suspended process, then the calling process can poke it (using FD-based APIs), and finally un-suspend it. There's a strange aversion in Linux/UNIX land to this model (it's too sane), so we get closer and closer to it with these kinds of workarounds.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003068/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003070"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2024 19:49 UTC (Fri)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1003070/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It’s not only wasted work, but it makes it hard not to overcommit memory (at least in the case of a full fork()). If a process with a gigabyte of address space forks, requiring a gigabyte of free memory is far too cautious if it will exec() shortly afterwards, yet if you assume it always exec()s you will get caught out if the child process starts to use the memory you promised it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003070/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1003106"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 1:08 UTC (Sat)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/1003106/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+clone() is not POSIX.  POSIX includes fork(), vfork(), and posix_spawn().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003106/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003108"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 1:47 UTC (Sat)
+                               by <b>gutschke</b> (subscriber, #27910)
+                              [<a href="/Articles/1003108/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+posix_spawn() is well-intentioned, but it doesn't really address the main problem with all of these APIs. As far as I can tell, POSIX doesn't guarantee for posix_spawn() to be thread-safe. And when I looked at the source code (admitted, this was years ago), the implementation in glibc most definitely didn't make any effort to ensure thread-safety. Also, posix_spawn() is just too limited to be a general solution. It's a fine response to the problem of Windows not having a fork()/exec() API. But it isn't really a solution for safely starting processes from any context.<br>
+<p>
+fork() is a decent general solution for single-threaded applications, and that's why we've been using it for so many decades. The kernel-level API is amenable to writing thread-safe code using fork()/exec(). But that requires that after fork() returns in the client, no further entries into any libraries are allowed. In fact, I am not even convinced that it is always safe to call the glibc version of fork() instead of making a direct system call.<br>
+<p>
+Both the various wrappers that glibc puts around system calls, and the hidden invocations of the dynamic link loader are potential sources for dead locks or crashes. Depending on how your program has been linked, this can even mean that you can no longer access any global symbols. Everything has to be on the local stack.<br>
+<p>
+The upshot of all of this is that you not only need to carefully screen the system calls that you want to make for potential process-wide side-effects, you also have to call them from inlined assembly instead of deferring to glibc. In addition, fork() only really works with memory over-committing enabled, and for large programs this system call can be expensive.<br>
+<p>
+vfork() solves the over-comitting problem, but it requires even more careful programming. I don't see how it can be made to work in a fully portable fashion, but it probably is the best solution for code that should run on more than just Linux. Some amount of porting to different OS's will be involved, if you need to spawn a new process from within a multi-threaded environment.<br>
+<p>
+clone() is the pragmatic solution. Once you come to the realization that this code is impossible to implement within the constraints of POSIX alone, you might as well take advantage of everything that Linux can provide to you. It's going to be hairy code to write, but there really is no way around it. Also, just to point out the obvious, the glibc wrapper around clone() is completely unsuitable for the purposes of what we need here. But a direct system call will work fine.<br>
+<p>
+Of course, in 99% of the cases, you won't hit any of the race conditions. They are a little tricky to trigger accidentally, and a lot of them are relatively benign. Who cares about an occasional errno value that isn't set correctly, or a file descriptor that sometimes leaks to a child process. Only in very rare cases will you trigger a dead-lock, crash, or worse. So, many programs simply don't bother, and nobody ever notices that the code is buggy. It's the really big programs that everyone uses that need to worry about these things, as you suddenly have millions of running instances and countless numbers of spawned processes. If there is a way for something to go wrong, it eventually will.<br>
+<p>
+A zygote process is a time-tested alternative. And that's great, assuming you can modify the startup phase of the program. If you can guarantee that your code executes before any threads are created, then a zygote that is fork'd() proactively will avoid all of these complications. But with bigger pieces of software that rely on lots of third-party libraries, that's not always feasible. These days, you should assume that all code is always multi-threaded -- if only because the graphics libraries decide to start threads as soon as they get linked into the program, or something similarly frustrating.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003108/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003148"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 15:18 UTC (Sat)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1003148/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; A zygote process is a time-tested alternative.</font>
+
+<p>Zygote solves an entirely different problem: how to start not one process, but many processes while executing an initialization part only once.</p>
+
+<p>It works, but that's entirely different task.</p>
+
+<font class="QuotedText">&gt; vfork() solves the over-comitting problem, but it requires even more careful programming. I don't see how it can be made to work in a fully portable fashion, but it probably is the best solution for code that should run on more than just Linux.</font>
+
+<p>It's <b>also</b> the simplest way to do everything reliably and efficiently on Linux.</p>
+
+<p>For some unfathomable reason everyone's attentions is on an unsolvable problem: how to prepare a new process state using remnants of the old code that is interwined with the state of your program.</p>
+
+<p>Just ditch all that! Start from the clean state! <a href="https://man7.org/linux/man-pages/man2/memfd_create.2.html">Create a new setup code</a>, push whatever you need/want in there, then execute <code>vfork</code>/<code>exec</code> (with zero steps between them, using <a href="https://man7.org/linux/man-pages/man3/fexecve.3.html">fexecve</a>) and viola: no races, no possibility of corrupting anything, everything is very clear, simple and guaranteed.</p>
+
+<p>The only downside: you have to develop that in arch-dependent way… but so what? If you compare that to insane amount of effort one would need to support all these bazillion zygote-based solutions then adding some kind of portable wrapper with arch-dependent guts even for 3-4 most popular architectures is not too hard.</p>
+
+<p>Best property of that solution: it's not supposed to be perfect! If you would find out that it doesn't work – nobody stops you from redoing that portable API and adding or removing something to it. Because you ship it with your code or in a shared library it's replaceable without any in-kernel politics.</p>
+
+<p>P.S. I think it can be called “double-exec” solution, and it requires Linux-specific syscalls, but the best part: all these syscalls are <b>already</b> there and are not even especially new.</p>
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003148/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1003566"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 27, 2024 1:52 UTC (Fri)
+                               by <b>alkbyby</b> (subscriber, #61687)
+                              [<a href="/Articles/1003566/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I predict this will be an interesting discussion.<br>
+<p>
+Can you please elaborate more specifically on thread-unsafety of posix_spawn implementations? POSIX might be not explicitly saying that posix_spawn is safe to use in MT programs, but it's main purpose is clearly to fix fork's problems with threads. So it has to be MT-safe.<br>
+<p>
+Fork+exec and threads are too unsafe in practice. Even our esteemed editor made an error above. Here: "details of what happens between those two calls can vary quite a bit. &lt;skiped&gt;environment adjusted, and so on".<br>
+<p>
+Thing is, updating process environment (e.g. via setenv) typically invokes malloc. And calling malloc in-between fork and exec is unsafe.<br>
+<p>
+As per posix (quoting from man 3posix fork): "If a multi-threaded process calls fork(), the new process shall contain a replica of the calling thread and its entire address space, possibly including the states of mutexes and other resources. Consequently, to avoid errors, the child process may only execute  async-signal-safe operations until such time as one of the exec functions is called."<br>
+<p>
+In practice malloc implementations go to some lengths to make malloc() possible after fork by carefully setting up pthread_atfork or alternatives. But this is big enough can of worms. And for example "abseil" tcmalloc explicitly doesn't (<a href="https://github.com/search?q=repo%3Agoogle%2Ftcmalloc%20atfork&amp;type=issues">https://github.com/search?q=repo%3Agoogle%2Ftcmalloc%20at...</a>). As per Google's internal policy pthread_atfork is forbidden (which is another, but somewhat related topic).<br>
+<p>
+So posix_spawn is the right thing IMO. And any exotic process setup things that might be missing in your favorite libc (e.g. stuff like unshare/prctl) you can always do in a small helper program. You exec into it. It gets clean slate, can do whatever syscalls and mallocs and what not. Single-threadly. And then exec into real thing.<br>
+<p>
+As for original discussion, I am really hoping io_uring is kept only for perf-critical stuff. Spawning childs isn't.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003566/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1003129"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Empty shell</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 4:58 UTC (Sat)
+                               by <b>IAmLiterallyABee</b> (subscriber, #144892)
+                              [<a href="/Articles/1003129/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; A better API would create an "empty shell" suspended process, then the calling process can poke it (using FD-based APIs), and finally un-suspend it</span><br>
+<p>
+IIRC, Fuchsia does something like that<br>
+<a href="https://fuchsia.dev/fuchsia-src/reference/kernel_objects/process#lifetime">https://fuchsia.dev/fuchsia-src/reference/kernel_objects/...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003129/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1003192"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 22, 2024 7:30 UTC (Sun)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/1003192/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There was a nice article a few years ago that describes the problems with fork+exec, and indeed ends up recommending something like what you describe as a potential solution. <a href="https://www.microsoft.com/en-us/research/uploads/prod/2019/04/fork-hotos19.pdf">https://www.microsoft.com/en-us/research/uploads/prod/201...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003192/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003613"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Generalizing system calls to operate on other processes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 27, 2024 17:01 UTC (Fri)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1003613/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's a great read.  I particularly liked the idea of making a system call that would apply to another process.  So all system calls get an additional process id argument (or a pidfd, I guess) and, where reasonably possible, you are allowed to call them to apply to another process, as long as it's one of your children and executing as the same user, or you are root.<br>
+<p>
+That means instead of fork() and in the child process opening file handles, the parent process could take care of all this.  Create the child, which is initially not schedulable, make any system calls you want to set up the child's execution environment, then finally an exec_pidfd() to apply to the child process and mark it schedulable.  That's a great way to apply "the Unix philosophy", composing the existing simple system calls rather than creating a kitchen sink like posix_spawn(), while avoiding the known problems of forking.<br>
+<p>
+Existing code should be translatable to the new scheme without too much trouble.  (Indeed you could even have a fork emulation layer in the C library which, on returning from fork() or vfork(), acts as though you were in the child process, so that calling open() actually calls into open_pidfd(), and then the final exec() call runs exec_pidfd() and then continues with the parent process's code.  That's a bit kooky but might be a quick way to migrate older code which just wants to spawn a subprocess.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003613/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003646"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Generalizing system calls to operate on other processes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 28, 2024 14:01 UTC (Sat)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/1003646/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Indeed you could even have a fork emulation layer in the C library which, on returning from fork() or vfork(), acts as though you were in the child process, so that calling open() actually calls into open_pidfd(), and then the final exec() call runs exec_pidfd() and then continues with the parent process's code.</span><br>
+<p>
+How would that work? The "magic" of `fork()` (and related functions) is that it returns twice: once with a `0` return value and once with a `pid`. How would a library do any kind of emulation to allow taking *both* sides of the `if` condition it (eventually) leads to without some kind of language magic?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003646/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003648"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Generalizing system calls to operate on other processes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 28, 2024 14:11 UTC (Sat)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1003648/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can write your own magical twice-returning functions with setjmp() and longjmp(), although (as always in C) there are caveats around using those correctly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003648/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1003690"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Generalizing system calls to operate on other processes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 28, 2024 20:58 UTC (Sat)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/1003690/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I imagined it would first return from fork() in the parent process, returning zero so you think you are in the child process.  But now, any call to open() is actually open_pidfd() applied to the child.  And exec() is also redirected so that it calls exec_pidfd() for the child and then jumps back to the end of the fork() call, this time returning the child's pid, so the parent continues executing.  That could maybe be done with setjmp/longjmp or with some even darker magic that the C standard library is able to perform, perhaps with the help of inline assembly.<br>
+<p>
+I wouldn't be surprised if similar hacks have existed to help port Unix code to single-tasking operating systems like MS-DOS.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003690/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1003719"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 29, 2024 18:42 UTC (Sun)
+                               by <b>ma4ris8</b> (subscriber, #170509)
+                              [<a href="/Articles/1003719/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Gitaly's experience of fork overhead was an amazing read:<br>
+<a href="https://about.gitlab.com/blog/2018/01/23/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/">https://about.gitlab.com/blog/2018/01/23/how-a-fix-in-go-...</a><br>
+<p>
+Thus one of Go's performance secrets is to use posix_spawn() since 2017.<br>
+<p>
+Linux Java from fork() into posix_spawn() near 2018, using "jspawnhelper" as a clean up process:<br>
+<a href="https://bugs.java.com/bugdatabase/view_bug.do?bug_id=JDK-8212828">https://bugs.java.com/bugdatabase/view_bug.do?bug_id=JDK-...</a><br>
+<p>
+Oracle's Java for Solaris took the change earlier, in 2013:<br>
+<a href="https://bugs.java.com/bugdatabase/view_bug?bug_id=5049299">https://bugs.java.com/bugdatabase/view_bug?bug_id=5049299</a><br>
+<p>
+Rust language: glibc uses sometimes posix_spawn():<br>
+<a href="https://kobzol.github.io/rust/2024/01/28/process-spawning-performance-in-rust.html">https://kobzol.github.io/rust/2024/01/28/process-spawning...</a><br>
+<p>
+Fork/Exec major problem:<br>
+- Memory overcommit (Gitaly article): large programs clone resources during fork. After exec,<br>
+  memory have to be cleaned up by the Kernel, and recycled for re-use.<br>
+<p>
+Fork/Exec benefits:<br>
+- Threaded process: After fork, file descriptor set is vague. Forked process can investigate and clean up the state,<br>
+  so that process doing exec() does not need to know about the caller process.<br>
+- This benefit is actually a work around: why to leak file descriptors, just to search for, and remove those before exec()?<br>
+- Could forking thread simply enlist the interesting set of fds, and then skip copying the uninteresting ones?<br>
+<p>
+posix_spawn() design:<br>
+- New process uses parent's memory. No memory overcommit.<br>
+  Caller thread sleeps, until new process does "exec()".<br>
+  New process's thread must do as little work as possible, and, and exec into middle process.<br>
+  Caller thread continues.<br>
+  Middle helper process (jspawnhelper) closes leaked file descriptors, re-maps stdin,stdout,stderr,<br>
+  and then exec's to the final process.<br>
+- This also copies all file descriptors, thus the fd clean up must be done with a helper program.<br>
+   Speed increase comes from avoiding the memory "Copy on Write" work though for big memory programs.<br>
+<p>
+Thus the optimal way (bpf, io_uring) solution would be to declare, what needs to be cloned, re-mapped,<br>
+and changed. Best is, if nothing unnecessary need to be created, and then destroyed (by middle process).<br>
+<p>
+The world for big memory programs (Go, Java), has already moved from fork() into posix_spawn.<br>
+<p>
+Thus there is big amount of Kernel work to be avoided, if the io_uring approach (and/or BPF enhancement)<br>
+can be used to avoid first cloning resources, just to tearing those down, and to call a child process<br>
+with given arguments, re-mapping stdin, stdout, stderr, passing some extra file descriptors (individual, tail range),<br>
+and setting child process working directory.<br>
+<p>
+So instead of cloning everything, and tearing down, and making caller thread to sleep until child process is launched,<br>
+we could have something simple, which defines (declarative, programmatically, hybrid of those) the configuration for <br>
+a new process, and does a clean process launch with the single (0-1) io_uring queue submit,<br>
+without enforcing caller thread to sleep, until child process is launched.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003719/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003721"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 29, 2024 18:56 UTC (Sun)
+                               by <b>ma4ris8</b> (subscriber, #170509)
+                              [<a href="/Articles/1003721/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Here is Rust Maelstrom analysis of the memory usage overhead in fork().<br>
+It shows, how the overhead rises, when caller process has bigger memory mapping.<br>
+https://maelstrom-software.com/blog/spawning-processes-on-linux/<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003721/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1003725"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 29, 2024 19:17 UTC (Sun)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1003725/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Thus one of Go's performance secrets is to use posix_spawn() since 2017.</span><br>
+<p>
+I switched systemd to use pidfd_spawn (which is posix_spawn but with clone3(), which gets back a pidfd instread of a pid, and to clone into the target cgroup atomically) in v255 last year for similar reasons, as the copy-on-write trap overhead was hitting hard the azure fleet. I should probably do a write up about that at some point...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003725/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1003825"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 31, 2024 7:37 UTC (Tue)
+                               by <b>izbyshev</b> (subscriber, #107996)
+                              [<a href="/Articles/1003825/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Thus one of Go's performance secrets is to use posix_spawn() since 2017.</span><br>
+<p>
+On Linux, Go uses raw syscalls for almost all standard functionality, and Go programs usually don't even link to a C library. So, Go uses a vfork() equivalent followed by execve(), not posix_spawn() library function [1].<br>
+<p>
+<span class="QuotedText">&gt; Linux Java from fork() into posix_spawn() near 2018</span><br>
+<p>
+No, it migrated from vfork() [2] (which has been used by default since forever). So, overcommit issues weren't present in the first place.<br>
+<p>
+The CPython issue [3] for migrating subprocess from fork() to vfork() contains a lot of useful links on the topic. In some parts, it's outdated [4].<br>
+<p>
+[1] <a href="https://github.com/golang/go/blob/194de8fbfaf4c3ed54e1a3c1b14fc67a830b8d95/src/syscall/exec_linux.go#L305">https://github.com/golang/go/blob/194de8fbfaf4c3ed54e1a3c...</a><br>
+[2] <a href="https://github.com/openjdk/jdk/commit/e21cb12d358c22350cb18f0c656dd375f12665a9">https://github.com/openjdk/jdk/commit/e21cb12d358c22350cb...</a><br>
+[3] <a href="https://github.com/python/cpython/issues/80004">https://github.com/python/cpython/issues/80004</a><br>
+[4] <a href="https://github.com/python/cpython/issues/113117">https://github.com/python/cpython/issues/113117</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003825/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1003859"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 31, 2024 15:19 UTC (Tue)
+                               by <b>surajm</b> (subscriber, #135863)
+                              [<a href="/Articles/1003859/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That sounds like the fuchsia api. I'm sure it's popular on many microkernels as well.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003859/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1004845"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: empty shell</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 12, 2025 2:33 UTC (Sun)
+                               by <b>chexo4</b> (subscriber, #169500)
+                              [<a href="/Articles/1004845/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Do you think we'll get there at some point? What do you mean by aversion, exactly? This seems like a really useful mechanism to me and I don't see why it wouldn't be a great option to have for the many cases where you don't want/need to inherit the parent process' address space.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1004845/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1003069"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2024 19:33 UTC (Fri)
+                               by <b>magfr</b> (subscriber, #16052)
+                              [<a href="/Articles/1003069/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have been intrigued by the BeOS variant since I first saw it.<br>
+They have some variant of posix_spawn which always can be called and they also have fork/exec but only allows those system calls in single threaded environments.<br>
+<p>
+To further mess with people this clone abstraction isn't strong enough to handle all cases - I have a little variation on tee which forks, sets up the child as a daemon process which does the writing, and then execs in the parent in order to keep the parent/child link with the grandparent.<br>
+(The child terminates on end of input)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003069/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1003118"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 3:05 UTC (Sat)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/1003118/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The elephant in the room with BPF is that this new API would then likely be limited to privileged processes.</span><br>
+<p>
+Yeah, that was also my concern. It seems like people are not going to be comfortable making eBPF available to unprivileged users any time soon.<br>
+<p>
+On the other hand, classic BPF is still around and is accessible to unprivileged users in a few ways, most notably via seccomp mode 2, but also by creating an unprivileged user+net namespace (allowed by default in the upstream kernel and in most but not all distros) and using it for its original purpose of packet filtering. Could you allow userspace to upload a cBPF program and some data for its use and have that be enough to make system calls?<br>
+<p>
+I think my specific proposal would be to extend clone3's struct clone_args with three fields: a pointer to a cBPF program in user memory, and a pointer and length of memory to copy-on-write into the new process. So if you want traditional behavior for some reason, you can specify NULL and ~0 and deal with the overcommit issues of doing that, but more likely you just need a page or two of memory for the filename, argv, maybe the value of $PATH, and maybe some additional info like how to reorder file descriptors. Add a new cBPF opcode BPF_SYSCALL that is only valid in this context, which makes the syscall stored in the BPF accumulator with the arguments in the BPF registers and returns a value to the accumulator. This syscall is treated as a real syscall (it is not eBPF's BPF_CALL, pointer arguments point to userspace, etc.). When it calls execve, normal behavior resumes. If the cBPF program returns instead of calling either execve or exit, then it returns to the userspace instruction pointer where clone3 was originally called, so you can use it just like a normal use of clone if you want. If that address is no longer mapped, the process dies with a segfault.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003118/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1003058"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2024 17:50 UTC (Fri)
+                               by <b>edeloget</b> (subscriber, #88392)
+                              [<a href="/Articles/1003058/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Right now, the commands really look like a set of instructions which are executed by a specific in-kernel VM, so  my guess is more that with enough time, the complexity of the subsystem will grow enough to warrant the creation of an "io uring language" of some sort. <br>
+<p>
+Which will /then/ be interpreted by a BPF program :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003058/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003061"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2024 18:08 UTC (Fri)
+                               by <b>adobriyan</b> (subscriber, #30858)
+                              [<a href="/Articles/1003061/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; in-kernel VM</span><br>
+<p>
+It will be incomplete until it is possible to create new uring with uring interface<br>
+__attribute__((sarcasm)).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003061/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1003067"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2024 18:44 UTC (Fri)
+                               by <b>jbills</b> (subscriber, #161176)
+                              [<a href="/Articles/1003067/">Link</a>] (40 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Dumb question: why can't we just have a single step function that starts a new process with a clean state without needing to do a whole load of operations in that process's context? Other operating systems get away with process creation without a magic dance.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003067/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003093"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2024 23:14 UTC (Fri)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1003093/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The basic problem is that, historically, the standard behavior is that "everything" is inherited, unless explicitly listed at [1]. If you change the rules now, lots of old libraries will not handle it gracefully. There are also a lot of awkward questions about miscellaneous process-wide state, such as the umask and working directory. Do those get "zeroed out" in some sensible way, or do you just inherit them?<br>
+<p>
+The other basic problem is that systemd --user has already solved quite a lot of practical use cases anyway, so there is reduced motivation to expand the kernel's semantics when we already have code that works today.<br>
+<p>
+[1]: <a href="https://pubs.opengroup.org/onlinepubs/9799919799/functions/fork.html">https://pubs.opengroup.org/onlinepubs/9799919799/function...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003093/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003098"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 0:11 UTC (Sat)
+                               by <b>jbills</b> (subscriber, #161176)
+                              [<a href="/Articles/1003098/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I mean it makes sense to keep the legacy API the way it is, but if we are designing an entire new API surface in io_uring, why not do something better?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003098/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003109"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 1:18 UTC (Sat)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/1003109/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The question is, if you build it, will they come? Not if it's flagrantly incompatible with everything... unless you combine it with exec and end up with posix_spawn, of course, but then you need umpteen different flags to tell posix_spawn how to do its job, which is not fun either.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003109/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003116"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 2:28 UTC (Sat)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1003116/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The design of the io_uring-based mechanism should allow using it to implement posix_spawn in many cases. (Some flags may require new uring operations.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003116/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor1003153"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 15:25 UTC (Sat)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1003153/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; The basic problem is that, historically, the standard behavior is that "everything" is inherited, unless explicitly listed at.</font>
+
+<p>And why is that an issue? New process can always ditch whatever it doesn't need.</p>
+
+<p>Heck, <b>you</b> may supply it with all the information needed to do that. Only need five syscalls: <a href="https://man7.org/linux/man-pages/man2/memfd_create.2.html">memfd_create</a>/<a href="https://man7.org/linux/man-pages/man2/write.2.html">write</a>/<a href="https://man7.org/linux/man-pages/man2/vfork.2.html">vfork</a>/<a href="https://man7.org/linux/man-pages/man2/execveat.2.html">execveat</a>/<a href="https://man7.org/linux/man-pages/man2/execveat.2.html">execveat</a></p>
+
+<p>No need for <code>io_uring</code>, <code>BPF</code> or other madness, everything entirely in userspace using syscalls that exist for years and years.</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003153/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003178"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 19:31 UTC (Sat)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/1003178/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Writing arbitrary code into a memfd and then exec'ing it would get around security subsystems that try to prevent running unsigned/unvalidated binaries. So that's not a general-enough solution. Instead you would need to have a prebuilt helper binary (signed if necessary) that does the work based on some parameters. But then why not just inline the stub into the "carefully written threadsafe library code" to avoid the double exec? And that's basically posix_spawn() today.<br>
+<p>
+You might say that the "users write arbitrary code into a memfd" part is essential for flexibility. Even if we ignore the security issues, it would be nasty to program directly. People would inevitably wrap it in some kind of tiny, portable virtual machine for users to express their setup code ... and then again, you can implement that approach without doing the double exec.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003178/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003183"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 20:09 UTC (Sat)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1003183/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; But then why not just inline the stub into the "carefully written threadsafe library code" to avoid the double exec?</font>
+
+<p>Precisely because then your sign-verifying machinery couldn't verify your code. You are executing things in the context that's polluted by gigabytes of long-living code that may affect your carefully prepared binary.</p>
+
+<p>Even if it was sign-verified and correct when process was started it's not guaranteed to stay sign-verified and correct by the time you [try to] execute it.</p>
+
+<font class="QuotedText">&gt; Instead you would need to have a prebuilt helper binary (signed if necessary) that does the work based on some parameters.</font>
+
+<p>You could do what Turbo Pascal did decades ago: concatenate binary and parameters for said binary into one executable.</p>
+
+<p>So there would be signed part and unsigned parameters, signature can be easily checked when binary is loaded, even if it's loaded from <code>memfd</code>.</p>
+
+<font class="QuotedText">&gt; and then again, you can implement that approach without doing the double exec.</font>
+
+<p>It's possible in theory but it's not done today. And it doesn't eliminate issues of that code being corrupted and abused before new binary is spawn.</p>
+
+<p>And if we are not fighting <b>that</b> with <code>io_uring</code> proposal then I don't even have an idea what we are fighting for and against.</p>
+
+<p>The big problem of article that we are discussing here is that it carefully describes <b>the answer</b> to some issues, but it entirely neglects to list the issues that we are trying to fix!</p>
+
+<p>Not as bad as infamous “42” as the answer to “the ultimate question of life, the universe, and everything”, but very close to it: sure, that's a mechanism with a certain properties… but what it tries to do? What's the problem that couldn't be easily solved with it but is impossible to solve without it?</p>
+
+<p>I have no idea and as long as I have no idea I couldn't even say if that's a good idea or not!</p>
+
+<p>That's why I'm talking about “buzzword compliance”: simply because if “hey, it's <code>io_uring</code>, <i>new</i> and <i>shiny</i>” is not the goal then what <b>is</b> the goal? Where does that solution is supposed to send us? And why couldn't we arrive there via simpler means?</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003183/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003196"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 22, 2024 11:29 UTC (Sun)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/1003196/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I have no idea and as long as I have no idea I couldn't even say if that's a good idea or not!</span><br>
+<p>
+Well, I am glad to see that this does not impair your ability to write essay-sized posts about it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003196/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1003099"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 0:18 UTC (Sat)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1003099/">Link</a>] (28 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think this would be a good idea. At the very least, there might be value in having a CLONE_ flag that makes the new process have an empty memory map rather than inheriting the caller's memory map.<br>
+<p>
+However, typically, you do want to inherit at least some state from the current process. You *have* to inherit permissions (though root could override them), you may want to inherit at least some file descriptors, and so on.<br>
+<p>
+And in practice you *may* want the option of having access to your memory map before doing the exec, at least for some operations.<br>
+<p>
+It might well be useful to have pidfd operations to set up a new process from an existing one, but there's value in batching those operations, in the style of uring.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003099/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003102"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 0:39 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1003102/">Link</a>] (26 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's generally considered good form to have at least one text segment in your address space ... you can try to munmap(NULL, -1) if you want, but it will not end well.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003102/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003103"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 0:46 UTC (Sat)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1003103/">Link</a>] (25 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you don't have any userspace (yet), and your userspace is going to get completely replaced by an execveat, what would go wrong if you have zero pages mapped in the address space?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003103/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003104"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 0:55 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/1003104/">Link</a>] (24 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oh, when you said CLONE flag, I thought you were talking about clone(). From your reply it seems like you're talking about some other operation where the caller operates on its child.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003104/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003107"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 1:12 UTC (Sat)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1003107/">Link</a>] (23 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was talking about clone(), but I was imagining a mode in which you combine "no initial memory map" with "don't start running yet". You'd then do your setup remotely, and then make some pidfd call to allow the process to start running.<br>
+<p>
+That would work well in the io_uring case too, where you could keep the pidfd in an in-ring file descriptor and do a series of operations on it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003107/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003111"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 2:11 UTC (Sat)
+                               by <b>gutschke</b> (subscriber, #27910)
+                              [<a href="/Articles/1003111/">Link</a>] (22 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We don't have a full set of system calls for remotely doing everything that a process can do by itself.<br>
+<p>
+Every once in while, there has been talk of a new system call to inject system calls into child processes. But it never seems to go far.<br>
+<p>
+Until then, you need to at least have some memory that is already mapped into the child. And presumably, you could then use ptrace() to make the child do what you need to do. But by the time you jump through all these hoops, you might as well create a new process that has some pre-mapped memory pages that the parent filled out before starting the child.<br>
+<p>
+It's still a major pain to program, but better than starting with no initial memory map. I could see working with a version of clone() that takes an aligned memory address and number of pages to preserve. It won't be fun to program, but that's something that could be implemented in a library once and then nobody else needs to worry about it. It'll solve a number of the concerns that people have with (v)fork() and clone()<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003111/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003113"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 2:13 UTC (Sat)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1003113/">Link</a>] (19 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is exactly the motivation that led me to propose io_uring as the primary mechanism here. That way, we don't have to add a distinct set of system calls for remotely manipulating a process, we can use the same set of io_uring operations we already have.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003113/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003156"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 15:39 UTC (Sat)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1003156/">Link</a>] (18 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>A much simpler approach would be to just add some code that would do that setup in the empty process. And we already have <a href="https://man7.org/linux/man-pages/man2/memfd_create.2.html">memfd_create</a>/<a href="https://man7.org/linux/man-pages/man2/execveat.2.html">execveat</a> combo that can do that.</p>
+
+<p>If you want – add flag to the <code>clone</code> that would call <a href="https://man7.org/linux/man-pages/man2/execveat.2.html">execveat</a>. And then new code in an entirely empty image can do whatever it needs to prepare for the execution of the <b>real</b> binary that you want to execution.<p>
+
+<p>Why shove <code>io_uring</code> into something that <b>already</b> can be done entirely from userspace? Buzzword compliance?</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003156/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 16:10 UTC (Sat)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1003158/">Link</a>] (17 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Khim, if you have a better idea, please submit a patch showing it.  But please stop insulting the work of others, that does not help anybody.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003159"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 16:44 UTC (Sat)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1003159/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; But please stop insulting the work of others, that does not help anybody.</font>
+
+<p>Where do you see insults? I've faced the need to mangle simple and easy to understand and implement ideas into pretzels to include all the right buzzwords at my $DAYJOBs often enough that I can easily see buzzword compliance as explicit, or more likely, implicit part of the requirements.</p>
+
+<p>And very often it's even the most important one: if you couldn't cause enough buzz around your idea then it would die (except if there are some <b>concrete</b> tasks for <b>concrete</b> customers that may need it) even if it's pretty good, but with enough buzz around your idea you may push it even if it's totally stupid and would hurt everyone in the long run.</p>
+
+<font class="QuotedText">&gt; Khim, if you have a better idea, please submit a patch showing it.</font>
+
+<p>There are no patch because in-kernel parts are already done… years ago, in fact.</p>
+
+<p>And to discuss userspace part we need some idea about <b>who</b>, <b>why</b> and <b>how</b> plans to use that mechanism.</p>
+
+<p>The list of interested parties is not in the article thus it's hard for me to offer anything concrete because it's not clear to me how much flexibility is needed or wanted.</p>
+
+<p>Implementation of <code>posix_spawn</code> is doable but would be significant amount of work without any clear benefits: do we have lots of users of that syscall? If yes, then where are they, if not then why are they so rare?</p>
+
+<p>IOW: I don't see enough of a picture related to that work to judge it fairly and if “buzzword-compliance” <b>is</b> part of reasoning (even if an implicit one) then it could be that <code>io_uring</code>-based solution <b>is</b> the best way forward. <b>Especially</b> if it's a solution-in-a-search-of-a-problem: it's much easier to make someone excited about <code>io_uring</code> solution than about solution that just combines well-known syscalls in a way that makes <code>posix_spawn</code> safer. </p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003159/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003163"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 16:48 UTC (Sat)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1003163/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      "Buzzword compliance" takes the work of people who are trying to improve the system and casts it as something useless.  If it were my work, I would find that insulting.  I do not believe that the people working on this are concerned about buzzwords, they are trying to solve real problems.  Please try being a bit more respectful toward them.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003163/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1003228"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2024 9:26 UTC (Mon)
+                               by <b>gutschke</b> (subscriber, #27910)
+                              [<a href="/Articles/1003228/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am still not 100% convinced that khim's solution is necessarily easier nor more robust. But since I was curious whether the proposal to use existing kernel API's in somewhat unconventional ways would be viable at all, I wrote proof-of-concept code and uploaded it to: <a href="https://github.com/gutschke/safeexec/blob/main/safeexec.c">https://github.com/gutschke/safeexec/blob/main/safeexec.c</a><br>
+<p>
+Not surprisingly, since we are doing things that weren't quite intended to be done this way, there are warts and pit-falls. If my code was to be turned into a production-quality library, a good amount of additional polishing is necessary. But as is, this is evidence that khim's suggestion can address several of the concerns raised in these comments.<br>
+<p>
+(The best way to play with the code is to run it under the control of "strace". All it does is call "/bin/true" in a very round-about fashion.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003228/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003245"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2024 14:39 UTC (Mon)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1003245/">Link</a>] (12 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>TL;DR version: this approach is better because in case of adoption failure (which is quite likely) one may just throw it away and forget about it, whileas if similar failure would happen with <code>io_uring</code> solution the code and special properties of these chained operations would have to stay in kernel forever.</p>
+
+<font class="QuotedText">&gt; I am still not 100% convinced that khim's solution is necessarily easier nor more robust.</font>
+
+<p>It's “easier” in a sense that you can use it in applications for RHEL8+ and Android8+ (and most other distributions also have kernels with <code>memfd_create</code>, too).</p>
+
+<p>That means that you could model your <code>io_uring</code> solution and test it on wide set of real-world tasks (since it can be used in production).</p>
+
+<p>Even if final solution would be to add either a dedicated syscall or set of <code>io_uring</code> operations (plus set of special “chaining” rules needed to make them usable) you would collect lots of data which would tell you what works and what doesn't work.</p>
+
+<p>If you start with addition to the kernel, on the other hand, then all these “large parent processes” deployed in various places wouldn't be able to use it for many years – and by the time when you would have real data collected from real apps… kernel API would be long-established and, most likely, not used (just like <code>posix_spawn</code> is barely used today).</p>
+
+<p>P.S. Of course if you plan to eventually go with <code>io_uring</code>, anyway, then it would be good idea to have API of your <code>safeexec</code> designed in way that would make it easy to switch to <code>io_uring</code>, at some point. Apps wouldn't even need to know that they stopped using “double exec” trick and switched to <code>io_uring</code> on kernels that have <code>io_uring</code> support, it would all be transparent for them.</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003245/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003298"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2024 16:29 UTC (Mon)
+                               by <b>bluca</b> (subscriber, #118303)
+                              [<a href="/Articles/1003298/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; It's “easier” in a sense that you can use it in applications for RHEL8+ and Android8+</span><br>
+<p>
+Actually I don't think you could use it in either, given it requires writable + executable memory, which is blocked by SELinux by default. Most sandboxing systems restrict that as well, as it's a very commonly used attack vector.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003298/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003299"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2024 16:36 UTC (Mon)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1003299/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>That can be solved if you would crate two mappings: read/write one and read/execute one. Or even just create read/write mapping, then fill it and then change to read/execute before <code>vfork</code>/<code>spawn</code>.</p>
+
+<p>These tricks are already used by JITs and most distributions, even very “enterprise” ones, have knobs to allow JITs, only iOS disabled that completely (and I don't think iOS is in scope for that project).</p>
+
+<p>Changing SELinux settings is needed in any solution, even if you introduce new syscall it's highly unlikely that SELinux wouldn't stop that till you retune it.</p>
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003299/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1003300"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2024 17:00 UTC (Mon)
+                               by <b>gutschke</b> (subscriber, #27910)
+                              [<a href="/Articles/1003300/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No writable/executable mapping is used in my proof of concept. Once the ephemeral ELF image has been exec()'d, there is only a single readable/executable mapping.<br>
+<p>
+I use a single mapping for both code and read-only data. That approach slightly simplified the already painfully complicated open-coded serialization of the various data structures that need to be passed into the child. But that could be split into two separate mappings for a production release. <br>
+<p>
+Or instead of passing data as part of the ELF image, all data could be passed into the ephemeral child over a pipe(). Those design details are certainly up for review.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003300/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1003337"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Chained operations in io_uring</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2024 11:57 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/1003337/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+special properties of these chained operations would have to stay in kernel forever.
+</blockquote>
+<p>The neat thing about the proposed <tt>io_uring</tt> solution is that the special properties of these chained operations already exist for other reasons - in order to allow you to queue up an I/O operation with an appropriate response on error, chains and hard links already exist<sup>[1]</sup>, and to allow <tt>io_uring</tt> to operate asynchronously to process context, it already knows how to handle trying to return to a userspace that isn't running.
+<p>The only new things here are <tt>IORING_OP_CLONE</tt> that creates a new process (not able to run) and <tt>IORING_OP_EXEC</tt> that replaces the program text and turns it into a ready-to-run process. Everything else already exists in <tt>io_uring</tt> for I/O purposes.
+<p><sup>[1]</sup> The intent is that you can do something like write to a WAL, <tt>fsync</tt> the WAL if the WAL write succeeds, write to the final location if the WAL write and <tt>fsync</tt> succeed, and then regardless of success of the WAL and final location writes trigger a futex wake, all in a single submission to the kernel.
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003337/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003343"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Chained operations in io_uring</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2024 14:10 UTC (Tue)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1003343/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; The neat thing about the proposed <code>io_uring</code> solution is that the special properties of these chained operations already exist for other reasons</font>
+
+<p>Have you actually <b>read</b> the article? That one, specifically: <i> Krisman hopes to be able to at least partially lift that constraint in the future</i>.</p>
+
+<p>It's <b>extremely</b> clear to me that interface, as presented, it's not finished and not tested. Or, even worse, tested and is just feed to kernel developers in an insidious way to convince them to adopt huge hairball of API that would be immediately rejected if presented in it's full capacity… that's even worse then “unfinished and untested” API in my book (and I sincerely hope it's not that: <a href="https://en.wikipedia.org/wiki/Hanlon%27s_razor">Hazan's razor</a> and all that).</p>
+
+<font class="QuotedText">&gt; The only new things here are IORING_OP_CLONE that creates a new process (not able to run)</font>
+
+<p>Which is something that Linux haven't supported till today. Currently “load new executable in a process” is one atomic operation that starts from the state where kernel have something mapped and executable in it's address space and ends in the state where kernel have something mapped and executable in it's address space.</p>
+
+<p>An attempt to split that process in two looks innocuous enough, but it's entirely not clear what strange pitfalls it may hit.</p>
+
+<font class="QuotedText">&gt; The intent is that you can do something like write to a WAL, fsync the WAL if the WAL write succeeds, write to the final location if the WAL write and fsync succeed, and then regardless of success of the WAL and final location writes trigger a futex wake, all in a single submission to the kernel. </font>
+
+<p>Yes. And that's fine because code before and after <b>comes from the exact same codebase</b>. If some steps are omitted and/or failed then code that started the whole mess could, presumably, handle these failures gracefully.</p>
+
+<p>Compare with <code>io_uring</code> attempt to do <code>clone</code>/<code>exec</code> attempt: you are doing some important cleanup work after <code>clone</code> which is, well, <b>important</b> (or we wouldn't worry so much about doing it in the first place) – and <b>if it fails we execute foreign code, anyway</b>.</p>
+
+<p>This sounds, to me, like “hey, we have added nice security vulnerability to the kernel API, we just have no idea how to exploit it in the wild… contest is starting”!</p>
+
+<p>The most likely consequence would be pile of special cases forbid some “likely exploitable” instructions in the sequence between <code>IORING_OP_CLONE</code> and <code>IORING_OP_EXEC</code>.</p>
+
+<p>With ongoing maintenance when they would be discovered and open questions about what to do about apps that rely on these operations.</p>
+
+<p>Of course <code>safeexec</code> <b>also</b> includes all the same issues (and probably some more), but there's a big difference: because it's not a kernel API and it can be easily embedded into your application by linking it statically there are no need to support all the warts of the first version indefinitely. In can be tuned and fixed [relatively] freely without commitment to support it forever (because each released version is self-contained and would work like it did on the day one).</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003343/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003349"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Chained operations in io_uring</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2024 14:41 UTC (Tue)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1003349/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Let's please not get too heated; even though we try to make articles as clear as possible, it's easy to have slightly different understandings of complex technical topics, and the best way to resolve that is usually with examples and more explanations.<br>
+<p>
+In any case — nothing obliges developers to use hard links between io_uring operations. If an important cleanup operation is necessary, and it is not safe to execute the new program if it fails, don't use a hard link. While it is arguably suboptimal to introduce yet another API that must be used correctly or risk security problems, it is hardly the first such API in the kernel. Nothing prevents a poorly-written program from leaking various kinds of state to another program with the current fork()/exec() workflow.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003349/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003384"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Chained operations in io_uring</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2024 16:04 UTC (Tue)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1003384/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; In any case — nothing obliges developers to use hard links between <code>io_uring</code> operations.</font>
+
+<p>How would anything work without hard links? After <code>IORING_OP_CLONE</code> your process is in “undead” state. It's neither alive nor entirely dead, but the important part: it doesn't have <b>any userspace</b> that may act and do some decisions.</p>
+
+<p>That's <b>the whole point</b> of that patch series: to introduce a way to “clean up” that “undead” process by doing some operations when <b>userspace is entirely gone</b>.</p>
+
+<p>If you wouldn't use hard links… what is supposed to happen? How would non-hardlinked operations work without userspace? What is supposed to happen if some operation would would fail? We don't have any agent that may receive information about failure!</p>
+
+<p>Sure, we would know that combined operation would fail without running the program, but we would just make already stupid situation (where people try to execute programs with non-standard loader, get the message “file not found” and then spend hours trying to understand why program that's clearly there will all the proper permissions couldn't be execute) even worse.</p>
+
+<font class="QuotedText">&gt; While it is arguably suboptimal to introduce yet another API that must be used correctly or risk security problems, it is hardly the first such API in the kernel.</font>
+
+<p>It's worse than that: currently it's not “must be used correctly or risk security problems” but “it must be extended more before it would go beyond “proof of concept” phase, because in it's current form it's impossible to use it safely”.</p>
+
+<p><b>And we have no idea how much more should it be extended to become actually usable</b>. That's precisely why <a href="https://lwn.net/Articles/1003159/">I have said that we need to know</a> <b>who</b>, <b>why</b> and <b>how</b> plans to use that mechanism – because without such information we have no idea what needs to be added to it to make it actually usable.</p>
+
+<font class="QuotedText">&gt; Nothing prevents a poorly-written program from leaking various kinds of state to another program with the current fork()/exec() workflow.</font>
+
+<p>Sure, but correctly-written program can do everything <b>correctly</b>. And handle failures safely. Even if glibc fails to do that it's possible, <b>at least in theory</b>. That's <b>currently impossible to do with the new mechanism</b>.</p>
+
+<p>Can it be extended to handle these things? Sure: you can make it possible to receive information about <code>io_uring</code> operations in the parent process. Or introduce some high-level “cleanup” operations. Or do many other extra extensions… but before we would do all that the main question needs to be answered: what we are <b>actually</b> trying to do with that mechanism?</p>
+
+<font class="QuotedText">&gt; the best way to resolve that is usually with examples and more explanations.</font>
+
+<p>Sure, but why are you directing that request to me? The main advantage that was touted <a href="https://lwn.net/Articles/908268/">in the original work</a> way speed that's <i>6-10% faster than vfork() and 30+% faster than posix_spawn()</i>.</p>
+
+<p>I have no idea who would really need that speedup (most of the time time spent in <code>fork</code>/<code>exec</code> is minuscule compared to the time needed to run dynamic loader, verify signatures and so on), but that sounded somewhat sensible.</p>
+
+<p>But if all that complexity (including fight with <i>a kernel corruption after a few spawns</i>) and less reliability than what existing mechanisms provide is justified then it would be really nice to know who executes so many processes that they do care about <code>fork</code>/<code>exec</code> time, why the time needed to actually start process is not impeding their work and so on.</p>
+
+<p>Because if it's some silly specialized unikernel or some kind of cluster management software – then it may very well be handled better with a more focused, more specialized API instead of jenga tower that this patch series starts to build.</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003384/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003400"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Chained operations in io_uring</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2024 19:12 UTC (Tue)
+                               by <b>daroc</b> (editor, #160859)
+                              [<a href="/Articles/1003400/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; How would anything work without hard links? After IORING_OP_CLONE your process is in “undead” state. It's neither alive nor entirely dead, but the important part: it doesn't have any userspace that may act and do some decisions.</span><br>
+<p>
+It's possible that I've misunderstood how the patch series works, but I thought that if the whole series of operations fails, the program that originally started the operation is notified in the normal way (via an item in the io_uring completion queue). You can see that in this example: <a href="https://lwn.net/ml/all/20241209234421.4133054-3-krisman@suse.de/">https://lwn.net/ml/all/20241209234421.4133054-3-krisman@s...</a><br>
+<p>
+So a program submits the chain of io_uring operations, and then it either succeeds (and a new process is created) or it fails, and the program that submitted it can choose how and whether to retry. So hard links aren't needed, and it's perfectly possible to write a correct program that closes important files with the current patch series.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003400/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003405"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Chained operations in io_uring</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2024 19:37 UTC (Tue)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1003405/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; You can see that in this example:</font>
+
+<p>Which test is that? AFAICS <b>the only</b> test function that doesn't use linking, <i>test_unlinked_clone_sequence</i> just issues unlinked <code>IORING_OP_CLONE</code> and then expects this:
+<pre>
+if (cqe-&gt;res != -EINVAL)
+	… Unlinked clone should have failed …
+</pre>
+
+<p>That's it. All other examples use linked operations, as they should.</p>
+
+<p>It's possible that I have misunderstood something, but at least at the first glance it's obvious <b>why</b> it have to be done that: after <code>IORING_OP_CLONE</code> is executed <b>the whole <code>io_uring</code> machinery</b> (I suspect 99% of Linux functionality) becomes, temporarily, “untouchable”… with some operations still permitted – only in linked form. And then it either succeeds (while silently ignoring errors leading to unknown state of the executed process) or fails – as whole.</p>
+
+<font class="QuotedText">&gt; So a program submits the chain of io_uring operations, and then it either succeeds (and a new process is created) or it fails, and the program that submitted it can choose how and whether to retry.</font>
+
+<p>Couldn't see that. At least in that patch series and set of examples.</p>
+
+<p>And it's obvious why: if you add that machinery then, suddenly, instead of simple and non-invasive patch that just adds couple of <code>io_uring</code> commands one would need to design completely new machinery which can support inter-process <code>io_uring</code> support! With execution happening in the context of one process and communication channel opened to another process.</p>
+
+<p>Sure, that's not impossible to create, but… do we really want to add so many new subtle features for 6% speedup?</p>
+
+<font class="QuotedText">&gt; So hard links aren't needed, and it's perfectly possible to write a correct program that closes important files with the current patch series.</font>
+
+<p>Show me the code. I couldn't find it. And I suspect that it's precisely as I have said: we only see 10% of the iceberg here, the majority of changes, 90% of iceberg is either doesn't exist or is not submitted for review.</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003405/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003410"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Chained operations in io_uring</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2024 19:49 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/1003410/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      You are really determined to sink this patch series, I'm not sure why.
+<p>
+Normally, you would not use hard-linked operations in the newly cloned child context.  If one of the setup operations fails, the entire chain fails, with the status returned to the parent.  No silently ignored failures.  No unknown state.
+<p>
+Hard links can be used in the <tt>execveat()</tt> sequence to implement a search path.  In that case, continuing after failure is the desired outcome; you want to go until you find something you can actually execute.
+<p>
+I am sorry if the article did not adequately convey that.
+<p>
+Doubtless there is interesting work to do to expand the range of actions available in the just-cloned child context; we will have to see what shape that takes.  But I see no reason to suspect some sort of evil plot here.
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003410/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003413"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Chained operations in io_uring</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2024 20:36 UTC (Tue)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1003413/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; You are really determined to sink this patch series, I'm not sure why.</font>
+
+<p>I want to understand what that patch series hopes to achieve, mainly. This part is not reassuring: <i>Krisman hopes to be able to at least partially lift that constraint in the future</i>. And this is even more worrying: <i>The hope is to increase the set of possible operations over time, enabling the implementation of complex logic for the spawning of a new task.</i></p>
+
+<p>In essence we are supposed to accept some piece of the whole solution without us knowing where the whole thing even leads.</p>
+
+<p>And, worse yet, it's not clear what problem this whole thing is even supposed to solve!</p>
+
+<p>If it's safety of creation of a new process then it's one thing (there are no need for <code>io_uring</code>, we already have all the pieces), if it's 30% speedup for <code>posix_spawn</code>, then it's another thing.</p>
+
+<font class="QuotedText">&gt; But I see no reason to suspect some sort of evil plot here.</font>
+
+<p>Evil plot is unlikely. But it really looks like a solution in a search of a problem… and I want to see the problem and, more importantly, explanation why that's the best solution for it.</p>
+
+<p>As was noted in article one alternative solution would be to just create a dedicated system call that would include all the required operations. Or “double exec” if we just want to safely implement <code>posix_spawn</code>.</p>
+
+<p>And if it's “an attempt to see where it goes” then I don't really want to <b>sink</b> but more to “flesh it out”, understand how the full, final, solution would look like and, again, <b>who</b>, <b>why</b> and <b>how</b> would use it.</p>
+
+<p>Because as it stands currently, it's not clear to me what's the goal of all that activity – and that matters much more then minor details of the implementation in the current form.</p>
+
+<p>Even if we would achieve the final goal of being able to execute all <code>io_uring</code> commands in this sequence of these instructions between <code>clone</code> and <code>execute</code> why are we so sure it would be enough.</p>
+
+<p>Where do we plan to arrive with that change and what do we plan to achieve?</p>
+
+<font class="QuotedText">&gt; Hard links can be used in the execveat() sequence to implement a search path. In that case, continuing after failure is the desired outcome; you want to go until you find something you can actually execute.</font>
+
+<p>Ah. I see. While this, again, looks like a solution in a search of a problem (why to look up for the executable before executing it? what's the point of moving this pretty much optional functionality into the kernel? do we really want to try to continue after finding “kinda-sorta-suitable” binary that would end up being broken, for some reason?) at least now I understand what I didn't understood about that patch set.</p>
+
+<p>Thanks for explaining it: while I still am not sure how useful would it be to implement what it tries to implement (because, again, I couldn't see the end goal), at least <b>some</b> operations can be implemented in safe manner. That's better than how I understood it working. Thanks for explanation.</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003413/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1003421"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Chained operations in io_uring</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2024 23:03 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1003421/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  Normally, you would not use hard-linked operations in the newly cloned child context. If one of the setup operations fails, the entire chain fails</span><br>
+<p>
+How exactly is this going to be achieved for processes? As I understand, there's going to be a new visible intermediate state for the process, as the operations are being executed, unless the io_uring sequence locks the entire kernel.<br>
+<p>
+This also can cause a problem for userspace process migration. How do you interrupt the io_uring sequence to suspend it? After reading the patch series, I don't see how it would prevent long-running operations like read() from being introduced into the middle of the sequence.<br>
+<p>
+It really is a poorly-designed API. It is very much in line with the good old UNIX tradition of screwing up process management APIs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003421/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1004863"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 12, 2025 18:17 UTC (Sun)
+                               by <b>mrugiero</b> (guest, #153040)
+                              [<a href="/Articles/1004863/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe it would be easier (but would take more execs) to just use execline on your first exec to set up the environment correctly. Nice little scripting language which is already designed for that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1004863/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1003120"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 3:14 UTC (Sat)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/1003120/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the idea of allowing a subset of pages to be preserved into the new program makes sense (I just suggested a variant of it in another comment).<br>
+<p>
+Agree that the complexity can be dealt with in a library once, but also I think it's less hard to program than you'd fear - one approach that would make it relatively pleasant to implement would be to write a tiny standalone binary to do the post-fork actions, and embed that compiled binary as a big constant in this helper library. Then the pre-fork operation (which the library would do for you) is to mmap some new pages to hold the binary and its stack, copy over the binary and fill in the stack appropriately, and tell clone3 to start running that binary from its entry point. Then immediately munmap those pages in the parent. (Or, if you want to get fancy, make a clone3 flag to move pages from the parent to the child instead of CoWing them.) This lets you avoid thinking too much about how the compiler is laying out memory and what parts you need to preserve, because you're essentially running a new program in the child. (In other words, it basically gives you kernel support for the "zygote" approach.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003120/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1003179"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 19:30 UTC (Sat)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/1003179/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; We don't have a full set of system calls for remotely doing everything that a process can do by itself.</span><br>
+<p>
+In a world with a more regular system interface, *every* system call would require callers specify all object on which to operate, explicitly. We wouldn't have operations that work on "the current process" or "the current thread". In this world, the process bootstrapping the GP proposes would fall naturally out of the general shape of the API surface.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003179/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1003155"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 15:32 UTC (Sat)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/1003155/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; However, typically, you do want to inherit at least some state from the current process.</font>
+
+<p>Just <a href="https://man7.org/linux/man-pages/man2/memfd_create.2.html">package it neatly</a> and pass it into a new process, damn it!</p>
+
+<font class="QuotedText">&gt; At the very least, there might be value in having a CLONE_ flag that makes the new process have an empty memory map rather than inheriting the caller's memory map.</font>
+
+<p>That's not possible: you need <b>something</b> in the process that you may execute. You can not start from zero. But if you would instead pass <code>fd</code> number that contains image that should be loaded there then with simple, almost trivial in kernel change you would enable fully-userpace solutions.<p>
+
+<p>But hey, that's too simple! There are not enough buzzwords in that approach! How can be accept something so sane? Nope, we need to push for <code>io_uring</code>, <code>BPF</code> or maybe even <code>webasm</code>! More complicated, more invasive, yet much more buzzword-compliant approach!</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003155/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1003105"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 1:07 UTC (Sat)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/1003105/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's essentially posix_spawn.<br>
+<p>
+On Linux, posix_spawn is just a userland wrapper for a vfork/exec dance.  But on macOS, posix_spawn is its own syscall.  The kernel creates the new process without having to bother with forking the virtual memory space and all that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003105/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003168"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 17:26 UTC (Sat)
+                               by <b>ma4ris8</b> (subscriber, #170509)
+                              [<a href="/Articles/1003168/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Let's have a threaded program. It opens and closes file descriptors. Some of those have FD_CLOSE.<br>
+Task is to create a child program. Child program will have three file descriptors, parent's three fds<br>
+mapped as child's stdin, stdout and stderr. Close all unrelated file descriptors.<br>
+Perhaps Valgrind's file descriptors with fds near upper bound, 1024, are also allowed to pass thru.<br>
+<p>
+One way is to fork, then open /proc/self/fd, close unrelated fds, remap related ones into 0,1 and 2.<br>
+After that, then exec the final child with a clean state. If parent has large memory foot print, this is heavy.<br>
+<p>
+The other way is to do posix_spawn(). Spawn intermediate process, which closes unrelated fds, remaps related<br>
+ones into 0,1 and 2. After clean up, execute the final child process. Drawback is to have the middle process<br>
+to do the clean up, but if parent has large memory foot print, this is light, compared to fork.<br>
+<p>
+Third way: how to do it so, that the cleanups could be done in an elegant and memory safe way,<br>
+without the separate middle process?<br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003168/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003236"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not just have a one-step spawn?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 23, 2024 13:44 UTC (Mon)
+                               by <b>fweimer</b> (guest, #111581)
+                              [<a href="/Articles/1003236/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can use Solaris, which offers posix_spawn_file_actions_addclosefrom_np. It's always in glibc 2.34 or later, too. The other historically missing bits are posix_spawn_file_actions_addchdir_np and posix_spawn_file_actions_addfchdir_np (glibc 2.29 and later).<br>
+<p>
+In general, this is an anti-pattern, though, because we have to keep adding stuff that's easily expressed elsewhere in code. One issue is that one gets just one error code for an entirely list of actions, and that's bad from a debugging point of view. And one day, we'll need to wrap something where a first action produces a value needed by a second action, and we cannot easily force the value to a caller-supplied choice (like we do for file descriptors today).<br>
+<p>
+One silver lining is that vfork may not be as bad as we thought it was for a while. (The TCB sharing is empirically quite harmless for a wide variety of programs). Running compiled C code instead of walking an action list may be the better approach in the end.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003236/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor1003101"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">zygotes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 0:20 UTC (Sat)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/1003101/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Fun trick you could pull with this, once it has full support for arbitrary io_uring operations:<br>
+<p>
+Clone a new process, do some initial setup, do a futex wait or blocking read or wait on a uring message, and when that completes, do an execveat of the new process. Now you can have a "pool" of ready-to-start processes, blocked in the kernel, waiting to exec.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003101/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1003110"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More work to do for tracing execs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 1:57 UTC (Sat)
+                               by <b>kxxt</b> (subscriber, #172895)
+                              [<a href="/Articles/1003110/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I suppose this means more work to do for tracing execs in the future...<br>
+<p>
+On x86_64, tracing execs is easy as hooking __x64_sys_execve{,at} and __ia32_compat_sys_execve{,at} for 32bit(execsnoop doesn't handle it, but my tracexec handles it).<br>
+<p>
+Of course there is sched_process_exec but only for successful execs.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003110/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1003112"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Missing a beat</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 2:06 UTC (Sat)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/1003112/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The first of those is IORING_OP_CLONE, which causes the creation of a new process to execute any operations that follow in the same chain. In a difference from a full clone() call, though, much of the calling task's context is unavailable to the process created by IORING_OP_CLONE. </span><br>
+<p>
+and that is the whole point, right?<br>
+<p>
+<span class="QuotedText">&gt; Without that context, io_uring operations in the newly created process can no longer be asynchronous; every operation in the chain must complete immediately, or the chain will fail.</span><br>
+<p>
+I'm afraid I'm missing a beat here. I mean, I miss the ... link (pun intended) between "without context" and "asynchronous". Could someone elaborate?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003112/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1003122"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Missing a beat</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2024 3:35 UTC (Sat)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/1003122/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My guess, and someone correct me if I'm wrong: once you've called IORING_OP_CLONE, there's no userspace for this process yet, and you can't return from a syscall like io_uring_enter if you don't have a userspace to return to. So all the operations you do in processing the ring have to be operations that are handled synchronously in kernelspace and keep the syscall happening; none of them can be an operation that would cause the kernel to return from the syscall and say "Yeah I'll do this asynchronously," until you've done an exec and loaded a new program into userspace. (And when you exec, you want to start the process from the beginning like normal, you don't want to act like you're returning from an io_uring system call, hence the rule that you can have no further io_uring operations.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1003122/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1007575"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fork/exec Did a Job Simply &amp; Well - Most of the Problems Mentioned Have Untreated Causes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2025 12:17 UTC (Mon)
+                               by <b>roblucid</b> (guest, #48964)
+                              [<a href="/Articles/1007575/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Modern developers criticising an early 70's design, which gave clean &amp; simple primitives solving problems shouldn't blame fork/exec <br>
+but the failure to establish clearly better alternatives as the computing environment changed.  The multi-user machines of the day were continually swapping out whole processes to disk and reloading them, single processes DID not have vmtables.  The fork(2) model allowed multi-tasking and the parent in the child process can set to NULL everything the child does not require with a small amount of memory copying and then overlay its own code via exec(2).<br>
+<p>
+Environment solved the problem of child processes having to know about everything that could be set, so banishing that uncessarily, incurs a future maintenance problem.  Just imagine if a DB style solution for user preferences hand been imposed with a single point of failure.  Having used alternative OS solutions, vast amounts of variables had to be set up and constantly reset in practice, rather than just using a bit copy of an area in process memory.<br>
+<p>
+A better question is why are huge monolithic programs with masses of VM mappings forking anyway?  Why aren't small main programs, setting up co-operating processes which have memory isolation and then can fire up threads for their heavy weight processing?<br>
+Surely that's what you want for cache effieciency, so parts with tightly coupled gang processing can share L3, while loosely coupled parts can be scheduled seperately.<br>
+<p>
+Seems to me the issue is the problem is the coordination between the program pieces, effectively an efficient message passing system so loosely coupled parts of a program can avoid sharing address spaces.<br>
+<p>
+When I read about clone being inefficient because it "copies the whole VM which is mostly unused", I see poor application architecture.<br>
+Again people mentioned graphics libraries starting threads when linked, well that's what dynamic loading avoids.<br>
+<p>
+When applications are statically linking huge amounts of common library code in multiple copies, that then may use threading which requires understanding of a memory model and safe operations, all in ONE big pot, it's a bit rich to moan about inefficiency caused by copying VM tables.<br>
+Who created this huge memory management problem putting everything in one large pot?<br>
+<p>
+Browsers moved away from single process because of security requirements despite it causing duplication, they still manage to be snappy enough, even if it's NOT what you would do in a twitch shooter game.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1007575/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1007710"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fork/exec Did a Job Simply &amp; Well - Most of the Problems Mentioned Have Untreated Causes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2025 18:47 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/1007710/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  A better question is why are huge monolithic programs with masses of VM mappings forking anyway? Why aren't small main programs, setting up co-operating processes which have memory isolation and then can fire up threads for their heavy weight processing?</span><br>
+<p>
+Why would you reinvent threading and shared memory?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1007710/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1015335"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fork/exec Did a Job Simply &amp; Well - Most of the Problems Mentioned Have Untreated Causes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2025 9:38 UTC (Tue)
+                               by <b>gstrauss</b> (guest, #176692)
+                              [<a href="/Articles/1015335/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A bit late to the party, similar to @roblucid<br>
+<p>
+If the problem is that fork()/execve() is expensive **for large processes** with many memory mappings, file descriptors, etc, then a solution is for those expensive monolithic processes to avoid fork().<br>
+<p>
+One user-space solution: a large process could use AF_UNIX sockets to contact a lightweight process-creation daemon already pre-configured to be ready to do some minimal setup, vfork() or clone(), and then execve().  The lightweight process-creation daemon does not even have to be running all the time.  It could conceivably be started on-demand via xinetd or systemd socket triggers.<br>
+<p>
+I wrote one such user-space process-creation daemon over a decade ago, called `proxyexec` (<a rel="nofollow" href="https://github.com/gstrauss/bsock">https://github.com/gstrauss/bsock</a>)<br>
+A heavyweight or differently-privileged process can contact proxyexec on an AF_UNIX socket and then pass argv, env, and fds for stdin, stdout, stderr fds.  proxyexec can even run under different credentials from the heavyweight process, and can even run in a different container connected by the AF_UNIX named socket.  This is not theoretical: an earlier version of proxyexec was (and maybe still is) used by CloudLinux to remove setuid binaries from their containers, and to still provide privileged services -- running under different user accounts and outside the containers -- via proxyexec.<br>
+<p>
+tl;dr: Alternative user-space application designs, e.g. possibly using a service oriented architecture (directly or via a process-execution proxy) should be compared and contrasted with extending io_uring to provide IORING_OP_CLONE, IORING_OP_EXEC.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1015335/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

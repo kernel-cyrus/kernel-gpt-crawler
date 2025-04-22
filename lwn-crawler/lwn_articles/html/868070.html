@@ -1,0 +1,1044 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>More IOPS with BIO caching [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/868070/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/868157/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/868070/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>More IOPS with BIO caching</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 6, 2021</br>
+           </div>
+Once upon a time, block storage devices were slow, to the point that they
+often limited the speed of the system as a whole.  A great deal of effort
+went into carefully ordering requests to get the best performance out of
+the storage device; achieving that goal was well worth expending some CPU
+time.  But then storage devices got much faster and the equation changed.
+Fancy I/O-scheduling mechanisms have fallen by the wayside and effort is now
+focused on optimizing code so that the CPU can keep up with its storage.  A
+block-layer change that was merged for the 5.15 kernel shows the kinds of
+tradeoffs that must be made to get the best performance from current hardware.
+<p>
+Within the block layer, an I/O operation is represented by <a
+href="https://elixir.bootlin.com/linux/v5.14/source/include/linux/blk_types.h#L215"><tt>struct bio</tt></a>; an instance of this structure is usually just called a
+"BIO".  Contained within a BIO are a pointer to the relevant block device,
+a description of the buffer(s) to be transferred, a pointer to a function
+to call when the operation completes, and a surprising amount of ancillary
+information.  A BIO must be allocated, managed, and eventually freed for
+every I/O operation executed by the system.  Given that a large, busy
+system with fast block devices can generate millions of I/O operations per
+second (IOPS), huge numbers of BIOs will be going through this life cycle
+in a constant stream.
+<p>
+The kernel's slab allocator is optimized for the task of repeatedly
+allocating and freeing structures of a uniform size; it seems like it
+should be well suited as a source of BIOs for the block subsystem.  It
+turns out, though, that the slab allocator is not fast enough; it has
+become a bottleneck slowing down block I/O.  So block maintainer Jens Axboe
+has put together <a
+href="/ml/linux-block/20210812154149.1061502-1-axboe@kernel.dk/">a set of
+patches</a> to circumvent the problem.
+<p>
+The result is a simple cache of BIO structures.  It is built as a set of
+linked lists, one for each CPU in the system.  When a new BIO is needed
+(and when some other conditions are met — see below), the linked list for
+the current CPU is checked; if a free BIO is found there, it can be removed
+from the list and used
+without having to call into the slab allocator.  If the list is empty, a
+slab call must be made as usual, of course.  When the time comes to free a BIO,
+it is put onto the current CPU's list.  Should the list grow too large
+(more than 576 cached BIOs), 64&nbsp;BIOs will be handed back to the slab
+allocator.
+<p>
+It is a simple mechanism, which is the source of its speed.  Rather than
+calling into the slab allocator, the block layer can just grab an available
+BIO directly off of the appropriate per-CPU list without any function calls
+at all.  The use of a per-CPU list eliminates the need for locking,
+speeding things further.  The lists are managed like a stack, maximizing
+the chance that an allocated BIO will already be present in the CPU cache.
+The end result is a significant improvement in performance.
+<p>
+At least, that is the case for some workloads.  The BIO cache is, as noted,
+simple; one of the things it doesn't bother with is interrupt safety.  A
+per-CPU data structure is only safe for lockless access if the kernel
+cannot be preempted while executing the critical section; interrupts,
+being the definitive form of preemption, violate that rule.  If a
+block-driver interrupt handler tries to allocate or free a BIO while some
+other kernel code is doing the same, the results are likely to be
+unpleasant and users will be remarkably unappreciative of the improved
+performance.
+<p>
+The BIO cache could be made interrupt-safe, of course, and someday that
+might just have to happen.  But disabling interrupts has a performance cost
+as well, so there are good reasons for avoiding it.  The cost associated
+with leaving interrupts enabled
+is that the BIO cache can only be used in situations where concurrent
+access in interrupt handlers is not a possibility.  The good news is that
+one such situation is well defined: when <a
+href="/Articles/663879/">block-layer I/O polling</a> is in use.  Polling
+turns off interrupts from the storage device in favor of simply looping
+until an I/O request is 
+completed; this can actually be a reasonable thing to do with fast devices.
+In settings where getting the highest I/O rates possible is important,
+administrators are likely to have polling enabled anyway; targeting this
+additional performance improvement at that use case thus makes some sense.
+<p>
+Getting the slab allocator out of the loop improves performance
+considerably, but there is one other bottleneck to overcome.  The block
+layer has a function called <a
+href="https://elixir.bootlin.com/linux/v5.14/source/block/bio.c#L240"><tt>bio_init()</tt></a>,
+the core of which reads:
+<p>
+<pre>
+    memset(bio, 0, sizeof(*bio));
+</pre>
+<p>
+One might think that <tt>memset()</tt> would be the fastest way to
+initialize a moderately sized structure like this, but that turns out not
+to be the case.  So Axboe added <a
+href="/ml/linux-block/20210812154149.1061502-2-axboe@kernel.dk/">a
+patch</a> that replaces the <tt>memset()</tt> call with a series of
+statements explicitly setting each BIO field to zero.  The changelog notes
+that this change halves the time it takes to allocate and initialize a BIO
+(when using the BIO cache, of course).
+<p>
+With these changes in place, Axboe said, the block layer's performance
+increased by about 10%; it can now execute over 3.5&nbsp;million IOPS on
+each CPU core on his test system.  That is a lot of blocks moving back and
+forth, which will 
+surely please the managers of storage servers.  This series shows what can
+be (and must be) done to optimize I/O throughput on current hardware; it
+also suggests, though, that it may be time to put some more optimization
+effort into the (already highly optimized) slab allocator.  If the kernel
+starts to fill up with per-subsystem object caches as a way of bypassing
+the allocator, performance overall will suffer.  Meanwhile, though, few are
+likely to argue that this effort to improve block-I/O performance is
+anything but well placed.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Block_layer-Scalability">Block layer/Scalability</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/868070/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor868487"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2021 16:01 UTC (Mon)
+                               by <b>tux3</b> (subscriber, #101245)
+                              [<a href="/Articles/868487/">Link</a>] (13 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Replacing memset calls with manual assignments! I didn&#x27;t expect memset to be so much slower.<br>
+<p>
+Could it be there&#x27;s fruit left to pick in the GCC? Is the threshold for calling out to the full blown memset machinery just a smidge too high?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868487/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868503"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memset slower than inline code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2021 20:46 UTC (Mon)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/868503/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A mis-predicted branch costs about 13 cycles, so 3 of them cover about 40 inline stores to memory (cache.)  memset does not know in advance the width or alignment of the destination, but the compiler does.  gcc __builtin_memset() could be a contender.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868503/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868513"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memset slower than inline code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2021 23:36 UTC (Mon)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/868513/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Doesn&#x27;t the standard permit GCC to freely translate memset, __builtin_memset, and manually-written initialization code into each other? I&#x27;m mildly surprised that replacing memset with not-memset even changed the assembly output, and I&#x27;m also mildly surprised that GCC is not smart enough to do that transformation itself.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868513/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868530"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memset slower than inline code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 6:38 UTC (Tue)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/868530/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      It should unless -ffreestanding or -fno-builtin is used. Linux only uses those option on a few select files, so I'm not sure what's going on... And as mentioned below in another comment, even with those options <tt>x = (struct foo) {0}</tt> generates the same code as __builtin_memset.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868530/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor868521"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memset slower than inline code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 1:20 UTC (Tue)
+                               by <b>robert.cohen@anu.edu.au</b> (subscriber, #6281)
+                              [<a href="/Articles/868521/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Due to alignment restrictions, there could well be unused space in a structure.<br>
+Individually setting the fields will mean the unused space doesn&#x27;t have to be written.<br>
+But I&#x27;m not sure how much that is effecting the relative speed of the 2 approaches.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868521/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868523"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memset slower than inline code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 1:37 UTC (Tue)
+                               by <b>mchapman</b> (subscriber, #66589)
+                              [<a href="/Articles/868523/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>I would prefer to see it written:</p>
+
+<p><tt><pre>*bio = (struct bio){ 0 };
+</pre></tt></p>
+
+<p>This ought to generate the same code as the hand-unrolled version &mdash; including skipping padding if the compiler thinks that is faster &mdash; but it would not need modification should the structure layout ever change.</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868523/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868526"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memset slower than inline code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 2:25 UTC (Tue)
+                               by <b>pabs</b> (subscriber, #43278)
+                              [<a href="/Articles/868526/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+bio_init() also sets some values to non-zero, the { 0 } approach means they would get set twice, which is presumably slower, unless the compiler is smart enough to eliminate the first setting?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868526/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868527"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memset slower than inline code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 2:52 UTC (Tue)
+                               by <b>mchapman</b> (subscriber, #66589)
+                              [<a href="/Articles/868527/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>That's possibly why <code>memset</code> was slower. But it seems more likely the compiler will optimise away the unnecessary assignments if it can see them, rather than having them hidden behind a function call.</p>
+
+<p>I just noticed that the proposed change no longer initializes the <code>bi_pool</code> field — it's being left uninitialized. <code>bi_pool</code> is zeroed in <code>bio_kmalloc</code>, but not in other callers to <code>bio_init</code>. I hope this is intentional. If it isn't, it's the kind of bug that struct assignment (or <code>memset</code>) would help guard against.</p>
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868527/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868529"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memset slower than inline code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 5:46 UTC (Tue)
+                               by <b>mchapman</b> (subscriber, #66589)
+                              [<a href="/Articles/868529/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>Just to follow up on this, apparently not assigning to <code>bi_pool</code> <a href="https://lwn.net/ml/linux-block/46c21d40-2b31-d3e1-f32f-98865c969040@kernel.dk/">was intended</a>.</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868529/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor868954"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memset slower than inline code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2021 18:16 UTC (Sat)
+                               by <b>mirabilos</b> (subscriber, #84359)
+                              [<a href="/Articles/868954/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Doesn’t skipping padding have security implications?<br>
+<p>
+(Sure, manually assigning to all the fields does the same, and probably not relevant here, but in general.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868954/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor869655"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memset slower than inline code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 18, 2021 4:46 UTC (Sat)
+                               by <b>Blaisorblade</b> (guest, #25465)
+                              [<a href="/Articles/869655/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Sure, but <code>*bio = (struct bio){ 0 };</code> is not expected to set padding — when that's needed for security reasons, <code>memset</code> should be used.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/869655/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor869750"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memset slower than inline code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 18, 2021 15:59 UTC (Sat)
+                               by <b>mirabilos</b> (subscriber, #84359)
+                              [<a href="/Articles/869750/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That’s what I said:<br>
+<p>
+<font class="QuotedText">&gt;   (Sure, manually assigning to all the fields does the same, and probably not</font><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/869750/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor868605"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memset slower than inline code</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 22:10 UTC (Tue)
+                               by <b>HenrikH</b> (subscriber, #31152)
+                              [<a href="/Articles/868605/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You have to compile this with a very very old version of GCC in order to have it be an actual call to memset.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868605/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor868506"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2021 20:55 UTC (Mon)
+                               by <b>HenrikH</b> (subscriber, #31152)
+                              [<a href="/Articles/868506/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That is probably down to which version of the compiler used and for which arch, trying a simplified version on the Compiler Explorer gave me basically identical results.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868506/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor868511"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2021 21:56 UTC (Mon)
+                               by <b>dancol</b> (guest, #142293)
+                              [<a href="/Articles/868511/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; more than 576 cached BIOs), 64 BIOs will be handed back to the slab allocator.</font><br>
+<p>
+Am I the only one a little unnerved by magic numbers like this? Isn&#x27;t there some way to make the proper bio cache depth self-adjusting?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868511/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868517"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 0:15 UTC (Tue)
+                               by <b>jedix</b> (subscriber, #116933)
+                              [<a href="/Articles/868517/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You are not the only one.. but the implications of the self adjusting code would be reducing the speed and increasing the complexity.  I would have thought it would have been based on page size though?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868517/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor868520"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 0:55 UTC (Tue)
+                               by <b>axboe</b> (subscriber, #904)
+                              [<a href="/Articles/868520/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Am I the only one a little unnerved by magic numbers like this? Isn&#x27;t there some way to make the proper bio cache depth self-adjusting?</font><br>
+<p>
+The numbers themselves shouldn&#x27;t really be important, and they just come out of the fact that we should cap it somewhere (512) and that we batch in units of 64. Really anything would work here, as long as the batch+count is big enough to yield a reasonable win.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868520/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor868515"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 0:07 UTC (Tue)
+                               by <b>jedix</b> (subscriber, #116933)
+                              [<a href="/Articles/868515/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      This sounds a lot like the per-cpu magazine and vmem idea [1].  The paper describes taking the idea further and generalizing it into its own vmem layer.  The magazine is also reloaded when emptied by asking the slab allocator for more.
+<br>
+I am surprised that the memset is slower.  Is this gcc on x86_64?  I had a quick look at the patch and didn't see it mentioned in the commit message.  Could this be some fancy intel instruction at work?
+<br>
+1. <a href="http://www.parrot.org/sites/www.parrot.org/files/vmem.pdf">http://www.parrot.org/sites/www.parrot.org/files/vmem.pdf</a>
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868515/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor868532"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 10:14 UTC (Tue)
+                               by <b>immibis</b> (guest, #105511)
+                              [<a href="/Articles/868532/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why isn&#x27;t this cache inside the slab allocator?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868532/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868572"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 15:46 UTC (Tue)
+                               by <b>bushdave</b> (subscriber, #58418)
+                              [<a href="/Articles/868572/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess there will be issues with fragmentation if the objects in the BIO cache doesn&#x27;t have similar lifespans.<br>
+<p>
+But it sounds like the BIO cache layer could become more generic and sit between other subsystems and the slab allocator (but with a separate BIO cache instance per subsystem/slab usage)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868572/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor868575"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 16:06 UTC (Tue)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/868575/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  At least, that is the case for some workloads. The BIO cache is, as noted, simple; one of the things it doesn&#x27;t bother with is interrupt safety. A per-CPU data structure is only safe for lockless access if the kernel cannot be preempted while executing the critical section; interrupts, being the definitive form of preemption, violate that rule. If a block-driver interrupt handler tries to allocate or free a BIO while some other kernel code is doing the same, the results are likely to be unpleasant and users will be remarkably unappreciative of the improved performance.</font><br>
+<font class="QuotedText">&gt;</font><br>
+<font class="QuotedText">&gt; The BIO cache could be made interrupt-safe, of course, and someday that might just have to happen. But disabling interrupts has a performance cost as well, so there are good reasons for avoiding it.</font><br>
+<p>
+Why not make the bio cache a truly lockless data structure (using hardware atomic operations)?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868575/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868577"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2021 16:33 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/868577/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Atomics are expensive.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868577/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868614"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2021 6:27 UTC (Wed)
+                               by <b>jthill</b> (subscriber, #56558)
+                              [<a href="/Articles/868614/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I have long thought that having a memory range dedicated to finish-this-first operations, so interrupts would check whether one was in progress and if so finish it before handling the interrupt, would pay.  So a per-cpu-compare-and-swap could simply be the load, compare, conditional store, return; and so on. Have a hardwired page dedicated to the finish-first pseudo-atomics, if the PC's on that page (which only the kernel can access) the interrupt handler knows where the return pointer is, inserts itself and continues it, knowing it'll be back very soon.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868614/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868615"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2021 6:32 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/868615/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The kernel actually has something like it: <a href="https://www.efficios.com/blog/2019/02/08/linux-restartable-sequences/">https://www.efficios.com/blog/2019/02/08/linux-restartabl...</a> <br>
+<p>
+It works pretty great, since in the usual case all the jumps are well-predicted. Still, not having them at all would be even better.<br>
+<p>
+<font class="QuotedText">&gt; I have long thought that having a memory range dedicated to finish-this-first operations, so interrupts would check whether one was in progress and if so finish it before handling the interrupt, would pay.</font><br>
+<p>
+How would this work? Is this pseudo-atomic-page for data or for instructions?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868615/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868678"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2021 16:46 UTC (Wed)
+                               by <b>jthill</b> (subscriber, #56558)
+                              [<a href="/Articles/868678/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      A dedicated page for kernel code the interrupt handler allows to complete before handling the interrupt. Reserve a register in that code for the interrupt handler and it'd be "if(unlikely(ffi-inflight set and interrupted pc on that page)) save the interrupted routines's return address, replace it with me, branch back to the interrupted instruction, restore the return address".
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868678/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868708"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2021 7:10 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/868708/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I&#x27;m not a kernel hacker so I genuinely don&#x27;t know the answer to these questions:<br>
+<p>
+1. Is it always possible/safe to do that kind of return-to-interrupt-handler chicanery? How does this interact with trampoline/retpoline-like things?<br>
+2. Do interrupts have additional state which might need to be saved and restored? If so, who owns that memory?<br>
+3. What if a second interrupt happens after you&#x27;ve futzed with the return address, but before the interrupted routine returns?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868708/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor868763"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2021 15:29 UTC (Thu)
+                               by <b>jthill</b> (subscriber, #56558)
+                              [<a href="/Articles/868763/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Not always, but if you keep tight control over what kind of code the interrupt handler decides to finish this way, sure. For instance, you have complete control over the call/return sequence. Interrupts definitely have to preserve state, in memory owned by that specific core / hardware thread (an msr shows where). Interrupt handlers are entered interrupts-off, they don't turn them back on until they've got enough state saved that the kernel code can take another without corrupting things.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868763/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor868618"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2021 7:10 UTC (Wed)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/868618/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="https://lwn.net/Articles/850202/">https://lwn.net/Articles/850202/</a> includes a discussion of when and how to go lockless. In the article, there is an example of how per-CPU data structures (in that case it was a simple counter) can perform better than either locks or atomics.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868618/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor868626"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">More IOPS with BIO caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2021 10:34 UTC (Wed)
+                               by <b>edeloget</b> (subscriber, #88392)
+                              [<a href="/Articles/868626/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And atomic cannot ensure the coherence of a whole structure. If you have more than one fields to update, you&#x27;re screwed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868626/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor868777"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">allow bzero in kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2021 18:18 UTC (Thu)
+                               by <b>dougg</b> (guest, #1894)
+                              [<a href="/Articles/868777/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Seeing how many memset()s in the kernel are of the form: memset(ptr, 0, size) why not allow bzero(ptr, size) which obviously saves one passed parameter and some typing. It makes FreeBSD driver code a bit easier to read. Maybe it could open the door to other optimizations, for example, if ptr is page aligned.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/868777/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor869020"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">allow bzero in kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2021 22:35 UTC (Sun)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/869020/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+According to bzero(3) on Linux:<br>
+<p>
+<font class="QuotedText">&gt; The bzero() function is deprecated (marked as LEGACY in POSIX.1-2001); use memset(3) in new programs.  POSIX.1-2008 removes the specification of bzero().</font><br>
+<p>
+As for *why* they decided to do that, you&#x27;ll have to take it up with the standards people.<br>
+<p>
+(Obviously, that man page is describing the glibc version of bzero. I&#x27;m fairly certain the kernel doesn&#x27;t link with glibc, at least in the normal fashion. But it hardly matters, because POSIX is POSIX regardless of who&#x27;s implementing it.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/869020/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2021, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

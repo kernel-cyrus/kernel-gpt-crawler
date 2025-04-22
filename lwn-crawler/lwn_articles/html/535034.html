@@ -1,0 +1,472 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Asynchronous block loop I/O [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/535034/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/533892/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/535034/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Asynchronous block loop I/O</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>We're bad at marketing</b>
+<p>
+We can admit it, marketing is not our strong suit. Our strength is
+writing the kind of articles that developers, administrators, and
+free-software supporters depend on to know what is going on in the
+Linux world. Please <a href="/Promo/nsn-bad/subscribe">subscribe today</a> to help us keep doing that, and so
+we don’t have to get good at marketing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 30, 2013</br>
+           </div>
+The kernel's block loop driver has a conceptually simple job: take a file
+located in a filesystem somewhere and present it as a block device that can
+contain a filesystem of its own.  It can be used to manipulate filesystem
+images; it is also useful for the management of filesystems for virtualized
+guests.  Despite having had some optimization effort applied to it, the
+loop driver in current kernels is not as fast as some would like it to be.
+But that situation may be about to change, thanks to an old patch set that
+has been revived and prepared for merging in a near-future development
+cycle.
+<p>
+As a block driver, the loop driver accepts I/O requests described by
+<tt>struct bio</tt> (or "BIO")
+structures; it then maps each request to a suitable block offset in the
+file serving as backing store and issues I/O requests to perform the
+desired operations on that file.  Each loop device has its own thread,
+which, at its core, runs a loop like this:
+<p>
+<pre>
+    while (1) {
+	wait_for_work();
+	bio = dequeue_a_request()
+	execute_request(bio);
+    }
+</pre>
+<p>
+(The actual code can be seen in <tt>drivers/block/loop.c</tt>.)  This code
+certainly works, but it has an important shortcoming: it performs I/O in a
+synchronous, single-threaded manner.  Block I/O is normally done
+asynchronously when possible; write operations, in particular, can be done
+in parallel with other work.  In the loop above, though, a single, slow
+read operation can hold up many other requests, and there is no
+ability for the block layer or the I/O device itself to optimize the
+ordering of requests.  As a result, the performance of loop I/O traffic is
+not what it could be.
+<p>
+In 2009, Zach Brown set out to fix this problem by changing the loop driver
+to execute multiple, asynchronous requests at the same time.  That
+work fell by the wayside when other priorities took over Zach's time, so
+his patches were never merged.  More recently, Dave Kleikamp has
+taken over this patch set, ported it to current kernels, and added support to
+more filesystems.  As a result, this patch set may be getting close to
+being ready to go into the mainline.
+<p>
+At the highest level, the goal of this patch set is to use the kernel's
+existing asynchronous I/O (AIO) mechanism in the loop driver.  Getting
+there takes a surprising amount of work, though; the AIO subsystem was
+written to manage user-space requests and is not an easy fit for
+kernel-generated operations.  To make these subsystems work together, the
+<a href="/Articles/534928/">30-part patch set</a> takes a bottom-up
+approach to the problem.
+<p>
+The AIO code is based around a couple of structures, one of which is
+<tt>struct iovec</tt>:
+<p>
+<pre>
+    struct iovec {
+	void __user *iov_base;
+	__kernel_size_t iov_len;
+    };
+</pre>
+<p>
+This structure is used by user-space programs to describe a segment of an
+I/O operation; it is part of the user-space API and cannot be changed.
+Associated with this structure is the internal <tt>iov_iter</tt> structure:
+<p>
+<pre>
+    struct iov_iter {
+	const struct iovec *iov;
+	unsigned long nr_segs;
+	size_t iov_offset;
+	size_t count;
+    };
+</pre>
+<p>
+This structure (defined in <tt>&lt;linux/fs.h&gt;</tt>) is used by the
+kernel to track progress working through an 
+array of <tt>iovec</tt> structures.  
+<p>
+Any kernel code needing to submit asynchronous I/O needs to express it in
+terms of these structures.  The problem, from the perspective of the loop
+driver, is that <tt>struct iovec</tt> deals with user-space addresses.  But
+the BIO structures representing block I/O operations deal with physical
+addresses in the form of <tt>struct page</tt> pointers.  So there is an
+impedance mismatch between the two subsystems that makes AIO unusable for
+the loop driver.
+<p>
+Fixing that involves changing the way <tt>struct iov_iter</tt> works.  The
+<tt>iov</tt> pointer becomes a generic pointer called <tt>data</tt> that
+can point to an array of <tt>iovec</tt> structures (as before) or, instead,
+an array of kernel-supplied BIO structures.  Direct access to structure
+members by kernel code is discouraged in favor of a set of defined
+accessor operations; the <tt>iov_iter</tt> structure itself gains a pointer
+to an operations structure 
+that can be changed depending on whether <tt>iovec</tt> or <tt>bio</tt>
+structures are in use.  The
+end result is an enhanced <tt>iov_iter</tt> structure and surrounding
+support code that allows AIO operations to be expressed in either
+user-space (<tt>struct iovec</tt>) or kernel-space (<tt>struct bio</tt>)
+terms.  Quite a bit of code using this structure must be adapted to use the
+new accessor functions; at the higher levels, code that worked directly
+with <tt>iovec</tt> structures is changed to work with the
+<tt>iov_iter</tt> interface instead.
+<p>
+The next step is to make it possible to pass <tt>iov_iter</tt> structures
+directly into filesystem code.  That is done by adding two more functions
+to the (already large) <tt>file_operations</tt> structure:
+<p>
+<pre>
+    ssize_t (*read_iter) (struct kiocb *, struct iov_iter *, loff_t);
+    ssize_t (*write_iter) (struct kiocb *, struct iov_iter *, loff_t);
+</pre>
+<p>
+These functions are meant to work much like the existing
+<tt>aio_read()</tt> and <tt>aio_write()</tt> functions, except that they
+work with <tt>iov_iter</tt> structures rather than with <tt>iovec</tt>
+structures directly.  A filesystem supporting the new operations must be
+able to cope with I/O requests expressed directly in BIO structures —
+usually just a matter of bypassing the page-locking and mapping operations
+required for user-space addresses.  If these new operations are provided,
+the <tt>aio_*()</tt> functions will never be called and can be removed.
+<p>
+After that, the patch set adds a new interface to make it easy for kernel
+code to submit asynchronous I/O operations.  In short, it's a matter of
+allocating an I/O control block with:
+<p>
+<pre>
+    struct kiocb *aio_kernel_alloc(gfp_t gfp);
+</pre>
+<p>
+That block is filled in with the relevant information describing the
+desired operation and a pointer to a completion callback, then handed off
+to the AIO subsystem with: 
+<p>
+<pre>
+    int aio_kernel_submit(struct kiocb *iocb);
+</pre>
+<p>
+Once the operation is complete, the completion function  is called to
+inform the submitter of the final status. 
+<p>
+A substantial portion of the patch set is dedicated to converting
+filesystems to provide <tt>read_iter()</tt> and <tt>write_iter()</tt>
+functions.  In 
+most cases the patches are relatively small; most of the real work is done
+in generic code, so it is mostly a matter of changing declared types and
+making use of some of the new <tt>iov_iter</tt> accessor functions.  See <a
+href="/Articles/535178/">the ext4 patch</a> for an example of what needs to
+be done.
+<p>
+With all that infrastructural work done, actually speeding up the loop
+driver becomes straightforward.  If the backing store for a given loop
+device implements the new operations, the loop driver will use
+<tt>aio_kernel_submit()</tt> for each incoming I/O request.  As a result,
+requests can be run in parallel with, one hopes, a significant improvement
+in performance.
+<p>
+The patch set has been through several rounds of review, and most of the
+concerns raised would appear to have been addressed.  Dave is now asking
+that it be included in the linux-next tree, suggesting that he intends to
+push it into the mainline during the 3.9 or 3.10 development cycle.  Quite
+a bit of kernel code will be changed in the process, but almost no
+differences should be visible from user space — except that block loop
+devices will run a lot faster than they used to.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Block_layer-Loopback_device">Block layer/Loopback device</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Loopback_device">Loopback device</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/535034/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor535356"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Asynchronous block loop I/O</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 31, 2013 6:22 UTC (Thu)
+                               by <b>alonz</b> (subscriber, #815)
+                              [<a href="/Articles/535356/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">
+The end result is an enhanced iov_iter structure and surrounding support code that allows AIO operations to be expressed in either user-space (struct iovec) or kernel-space (struct bio) terms.
+</font>
+<p>
+Wouldn't it be better to just have the new functions (<tt>read_iter</tt> and <tt>write_iter</tt>) <em>always</em> take <tt>struct bio</tt>-based structures, and convert the <tt>struct iovec</tt>s to these structures in the generic <tt>aio_*</tt> functions?
+<p>
+This would result in a far cleaner abstraction, IMO&hellip;
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/535356/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor535837"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Asynchronous block loop I/O</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2013 16:21 UTC (Sat)
+                               by <b>butlerm</b> (subscriber, #13312)
+                              [<a href="/Articles/535837/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is great!  I would just like to cheer on the folks willing to take this on.  It is a much needed improvement.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/535837/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor535859"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Asynchronous block loop I/O</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2013 18:33 UTC (Sat)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/535859/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+the AIO subsystem was written to manage user-space requests
+</blockquote>
+... a task for which it is almost unused. glibc doesn't use it to implement the POSIX aio functionality. Is QEMU its only user?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/535859/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor535882"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Asynchronous block loop I/O</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2013 21:31 UTC (Sat)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/535882/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I thought Oracle was the big user of AIO<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/535882/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor535910"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Asynchronous block loop I/O</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2013 0:41 UTC (Sun)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/535910/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oh yes, the database. So the whole point of this aio infrastructure is... to seduce Oracle away from the evil of raw partitions? Is that *all*?<br>
+<p>
+It seems odd that glibc isn't using it to implement the user-side aio calls, is all. What's missing?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/535910/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor536032"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Asynchronous block loop I/O</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 4, 2013 16:40 UTC (Mon)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/536032/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, Linus doesn't merge major interfaces like that for just one vendor, they must be generally useful.  You could make the same kinds of arguments around btrfs or ocfs2 or the clustering lock manager or other features which were implemented by and for Oracle products primarily.<br>
+<p>
+I don't know enough about AIO to comment intelligently about why it's not exposed by glibc. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/536032/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor536901"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Asynchronous block loop I/O</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 8, 2013 7:01 UTC (Fri)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/536901/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IIRC the kernel AIO interface requires files to be opened with O_DIRECT, as well as page (or block?)-aligned I/O. So it's not really a general-purpose interface.<br>
+<p>
+There have been a number of people working on "buffered AIO" over the years, but so far nothing has been merged.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/536901/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

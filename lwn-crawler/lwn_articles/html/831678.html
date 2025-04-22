@@ -1,0 +1,684 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Four short stories about preempt_count() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/831678/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/831742/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/831678/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Four short stories about preempt_count()</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Benefits for LWN subscribers</b>
+<p>
+The primary benefit from <a href="/Promo/nst-nag5/subscribe">subscribing to LWN</a>
+       is helping to keep us publishing, but, beyond that, subscribers get
+       immediate access to all site content and access to a number of extra
+       site features.  Please sign up today!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 18, 2020</br>
+           </div>
+The discussion started out as a <a
+href="/ml/linux-mm/20200914204209.256266093@linutronix.de/">straightforward
+patch set</a> from Thomas Gleixner making a minor change to how preemption
+counting is handled.  The resulting discussion quickly spread out to cover
+a number of issues relevant to core-kernel development in surprisingly few
+messages; each of those topics merits a quick look, starting with how the
+preemption counter itself works.  Sometimes a simple count turns out to not
+be as simple as it seems.
+
+<p>
+<h4>preempt_count()</h4>
+<p>
+In a multitasking system like Linux, no thread of execution is guaranteed exclusive
+access to the processor for as long as it would like to run; the kernel can
+(almost) always preempt a running thread in favor of one that has a higher
+priority.  That new thread might be a different process, but it might also
+be a hardware interrupt or other outside event.  In order to properly
+coordinate the running of all of a system's tasks, the kernel must keep
+track of the current execution state, including anything that has been
+preempted or which might prevent a thread from being preempted.
+<p>
+One piece of the infrastructure for that tracking is the preemption
+counter that is stored with every task in the system.  That counter is
+accessed via the <a
+href="https://elixir.bootlin.com/linux/v5.8.9/source/include/asm-generic/preempt.h#L9"><tt>preempt_count()</tt>
+function</a> which, in its generic form, looks like this:
+<p>
+<pre>
+    static __always_inline int preempt_count(void)
+    {
+	return READ_ONCE(current_thread_info()-&gt;preempt_count);
+    }
+</pre>
+<p>
+The purpose of this counter is to describe the current state of whatever
+thread has been running, whether it can be preempted, and whether it is
+allowed to sleep.  To do so, it must track a number of different states, so 
+it is split into several sub-fields:
+<p>
+<blockquote>
+<img src="https://static.lwn.net/images/2020/preempt-count.svg" class="photo"
+width=450px alt="[preempt_count]" border=0>
+</blockquote>
+<p>
+The least-significant byte tracks the nesting of <tt>preempt_disable()</tt>
+calls — the number of times that preemption has been disabled so far.  The
+next three fields track the number of times the running thread has been
+interrupted by software, hardware, and non-maskable interrupts; they are
+all probably oversized for the number of interruptions that is likely to
+ever happen in real execution, but bits are not in short supply here.
+Finally, the most-significant bit indicates whether the kernel has decided
+that the current process needs to be scheduled out at the first
+opportunity.
+<p>
+A look at this value tells the kernel a fair amount about what is going on
+at any given time.  For example, any non-zero value for
+<tt>preempt_count</tt> indicates that the current thread cannot be
+preempted by the scheduler; either preemption has been disabled explicitly
+or the CPU is currently servicing some sort of interrupt.  In the same way,
+a non-zero value indicates that the current thread cannot sleep, since it
+is running in a context that must be allowed to run to completion.  The
+"reschedule needed" bit tells the kernel that there is a higher-priority
+process that should be given the CPU at the first opportunity.  This bit 
+cannot be set unless <tt>preempt_count</tt> is
+non-zero; otherwise the kernel would have simply preempted the process
+rather than setting the bit and waiting.
+<p>
+Code throughout the kernel uses <tt>preempt_count</tt> to make decisions
+about which actions are possible at any given time.  That, as it turns out,
+can be a bit of a problem for a few reasons.
+<p>
+<h4>Misleading counts</h4>
+<p>
+It is worth noting that <tt>preempt_disable()</tt> only applies when a
+thread is running within the kernel; user-space code is always
+preemptible.  In the distant past, the kernel did not support preemption of
+kernel-space code at all; when that feature was added (as a way of
+improving latency), it was also made configurable.  There are, as a result,
+still systems out there that are running without kernel preemption at all;
+it is a configuration that might make sense for some throughput-oriented
+workloads.
+<p>
+If kernel code cannot be preempted, there is little value in tracking calls
+to <tt>preempt_disable()</tt>; preemption is always disabled.  So the
+kernel doesn't waste its time maintaining that information; in such kernels,
+the preempt-disable count portion of <tt>preempt_count</tt> is always
+zero.  The <tt>preemptible()</tt> function will always return false, since
+the kernel is indeed not preemptible.  It all seems to make sense.
+<p>
+There are some problems that result from this behavior, though.  One is
+that functions like 
+in_atomic(), which indicates whether the 
+kernel is currently running in atomic context, do not behave in the same
+way.  On a kernel with preemption configured in, calling
+<tt>preempt_disable()</tt> will cause <tt>in_atomic()</tt> to return true;
+if preemption is configured out, <tt>preempt_disable()</tt> is a no-op and
+<tt>in_atomic()</tt> will return false.  This can cause
+<tt>in_atomic()</tt> to return false when, for example, spinlocks are held
+— a situation that is indeed an atomic context.
+<p>
+Gleixner, in his patch set, points out some other problems that result from
+this inconsistency and says that it is a problem overall:
+<p>
+<div class="BigQuote">
+	The lack of such indicators which work on all kernel configurations
+	is a constant source of trouble because developers either do not
+	understand the implications or try to work around this
+	inconsistency in weird ways.
+</div>
+<p>
+His solution is to remove the conditional compilation for the
+preemption-disable tracking, causing that counter to be maintained even in
+kernels that do not support kernel preemption.  There is a cost in terms of
+increased execution time and code size on machines running those
+configurations, but Gleixner says that his benchmark testing "<q>did not
+reveal any measurable impact</q>" from the change.
+<p>
+Linus Torvalds <a
+href="/ml/linux-mm/CAHk-=win80rdof8Pb=5k6gT9j_v+hz-TQzKPVastZDvBe9RimQ@mail.gmail.com/">was
+not convinced</a> about the value of this change, noting that the code
+generation for spinlocks is indeed better when preemption is not possible.
+Gleixner <a
+href="/ml/linux-mm/871rj4owfn.fsf@nanos.tec.linutronix.de/">reiterated</a>
+that the effect is not measurable, and Torvalds <a
+href="/ml/linux-mm/CAHk-=wj0eUuVQ=hRFZv_nY7g5ZLt7Fy3K7SMJL0ZCzniPtsbbg@mail.gmail.com/">conceded</a>
+that the patch set does make the code simpler and "<q>has its very clear
+charm</q>".
+
+<h4>Using preempt_count</h4>
+<p>
+
+Torvalds's larger complaint, though, was about code that uses
+<tt>preempt_count</tt> to change its behavior depending on the context.
+Such code, he <a
+href="/ml/linux-mm/CAHk-=wht7kAeyR5xEW2ORj7m0hibVxZ3t+2ie8vNHLQfdbN2_g@mail.gmail.com/">said</a>,
+is "<q>always simply fundamentally wrong</q>".  Code that changes its
+behavior depending on the context should have that context passed in as a
+parameter, he said, so that callers know what to expect.  Thus, the
+<tt>GFP_ATOMIC</tt> flag to the memory-allocation functions is acceptable,
+but changing behavior based on the return value from <tt>in_atomic()</tt>
+is not.
+<p>
+To an extent, there is general agreement with this position.  Gleixner's
+patch posting included a section with future plans to audit and fix callers of
+functions like <tt>in_atomic()</tt> where, he says, "<q>the number of
+buggy users is clearly the vast majority</q>".  Daniel Vetter <a
+href="/ml/linux-mm/CAKMK7uHAk9-Vy2cof0ws=DrcD52GHiCDiyHbjLd19CgpBU2rKQ@mail.gmail.com/">added</a>
+that, in his experience, "<q>code that tries to cleverly adjust its
+behaviour depending upon the context it's running in is harder to
+understand and blows up in more interesting ways</q>".
+<p>
+Paul McKenney, instead, <a
+href="/ml/linux-mm/20200916152956.GV29330@paulmck-ThinkPad-P72/">argued</a>
+that some code has to be able to operate properly in different contexts;
+the alternative would be an explosion of the API:
+<p>
+<div class="BigQuote">
+	Now perhaps you like the idea of call_rcu() for schedulable
+	contexts, call_rcu_nosched() when preemption is disabled,
+	call_rcu_irqs_are_disabled() when interrupts are disabled,
+	call_rcu_raw_atomic() from contexts where (for example) raw
+	spinlocks are held, and so on.  However, from what I can see, most
+	people instead consistently prefer that the RCU API instead be
+	consolidated.
+</div>
+<p>
+In response, Torvalds <a
+href="/ml/linux-mm/CAHk-=wjsMycgMHJrCmeetR3r+K5bpSRtmVWfd8iaoQCYd_VYAg@mail.gmail.com/">clarified</a>
+that he sees core-kernel code as having different requirements than the
+rest.  Core code has to deal with multiple contexts and should always do
+the right thing; code in drivers, instead, should not be changing its
+behavior based on its view of the context.
+<p>
+No hard conclusions were reached in this branch of the discussion.  It does
+seem likely, though, that code with context-dependent behavior will be
+looked at more closely in the future.
+
+<p>
+<a name="highmem"></a>
+<h4>Questioning high memory</h4>
+<p>
+One example of questionable use of <tt>preempt_count</tt>, in the crypto
+code, was pointed out early in the discussion by Gleixner; it changes a memory
+allocation mode in strange ways if it thinks that it's not currently
+preemptible.  After some discussion, it <a
+href="/ml/linux-mm/CAMj1kXHrDU50D08TwLfzz2hCK+8+C7KGPF99PphXtsOYZ-ff1g@mail.gmail.com/">turned
+out</a>, according to Ard Biesheuvel, that the real purpose had been to
+avoid using <tt>kmap_atomic()</tt> if possible.
+<p>
+For those who are not immediately familiar with <tt>kmap_atomic()</tt>, a
+look at <a href="/Articles/813201/">this article on high memory</a> might
+be helpful.  In short: 32-bit machines can only map a limited amount of
+memory into the kernel's address space; that amount is a little under 1GB
+on most architectures and configurations.  Any memory that is not directly
+mapped is deemed "high memory"; any page in high memory must be explicitly
+(and temporarily) mapped into the kernel before the kernel can access its
+contents.  The functions <tt>kmap()</tt> and <tt>kmap_atomic()</tt> exist
+to perform this mapping.
+<p>
+There are a few differences between those two functions, starting with the
+fact that only <tt>kmap_atomic()</tt> is callable in atomic context.
+Beyond that, though, <tt>kmap_atomic()</tt> is more efficient and is thus
+seen as being strongly
+preferable in any situation where it can be used, regardless of whether the caller
+was running in atomic context before the call (the CPU will always be
+running in atomic context while the mapping is in place).  As Biesheuvel
+pointed out, though, the documentation doesn't reflect this preference and
+encourages the use of <tt>kmap()</tt> instead, so that is what he did.
+<p>
+There is another reason to prefer <tt>kmap()</tt>, he added; a call
+to <tt>kmap_atomic()</tt> disables preemption even on 64-bit architectures,
+where high memory does not exist and no temporary mapping need be made.
+Using it would have resulted in much of 
+the WireGuard VPN code running with preemption disabled, entirely
+unnecessarily.  Torvalds <a
+href="/ml/linux-mm/CAHk-=wir6LZ=4gHt8VDdASv=TmEMjEUONuzbt=s+DyXPCvxaBA@mail.gmail.com/">pointed
+out</a> that there is a reason for this behavior: it is there to cause code to fail on
+64-bit machines if it does things that would not work on 32-bit machines
+where high memory does exist.  It is essentially a debugging aid that is
+making up for the fact that few developers run on 32-bit machines.
+<p>
+One way to optimize <tt>kmap_atomic()</tt> on 64-bit systems, Gleixner <a
+href="/ml/linux-mm/87een35woz.fsf@nanos.tec.linutronix.de/">said</a>, would
+be to make <tt>kmap_atomic()</tt> sections be preemptible — no longer
+atomic, in other words.  This approach has been taken in the realtime
+kernels, he said, and "<q>it's not that horrible</q>".  The cost
+would be to make <tt>kmap_atomic()</tt> a little slower on systems where
+high memory is in use.
+<p>
+That, it seems, is a cost that the development community is increasingly
+willing to pay; Torvalds <a
+href="/ml/linux-mm/CAHk-=wg_koVS=8bYurGCZ8zs=zDH5cOKVzFdoj4AkUWEW9mKjA@mail.gmail.com/">replied</a>
+that he would like to start removing <tt>kmap()</tt> support entirely.
+32-Bit systems will be around for some time yet, but they are increasingly
+unlikely to be used in situations where lots of memory is needed.  Or, as
+Torvalds put it: "<q>It's not that 32-bit is irrelevant, it's that
+32-bit with large amounts of memory is irrelevant</q>".  Every time that
+the cost of supporting high memory (which adds a significant amount of
+complexity to the memory-management subsystem) makes itself felt, the
+desire to take it out grows.
+<p>
+That said, nobody will be removing high-memory support right away.  But a
+change that penalizes high-memory systems in favor of the systems that are being deployed
+now, such as making <tt>kmap_atomic()</tt> no longer be atomic, is
+increasingly likely to be accepted.  Meanwhile, the other issues around
+<tt>preempt_count</tt> remain mostly unresolved, but it seems likely that,
+in the end, changes that bring correctness and reduce complexity will
+probably win out.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#kmap_atomic">kmap_atomic()</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-High_memory">Memory management/High memory</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Preemption">Preemption</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/831678/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor831895"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Four short stories about preempt_count()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2020 0:40 UTC (Sat)
+                               by <b>ms-tg</b> (subscriber, #89231)
+                              [<a href="/Articles/831895/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Great, we’ll-written and easy to follow! Thank you<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/831895/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor831904"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Four short stories about preempt_count()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2020 8:36 UTC (Sat)
+                               by <b>darwi</b> (subscriber, #131202)
+                              [<a href="/Articles/831904/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As Daniel succinctly stated, using in_interrupt(), in_irq(), or preemptible() in device drivers is either a symptom of horrible locking design or laziness. Usually it is both.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/831904/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor831926"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Four short stories about preempt_count()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2020 14:59 UTC (Sat)
+                               by <b>bluez_1134</b> (guest, #141537)
+                              [<a href="/Articles/831926/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Would love to see more of these &quot;stories&quot; that explains the rationale behind core kernel design and implementation details in a very approachable manner. Really helpful for kernel newbies like me. :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/831926/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor831930"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Four short stories about preempt_count()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2020 17:31 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/831930/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The story continues with Thomas posting kmap_temporary() and Linus liking everything but the name:<br>
+<p>
+<a href="https://lore.kernel.org/linux-mm/20200919091751.011116649@linutronix.de/">https://lore.kernel.org/linux-mm/20200919091751.011116649...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/831930/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor831935"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Four short stories about preempt_count()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2020 19:17 UTC (Sat)
+                               by <b>nevets</b> (subscriber, #11875)
+                              [<a href="/Articles/831935/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Small correction about the <i>"reschedule needed"</i> bit. At least on x86. It starts out set, and is cleared when we need a schedule.
+<p>
+Why?
+<p>
+Because if an interrupt comes in and detects a schedule is needed but sees that the other bits in <i>preempt_count</i> are set, it clears this bit and returns.
+<p>
+Back on the task that is running, when it does a preempt_enable() the code there can do a dec and test on <i>preempt_count</i>. If it is zero, then it should call the scheduler.
+<p>
+<pre>
+   if (dec_and_test(preempt_count))
+        schedule();
+</pre>
+<p>
+This lets us do a single test in preempt_enable() to know if it should schedule or not. Otherwise we need to do:
+<pre>
+  if (dec_and_test(preempt_count) &amp;&amp; need_resched_set())
+    schedule();
+</pre>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/831935/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor831937"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Four short stories about preempt_count()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2020 19:22 UTC (Sat)
+                               by <b>nevets</b> (subscriber, #11875)
+                              [<a href="/Articles/831937/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      See <tt>__preempt_count_dec_and_test()</tt> in <tt>arch/x86/include/asm/preempt.h</tt> for details.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/831937/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor831958"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Four short stories about preempt_count()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 20, 2020 10:13 UTC (Sun)
+                               by <b>rustylife</b> (subscriber, #102864)
+                              [<a href="/Articles/831958/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+great article mr @corbet, tyvm!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/831958/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor832467"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Four short stories about preempt_count()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2020 13:01 UTC (Fri)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/832467/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I do wish 32-bit systems with a quantity of memory appropriate for running Windows XP through 7 weren&#x27;t considered a weird niche that requires highmem voodoo until the end of time. Is that really the best option?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/832467/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor833697"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Four short stories about preempt_count()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 7, 2020 16:26 UTC (Wed)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/833697/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As I remember things from the Old Days, Linux is limited to about 1 GB of RAM in 32 bit modes. Unless you use that voodoo.<br>
+<p>
+I remember needing to do kernel rebuilds or picking the correct Redhat kernels to get 3 GB userspace.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/833697/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor833979"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Four short stories about preempt_count()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2020 15:34 UTC (Sun)
+                               by <b>mcortese</b> (guest, #52099)
+                              [<a href="/Articles/833979/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      32-bit systems suitable for old Windows versions are also suitable for old Linux versions. Newer Linux versions may well assume they are a weird niche.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/833979/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor834222"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Four short stories about preempt_count()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2020 9:49 UTC (Wed)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/834222/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem is those old versions did too. Memory between 896MB-4GB has always been a kludge under x86 Linux.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/834222/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor838200"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Four short stories about preempt_count()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 24, 2020 8:55 UTC (Tue)
+                               by <b>cyph</b> (subscriber, #50776)
+                              [<a href="/Articles/838200/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why does preempt_count need to be maintained for every thread? Since a non-preemptible thread can never be scheduled away, wouldn&#x27;t it be better to track preempt_count per-CPU instead?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/838200/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2020, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

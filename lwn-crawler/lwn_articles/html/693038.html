@@ -1,0 +1,397 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Two approaches to reference count hardening [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/693038/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/693094/">Return to the Security page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/693038/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Two approaches to reference count hardening</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Benefits for LWN subscribers</b>
+<p>
+The primary benefit from <a href="/Promo/nst-nag5/subscribe">subscribing to LWN</a>
+       is helping to keep us publishing, but, beyond that, subscribers get
+       immediate access to all site content and access to a number of extra
+       site features.  Please sign up today!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 7, 2016</br>
+           </div>
+Reference counts are used throughout the kernel to track the lifecycles of
+objects; when a reference count is decremented to zero, the kernel knows
+that the associated object is no longer in use and can be freed.  But
+reference counts, like almost any other mechanism, are subject to various
+sorts of bugs in their usage, and those bugs can lead to exploitable
+vulnerabilities.  So it is not surprising that developers have been
+interested in hardening the kernel against such bugs for years.
+<p>
+With reference counts, the most common bugs are failure to decrement a
+counter and decrementing the counter when a reference is not held.  Both
+often happen in error paths and can go undetected for a long time, since
+those paths are lightly tested at best and rarely executed.  An error
+situation might lead a function to return without performing a necessary
+decrement, or it may decrement a count that, in fact, had not yet been
+incremented.  But these bugs can pop up in non-error paths as well; they
+often go unnoticed, since they rarely result in obvious explosions.
+<p>
+Excessive decrements will cause an object to be freed before the last real
+reference has been released, leading to a classic use-after-free
+situation.  Such errors are often exploitable; see <a
+href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2016-4557">CVE-2016-4557</a>
+(and <a
+href="https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=8358b02bf67d3a5d8a825070e1aa73f25fb2e4c7">the
+associated fix</a>) for a recent example.  Excessive increments, if they can be
+provoked by an attacker, lead to a similar scenario: first the counter is
+overflowed, then decremented back to zero, leading to a premature freeing
+of the object.  <a
+href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2016-0728">CVE-2016-0728</a>
+(fixed with <a
+href="https://git.kernel.org/linus/38bd10c447f8e8980753149a8a65108159871df5">this
+commit</a>) is an example of the trouble that can ensue.  Needless to say,
+it would be 
+nice to catch this type of error before it gets to the point of being
+exploitable by an attacker.
+<p>
+As is so often the case, the oldest work in this area seems to have been
+done in the <a href="https://pax.grsecurity.net/">PaX</a> project.  This
+work starts with the kernel's <tt>atomic_t</tt> type, which is often used
+to implement reference counts.  The kernel provides a set of helper
+functions for performing operations (increments and decrements, for
+example) on <tt>atomic_t</tt> variables, so it makes sense to add overflow
+checks to those functions.  That must be done carefully, though, since
+operations on <tt>atomic_t</tt> variables are often in hot paths in the
+kernel; changes that increase the size of the <tt>atomic_t</tt> type are
+also unlikely to be accepted.
+<p>
+In the PaX case, the relevant operations, most of which are already
+implemented in assembly, are enhanced to perform overflow checks.  Often
+that is just a matter of checking the condition-code flags set by the
+processor as a result of the increment or decrement operation.  Should an
+overflow be 
+detected, the response is architecture-dependent, but results in some sort
+of kernel trap.  The overflow is undone, the process that overflowed the
+counter is killed, and a message is logged.
+<p>
+This checking catches attempts to exploit the overflow (excessive
+increment) bugs handily; that class of bugs is rendered unexploitable.
+Excessive decrements are harder to catch, since decrementing a reference
+count to zero is a part of normal operation.  If such a bug exists, though,
+it will almost certainly show itself by decrementing the counter below zero
+occasionally, even in normal operations.  With checking in place, somebody
+should notice the problem and it should be fixed.
+<p>
+There is one catch that makes this patch more invasive than one might
+expect, though: not all uses of <tt>atomic_t</tt> are reference counts.
+Other uses, which might legitimately wrap or go below zero, should not have
+this type of checking enabled.  To get to 
+that point, PaX adds <tt>atomic_unchecked_t</tt> type and converts a large
+set of in-kernel users; that leads to a fair amount of code churn.
+<p>
+Back in December, David Windsor <a href="/Articles/668876/">posted a
+version</a> of the PaX reference-count hardening patch set for review.  A
+certain amount of discussion followed, and some problems were pointed out,
+but there was little opposition to the idea in general.  Unfortunately,
+David vanished shortly thereafter and never followed up with a new version
+of the patches, so they remain outside of the mainline.  Nobody else has
+stepped up to carry this work forward.
+<p>
+More recently, Jann Horn has posted <a href="/Articles/692695/">a different
+approach</a> to the refcount problem.  Rather than change the
+<tt>atomic_t</tt> type, this patch set changes the <a
+href="/Articles/75920/"><tt>kref</tt> mechanism</a>, which exists
+explicitly for the implementation of reference counts.  This choice means
+that far fewer locations in the kernel will be protected, but it makes the
+patch set far less invasive and allows testing of the underlying ideas.
+<p>
+Jann's patch set eschews assembly tweaks in favor of entirely
+architecture-independent checking, a choice which, he later <a
+href="/Articles/693039/">conceded</a>, might not be the most efficient in
+the end. 
+With this patch in place, special things happen once a reference count
+reaches a maximum value (0x70000000): after that point, increments and
+decrements are no longer allowed.  In essence, a reference count that large
+is deemed to have already overflowed, so it is "pinned" at a high number to
+prevent premature object freeing.  No warnings are emitted, and no
+processes are killed.
+<p>
+While he had no objection to the patch as it was, Kees Cook <a
+href="/Articles/693040/">said</a> that he would rather see the checking
+done at the <tt>atomic_t</tt> level, since so much reference counting is
+done that way.  Greg Kroah-Hartman <a href="/Articles/693042/">agreed</a>,
+noting that the process of auditing <tt>atomic_t</tt> users would turn up a
+lot of places where <tt>kref</tt> should be used instead.  Adding overflow
+checking to <tt>atomic_t</tt> would protect <tt>kref</tt> automatically
+(since <tt>kref</tt>s are implemented as a wrapper around
+<tt>atomic_t</tt>), so it really 
+does seem that, despite the large number of changes required, this
+protection should be done at the lower level.
+<p>
+Of course, there is already a working patch set for the detection of
+<tt>atomic_t</tt> overflows: the PaX code.  The work to separate it out and
+turn it into a standalone kernel patch has even been done.  The flag-day
+nature of the change (all non-reference-count uses of <tt>atomic_t</tt>
+have to change when the semantics of <tt>atomic_t</tt> do) is will make
+the process of upstreaming this patch a bit harder, but such changes can be
+made when they are justified.  Closing off a class of errors that has
+demonstrably led to exploitable kernel vulnerabilities would seem like a
+reasonably strong justification.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#atomic_t">atomic_t</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Reference_counting">Reference counting</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security">Security</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Hardening">Hardening</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Linux_kernel">Linux kernel</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/693038/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor693829"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Two approaches to reference count hardening</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 8, 2016 9:55 UTC (Fri)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/693829/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+interested readers would probably like read Rodrigo Branco's blog entry we posted earlier this year: <a href="https://forums.grsecurity.net/viewtopic.php?f=7&amp;t=4173">https://forums.grsecurity.net/viewtopic.php?f=7&amp;t=4173</a> .<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693829/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor693851"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Two approaches to reference count hardening</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 8, 2016 12:00 UTC (Fri)
+                               by <b>xav</b> (guest, #18536)
+                              [<a href="/Articles/693851/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The more I play with Rust, the more I find huge C codebases brittle. C++ isn't way better in that respect.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693851/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693957"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Two approaches to reference count hardening</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2016 16:28 UTC (Sat)
+                               by <b>sorokin</b> (guest, #88478)
+                              [<a href="/Articles/693957/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; C++ isn't way better in that respect.</font><br>
+<p>
+I don't see how C++ isn't way better in that respect. Smart pointers are designed specifically to address the issue of missing/superfluous decrements.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693957/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor693959"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Two approaches to reference count hardening</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2016 18:13 UTC (Sat)
+                               by <b>xav</b> (guest, #18536)
+                              [<a href="/Articles/693959/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is better, but not way better. There are hundreds of ways to shoot yourself in the foot in C++, like dereferencing a null pointer or reading free memory, which are statically checked by the compiler in Rust.<br>
+But the kernel isn't written in Rust nor in C++, so the point is moot.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693959/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor693872"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">UBSAN and no unsigned atomic_t</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 8, 2016 15:14 UTC (Fri)
+                               by <b>abatters</b> (<b>&#x272D; supporter &#x272D;</b>, #6932)
+                              [<a href="/Articles/693872/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have some out-of-tree kernel code that increments an atomic_t to assign a 32-bit unsigned tag to an object, and overflow after a few billion tags is perfectly fine.  But I recently enabled UBSAN, and it complains because atomic_t is signed, and signed overflow is undefined behavior in C, even though I am using the result as unsigned.  The kernel does not provide an unsigned atomic_t type.  Time to use C11 atomics instead?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693872/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor693972"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A path to exploitation...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 10, 2016 2:46 UTC (Sun)
+                               by <b>zx2c4</b> (subscriber, #82519)
+                              [<a href="/Articles/693972/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Last time I looked, every time you opened one of those files in /proc/net, the reference count for the network namespace was incremented. Then, when closing the file, it was decremented again. So, if you can open a lot of files, you can ostensibly make that reference counter wrap, and then have a nice use-after-free vuln. Exploitation isn't that hard. The last time I was playing with this, my choice for getting past rlimit on max open files was to make a unix socket, send the fd over that socket, but not recv it on the other end, and then close it on the sending end. Then, it wouldn't count toward the rlimit, and it wouldn't be closed either. It's been a little while since I looked at that code, so I'm not sure how much of the above has been patched. But, anyway, obvious security problem with those reference counters.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/693972/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

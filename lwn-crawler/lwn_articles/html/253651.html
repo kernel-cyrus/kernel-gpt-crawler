@@ -1,0 +1,1752 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The design of preemptible read-copy-update [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/253651/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/253176/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/253651/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The design of preemptible read-copy-update</h1>
+</div>
+<div class="ArticleText">
+<div class="GAByline">
+           <p>October 8, 2007</p>
+           <p>This article was contributed by Paul McKenney</p>
+           </div>
+This document walks through the design of preemptible RCU.
+
+<H2>Introduction</H2>
+
+<P>Read-copy update (RCU) is a synchronization API that is sometimes used
+in place of reader-writer locks.  RCU's read-side primitives offer
+extremely low overhead and deterministic execution time.
+The downside of this deterministic read-side execution time is that
+RCU updaters cannot block RCU readers.
+This means that RCU updaters can be expensive, as they must leave
+old versions of the data structure in place to accommodate pre-existing
+readers.
+Furthermore, these old versions must be reclaimed after all pre-existing
+readers complete.
+A time period during which all such pre-existing readers complete is
+called a "grace period".
+
+<P>The Linux kernel offers a number of RCU implementations, the first
+such implementation being called "Classic RCU".
+More material introducing RCU may be found in the
+<code>Documentation/RCU</code> directory in any recent Linux source tree,
+or at
+<A HREF="http://www.rdrop.com/users/paulmck/RCU">Paul McKenney's RCU page</A>.
+
+<P>The RCU implementation for the -rt patchset is unusual in that
+it permits read-side critical
+sections to be preempted and to be blocked waiting for locks.
+However, it does not handle general blocking
+(for example, via the <code>wait_event()</code> primitive):
+if you need that, you should instead use
+<A HREF="http://lwn.net/Articles/202847/">SRCU</A>.
+In contrast to SRCU,
+preemptible RCU only permits blocking within primitives that are
+both subject to priority inheritance and non-blocking in a
+non-<code>CONFIG_PREEMPT</code> kernel.
+This ability to acquire blocking locks and to be preempted within
+RCU read-side critical sections is required for the aggressive real-time
+capabilities provided by Ingo Molnar's -rt patchset.
+However, the initial preemptible RCU implementation
+that was added to -rt in August 2005 has some limitations, including:
+<OL>
+<LI>	Its read-side primitives cannot be called from within
+	non-maskable interrupt (NMI) or systems-management interrupt
+	handlers.
+<p>
+<LI>	Its read-side primitives use both atomic instructions and
+	memory barriers, both of which have excessive overhead.
+<p>
+<LI>	It does no priority boosting of RCU read-side critical
+	sections (however, this has been described
+	<A HREF="http://lwn.net/Articles/220677/">previously</A>,
+	and so will not be discussed further here).
+</OL>
+
+<P>The new preemptible RCU implementation that was submitted to LKML (most
+recently with <a href="http://lkml.org/lkml/2007/9/10/213">this patch</a> as of this writing)
+removes these limitations, and this document describes its design.
+
+<A NAME="Quick Quiz 1"></a><P><B>Quick Quiz 1</B>:
+Why is it important that blocking primitives
+called from within a preemptible-RCU read-side critical section be
+subject to priority inheritance?
+
+<A NAME="Quick Quiz 2"></a><P><B>Quick Quiz 2</B>:
+Could the prohibition against using primitives
+that would block in a non-<code>CONFIG_PREEMPT</code> kernel be lifted,
+and if so, under what conditions?
+
+<H2>Conceptual RCU</H2>
+
+<P>Understanding and validating an RCU implementation is much easier given
+a view of RCU at the lowest possible level.
+In contrast with other RCU documentation, the goal of this section is
+not to help you understand how to use RCU, but rather to understand the
+most basic concurrency requirements that an RCU implementation must
+support.
+
+<P>RCU implementations must obey the following rule: if any
+statement in a given RCU read-side critical section precedes a
+grace period, then all statements in that RCU read-side critical
+section must complete before that grace period ends.
+
+<P>This is illustrated by the following picture, where time advances
+from left to right:
+
+<P>
+<blockquote>
+<img src="https://static.lwn.net/images/ns/kernel/rcu/GracePeriodBad.png" width=519 height=264
+alt="[Grace period]">
+</blockquote>
+
+<P>The red "Removal" box represents the update-side critical section that
+modifies the RCU-protected data structure, for example, via
+<code>list_del_rcu()</code>; the large yellow "Grace Period" box
+represents a grace period (surprise!) which might be invoked via
+<code>synchronize_rcu()</code>, and the green "Reclamation" box
+represents freeing the affected data element,
+perhaps via <code>kfree()</code>.
+The blue "Reader" boxes each represent an RCU read-side critical section,
+for example, beginning with <code>rcu_read_lock()</code> and ending with
+<code>rcu_read_unlock()</code>.
+The red-rimmed "Reader" box is an example of an illegal situation:
+any so-called RCU implementation that permits a read-side critical section
+to completely overlap a grace period is buggy, since the updater might
+free up memory that this reader is still using.
+
+<P>So, what is the poor RCU implementation to do in this situation?
+
+<P>It must extend the grace period, perhaps as shown below:
+
+<P>
+<blockquote>
+<img src="https://static.lwn.net/images/ns/kernel/rcu/GracePeriodGood.png" WIDTH=525 height=261
+alt="[Grace period]">
+</blockquote>
+
+<P>In short, the RCU implementation must ensure that any
+RCU read-side critical sections in progress at the start of a given grace
+period have completely finished, memory operations and all, before that
+grace period is permitted to complete.
+This fact allows RCU validation to be extremely focused: simply demonstrate
+that any RCU read-side critical section in progress at the beginning of
+a grace period must terminate before that grace period ends, along with
+sufficient barriers to prevent either the compiler or the CPU from undoing
+the RCU implementation's work.
+
+<H2>Overview of Preemptible RCU Algorithm</H2>
+
+This section focuses on a specific implementation of preemptible RCU.
+Many other implementations are possible, and for additional discussion
+of these other possibilities, please see the
+<A HREF="http://www.rdrop.com/users/paulmck/RCU/OLSrtRCU.2006.08.11a.pdf">
+2006 OLS paper</A> or the
+<A HREF="http://www.rdrop.com/users/paulmck/RCU/realtimeRCU.2005.04.23a.pdf">
+2005 linux.conf.au paper</A>.
+
+<P>Instead, this article focuses on the general approach, the data structures,
+the grace-period state machine, and a walk through the read-side primitives.
+
+<H3>General Approach</H3>
+
+Because this implementation of preemptible RCU does not require memory
+barriers in <code>rcu_read_lock()</code> and <code>rcu_read_unlock()</code>,
+a multi-stage grace-period detection algorithm is required.
+Instead of using a single <code>wait</code> queue of callbacks
+(which has sufficed for earlier RCU implementations), this implementation
+uses an array of <code>wait</code> queues, so that RCU callbacks
+are enqueued on each element of this array in turn.
+This difference in callback flow is shown in the following figure
+for a preemptible RCU implementation with two waitlist stages per grace period
+(in contrast, 
+<A HREF="http://lkml.org/lkml/2007/9/10/213">the September 10 patch</A>
+uses four waitlist stages):
+
+<P>
+<blockquote>
+<img src="https://static.lwn.net/images/ns/kernel/rcu/RCUpreemptListsCompare.png" WIDTH=534
+height=570 alt="[RCU preempt lists]">
+</blockquote>
+
+<P>Given two stages per grace period, any pair of
+stages forms a full grace period.
+Similarly, in an implementation with four stages per grace period,
+any sequence of four stages would form a full grace period.
+
+<P>To determine when a grace-period stage can end,
+preemptible RCU uses a per-CPU two-element <code>rcu_flipctr</code> array
+that tracks in-progress RCU read-side critical sections.
+One element of a given CPU's <code>rcu_flipctr</code> array tracks
+old RCU read-side critical sections, in other words, critical sections
+that started before the current grace-period stage.
+The other element tracks new RCU read-side critical
+sections, namely those starting during the current grace-period stage.
+The array elements switch roles at the beginning of each new grace-period
+stage, as follows:
+
+<P>
+<blockquote>
+<img src="https://static.lwn.net/images/ns/kernel/rcu/RCUpreemptCounterFlip.png" WIDTH=529
+height=404 alt="[RCU counter flip]">
+</blockquote>
+
+<P>During the first stage on the left-hand side of the above figure,
+<code>rcu_flipctr[0]</code> tracks the new
+RCU read-side critical sections, and is therefore incremented by
+<code>rcu_read_lock()</code> and decremented by <code>rcu_read_unlock()</code>.
+Similarly, <code>rcu_flipctr[1]</code> tracks the old RCU read-side
+critical sections (those that started during earlier stages), and
+is therefore decremented by <code>rcu_read_unlock()</code> and never
+incremented at all.
+
+<P>Because each CPU's old <code>rcu_flipctr[1]</code> elements are never
+incremented, their sum across all CPUs must eventually go to zero,
+although preemption in the midst of an RCU read-side critical section might
+cause any individual counter to remain non-zero or even to go negative.
+For example, suppose that a task calls <code>rcu_read_lock()</code> on
+one CPU, is preempted, resumes on another CPU, and then calls
+<code>rcu_read_unlock()</code>.
+The first CPU's counter will then be +1 and the second CPU's counter
+will be -1, however, they will still sum to zero.
+Regardless of possible preemption, when the sum of the old counter
+elements does go to zero, it is safe to move to the next grace-period
+stage, as shown on the right-hand side of the above figure.
+
+<P>In this second stage, the elements of each CPU's <code>rcu_flipctr</code>
+counter array switch roles.
+The <code>rcu_flipctr[0]</code> counter now tracks the old RCU read-side
+critical sections, in other words, the ones that started during
+grace period stage 0.
+Similarly, the <code>rcu_flipctr[1]</code> counter now tracks the new
+RCU read-side critical sections that start in grace period stage 1.
+Therefore, <code>rcu_read_lock()</code> now increments
+<code>rcu_flipctr[1]</code>, while <code>rcu_read_unlock()</code> still
+might decrement either counter.
+Specifically, if the matching <code>rcu_read_lock()</code> executed
+during grace-period stage 0 (the old stage at this point), then
+<code>rcu_read_unlock()</code> must decrement <code>rcu_flipctr[0]</code>,
+but if the matching <code>rcu_read_lock()</code> executed during
+grace-period stage 1 (the new stage), then <code>rcu_read_unlock()</code>
+must instead decrement <code>rcu_flipctr[1]</code>.
+
+<P>The critical point is that all <code>rcu_flipctr</code> elements
+tracking the old RCU read-side critical sections must strictly decrease.
+Therefore, once the sum of these old counters reaches zero,
+it cannot change.
+
+<P>The <code>rcu_read_lock()</code> primitive uses the bottom
+bit of the current grace-period counter
+(<code>rcu_ctrlblk.completed &amp; 0x1</code>) to index the
+<code>rcu_flipctr</code> array,
+and records this index in the task structure.
+The matching <code>rcu_read_unlock()</code> uses this recorded
+value to ensure that it decrements a counter corresponding to
+the one that the matching <code>rcu_read_lock()</code> incremented.
+Of course, if the RCU read-side critical section has been preempted,
+<code>rcu_read_lock()</code> might be decrementing the counter
+belonging to a different CPU than the one whose counter was incremented
+by the matching <code>rcu_read_lock()</code>.
+
+<P>Each CPU also maintains <code>rcu_flip_flag</code> and
+and <code>rcu_mb_flag</code> per-CPU variables.
+The <code>rcu_flip_flag</code> variable is used to synchronize the
+start of each grace-period stage: once a given CPU has responded
+to its <code>rcu_flip_flag</code>, it must refrain from incrementing
+the <code>rcu_flip</code> array element that now corresponds to
+the old grace-period stage.
+The CPU that advances the counter (<code>rcu_ctrlblk.completed</code>)
+changes the value of each CPU's <code>rcu_mb_flag</code> to
+<code>rcu_flipped</code>, but a given <code>rcu_mb_flag</code>
+may be changed back to <code>rcu_flip_seen</code> only by
+the corresponding CPU.
+
+The <code>rcu_mb_flag</code> variable is used to force each CPU to
+execute a memory barrier at the end of each grace-period stage.
+These memory barriers are required to ensure that memory accesses from
+RCU read-side critical sections ending in a given grace-period stage
+are ordered before the end of that stage.
+This approach gains the benefits of memory barriers at the
+beginning and end of each RCU read-side critical section without
+having to actually execute all those costly barriers.
+The <code>rcu_mb_flag</code> is set to <code>rcu_mb_needed</code> by
+the CPU that detects that the sum of the old counters is zero,
+but a given <code>rcu_mb_flag</code> is changed back to
+<code>rcu_mb_done</code> only by the corresponding CPU, and even
+then only after executing a memory barrier.
+
+<H3>Data Structures</H3>
+
+This section describes preemptible RCU's major data structures, including
+<code>rcu_ctrlblk</code>, <code>rcu_data</code>, <code>rcu_flipctr</code>,
+<code>rcu_try_flip_state</code>, <code>rcu_try_flip_flag</code>, and
+<code>rcu_mb_flag</code>.
+
+<H4>rcu_ctrlblk</H4>
+
+<P>The <code>rcu_ctrlblk</code> structure is global, and holds the lock
+that protects grace-period processing (<code>fliplock</code>) as well
+as holding the global grace-period counter (<code>completed</code>).
+The least-significant bit of <code>completed</code> is used by
+<code>rcu_read_lock()</code> to select which set of counters to increment.
+
+<H4>rcu_data</H4>
+
+<P>The <code>rcu_data</code> structure is a per-CPU structure, and
+contains the following fields:
+
+<UL>
+<LI>	<code>lock</code> guards the remaining fields in this structure.
+<LI>	<code>completed</code> is used to synchronize CPU-local
+	activity with the global counter in <code>rcu_ctrlblk</code>.
+<LI>	<code>waitlistcount</code> is used to maintain a count of the
+	number of non-empty wait-lists.
+	This field is used by <code>rcu_pending()</code> to help determine
+	if this CPU has any RCU-related work left to be done.
+<LI>	<code>nextlist</code>, <code>nextail</code>, <code>waitlist</code>,
+	<code>waittail</code>, <code>donelist</code>, and
+	<code>donetail</code> form lists containing
+	RCU callbacks that are waiting for invocation at the end
+	of a grace period.
+	Each list has a tail pointer, allowing <code>O(1)</code> appends.
+	The RCU callbacks flow through these lists as shown below.
+<LI>	<code>rcupreempt_trace</code> accumulates statistics.
+</UL>
+
+<img src="https://static.lwn.net/images/ns/kernel/rcu/RCUpreemptLists.png" WIDTH=293 height=587
+align="right" hspace=3 alt="[Preempt lists]">
+
+
+The figure on the right shows how RCU callbacks flow through a given
+<code>rcu_data</code> structure's lists, from creation by
+<code>call_rcu()</code> through invocation by
+<code>rcu_process_callbacks()</code>.
+Each blue arrow represents one pass by the grace-period state machine,
+which is described in a later section.
+
+<P>
+
+<H4>rcu_flipctr</H4>
+
+As noted earlier, the <code>rcu_flipctr</code>
+per-CPU array of counters contains the
+counter pairs that track outstanding RCU read-side critical sections.
+Any given counter in this array can go negative, for example, when
+a task is migrated to a different CPU in the middle of an RCU
+read-side critical section.
+However, the sum of the counters will
+still remain positive throughout the corresponding grace period, and will
+furthermore go to zero at the end of that grace period.
+
+<H4>rcu_try_flip_state</H4>
+
+The <code>rcu_try_flip_state</code> variable tracks the current state of
+the grace-period state machine, as described in the next section.
+
+<H4>rcu_try_flip_flag</H4>
+
+The <code>rcu_try_flip_flag</code> per-CPU variable alerts the corresponding
+CPU that the grace-period counter has recently been incremented, and
+also records that CPU's acknowledgment.
+Once a given CPU has acknowledged the counter flip, all subsequent actions
+taken by <code>rcu_read_lock()</code> on that CPU must account for the
+new value of the grace-period counter, in particular, when incrementing
+<code>rcu_flipctr</code> in <code>rcu_read_lock()</code>.
+
+<H4>rcu_mb_flag</H4>
+
+The <code>rcu_mb_flag</code> per-CPU variable alerts the corresponding
+CPU that it must execute a memory barrier in order for the grace-period
+state machine to proceed, and also records that CPU's acknowledgment.
+Once a given CPU has executed its memory barrier, the memory operations
+of all prior RCU read-side critical sections will be visible to any code sequenced
+after the corresponding grace period.
+
+<p>
+<H3>Grace-Period State Machine</H3>
+
+This section gives an overview of the states executed by the grace-period
+state machine, and then walks through the relevant code.
+
+<H4>Grace-Period State Machine Overview</H4>
+
+The state (recorded in <code>rcu_try_flip_state</code>)
+can take on the following values:
+
+<UL>
+<LI>	<code>rcu_try_flip_idle_state</code>:  the grace-period state
+	machine is idle due to there being no RCU grace-period activity.
+	The <code>rcu_ctrlblk.completed</code> grace-period counter
+	is incremented upon exit from this state, and all of the
+	per-CPU <code>rcu_flip_flag</code> variables are set
+	to <code>rcu_flipped</code>.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+<LI>	<code>rcu_try_flip_waitack_state</code>:
+	waiting for all CPUs to acknowledge that they have seen the
+	previous state's increment, which they do by setting their
+	<code>rcu_flip_flag</code> variables to <code>rcu_flip_seen</code>.
+	Once all CPUs have so acknowledged, we know that the old
+	set of counters can no longer be incremented.
+<p>
+<LI>	<code>rcu_try_flip_waitzero_state</code>:
+	waiting for the old counters to sum to zero.
+	Once the counters sum to zero, all of the per-CPU
+	<code>rcu_mb_flag</code> variables are set to
+	<code>rcu_mb_needed</code>.
+<p>
+<LI>	<code>rcu_try_flip_waitmb_state</code>:
+	waiting for all CPUs to execute a memory-barrier instruction,
+	which they signify by setting their <code>rcu_mb_flag</code>
+	variables to <code>rcu_mb_done</code>.
+	Once all CPUs have done so, all CPUs are guaranteed to see
+	the changes made by any RCU read-side critical section that
+	started before the beginning of the corresponding grace period,
+	even on weakly ordered machines.
+</UL>
+
+<P>The grace period state machine cycles through these states sequentially,
+as shown in the following figure.
+
+<P>
+<blockquote>
+<IMG SRC="/images/ns/kernel/rcu/RCUpreemptStates.png" WIDTH=487 height=566 alt="[Preempt states]">
+</blockquote>
+
+<P>The next figure shows how the state machine operates over time.
+The states are shown along the figure's left-hand side and the relevant events
+are shown along the timeline, with time proceeding in the downward direction.
+We will elaborate on this figure when we validate the algorithm in
+a later section.
+
+<P>
+<blockquote>
+<IMG SRC="/images/ns/kernel/rcu/RCUpreemptTimeline.png" WIDTH=458
+height=525 alt="[preempt timeline]">
+</blockquote>
+
+<P>In the meantime, here are some important things to note:
+
+<OL>
+<LI>	The increment of the <code>rcu_ctrlblk.completed</code> counter
+	might be observed at different times by different CPUs, as
+	indicated by the blue oval.  However, after a given
+	CPU has acknowledged the increment, it is required to
+	use the new counter.
+	Therefore, once all CPUs have acknowledged, the old counter
+	can only be decremented.
+<p>
+<LI>	A given CPU advances its callback lists just before
+	acknowledging the counter increment.
+<p>
+<LI>	The blue oval represents the fact that memory reordering
+	might cause different CPUs to see the increment at
+	different times.
+	This means that a given CPU might believe that some
+	other CPU has jumped the gun, using the new value of the counter
+	before the counter was actually incremented.
+	In fact, in theory, a given CPU might see the next increment of the
+	<code>rcu_ctrlblk.completed</code> counter as early as
+	the last preceding memory barrier.
+	(Note well that this sentence is very imprecise.
+	If you intend to do correctness proofs involving memory barriers,
+	please see the
+	<A HREF="#Formal Validation">section on formal validation</A>.)
+<p>
+<LI>	Because <code>rcu_read_lock()</code> does not contain any
+	memory barriers, the corresponding RCU read-side critical
+	sections might be reordered by the CPU to follow the
+	<code>rcu_read_unlock()</code>.
+	Therefore, the memory barriers are required to ensure
+	that the actions of the RCU read-side critical sections
+	have in fact completed.
+<p>
+<LI>	As we will see, the fact that different CPUs can see the
+	counter flip happening at different times means that a
+	single trip through the state machine is not sufficient
+	for a grace period: multiple trips are required.
+</OL>
+
+<H4>Grace-Period State Machine Walkthrough</H4>
+
+This section walks through the C code that implements the RCU
+grace-period state machine, which is invoked from the scheduling-clock
+interrupt, which invokes <code>rcu_check_callbacks()</code> with
+irqs (and thus also preemption) disabled.
+This function is implemented as follows:
+<p>
+<blockquote>
+<PRE>
+  1 void rcu_check_callbacks(int cpu, int user)
+  2 {
+  3   unsigned long flags;
+  4   struct rcu_data *rdp = RCU_DATA_CPU(cpu);
+  5 
+  6   rcu_check_mb(cpu);
+  7   if (rcu_ctrlblk.completed == rdp-&gt;completed)
+  8     rcu_try_flip();
+  9   spin_lock_irqsave(&amp;rdp-&gt;lock, flags);
+ 10   RCU_TRACE_RDP(rcupreempt_trace_check_callbacks, rdp);
+ 11   __rcu_advance_callbacks(rdp);
+ 12   spin_unlock_irqrestore(&amp;rdp-&gt;lock, flags);
+ 13 }
+</PRE>
+</blockquote>
+<p>
+Line&nbsp;4 selects the <code>rcu_data</code> structure corresponding
+to the current CPU, and line&nbsp;6 checks to see if this CPU needs
+to execute a memory barrier to advance the state machine out of the
+<code>rcu_try_flip_waitmb_state</code> state.
+Line&nbsp;7 checks to see if this CPU is already aware of the
+current grace-period stage number, and line&nbsp;8 attempts to advance the
+state machine if so.
+Lines&nbsp;9 and 12 hold the <code>rcu_data</code>'s lock, and
+line&nbsp;11 advances callbacks if appropriate.
+Line&nbsp;10 updates RCU tracing statistics, if enabled via
+<code>CONFIG_RCU_TRACE</code>.
+
+<P>The <code>rcu_check_mb()</code> function executes a memory barrier
+as needed:
+<p>
+<blockquote>
+<PRE>
+  1 static void rcu_check_mb(int cpu)
+  2 {
+  3   if (per_cpu(rcu_mb_flag, cpu) == rcu_mb_needed) {
+  4     smp_mb();
+  5     per_cpu(rcu_mb_flag, cpu) = rcu_mb_done;
+  6   }
+  7 }
+</PRE>
+</blockquote>
+<p>
+Line&nbsp;3 checks to see if this CPU needs to execute a memory barrier,
+and, if so, line&nbsp;4 executes one and line&nbsp;5 informs the state
+machine.
+Note that this memory barrier ensures that any CPU that sees the new
+value of <code>rcu_mb_flag</code> will also see the memory operations
+executed by this CPU in any prior RCU read-side critical section.
+
+<P>The <code>rcu_try_flip()</code> function implements the top level of
+the RCU grace-period state machine:
+<p>
+<blockquote>
+<PRE>
+  1 static void rcu_try_flip(void)
+  2 {
+  3   unsigned long flags;
+  4 
+  5   RCU_TRACE_ME(rcupreempt_trace_try_flip_1);
+  6   if (unlikely(!spin_trylock_irqsave(&amp;rcu_ctrlblk.fliplock, flags))) {
+  7     RCU_TRACE_ME(rcupreempt_trace_try_flip_e1);
+  8     return;
+  9   }
+ 10   switch (rcu_try_flip_state) {
+ 11   case rcu_try_flip_idle_state:
+ 12     if (rcu_try_flip_idle())
+ 13       rcu_try_flip_state = rcu_try_flip_waitack_state;
+ 14     break;
+ 15   case rcu_try_flip_waitack_state:
+ 16     if (rcu_try_flip_waitack())
+ 17       rcu_try_flip_state = rcu_try_flip_waitzero_state;
+ 18     break;
+ 19   case rcu_try_flip_waitzero_state:
+ 20     if (rcu_try_flip_waitzero())
+ 21       rcu_try_flip_state = rcu_try_flip_waitmb_state;
+ 22     break;
+ 23   case rcu_try_flip_waitmb_state:
+ 24     if (rcu_try_flip_waitmb())
+ 25       rcu_try_flip_state = rcu_try_flip_idle_state;
+ 26   }
+ 27   spin_unlock_irqrestore(&amp;rcu_ctrlblk.fliplock, flags);
+ 28 }
+</PRE>
+</blockquote>
+<p>
+Line&nbsp;6 attempts to acquire the global RCU state-machine lock,
+and returns if unsuccessful.
+Lines;&nbsp;5 and 7 accumulate RCU-tracing statistics (again, if
+<code>CONFIG_RCU_TRACE</code> is enabled).
+Lines&nbsp;10 through 26 execute the state machine,
+each invoking a function specific to that state.
+Each such function returns 1 if the state needs to be advanced and
+0 otherwise.
+In principle, the next state could be executed immediately,
+but in practice we choose not to do so in order to reduce latency.
+Finally, line&nbsp;27 releases the global RCU state-machine lock
+that was acquired by line&nbsp;6.
+
+<P>The <code>rcu_try_flip_idle()</code> function is called when the
+RCU grace-period state machine is idle, and is thus responsible for
+getting it started when needed.
+Its code is as follows:
+<p>
+<blockquote>
+<PRE>
+  1 static int rcu_try_flip_idle(void)
+  2 {
+  3   int cpu;
+  4 
+  5   RCU_TRACE_ME(rcupreempt_trace_try_flip_i1);
+  6   if (!rcu_pending(smp_processor_id())) {
+  7     RCU_TRACE_ME(rcupreempt_trace_try_flip_ie1);
+  8     return 0;
+  9   }
+ 10   RCU_TRACE_ME(rcupreempt_trace_try_flip_g1);
+ 11   rcu_ctrlblk.completed++;
+ 12   smp_mb();
+ 13   for_each_cpu_mask(cpu, rcu_cpu_online_map)
+ 14     per_cpu(rcu_flip_flag, cpu) = rcu_flipped;
+ 15   return 1;
+ 16 }
+</PRE>
+</blockquote>
+<p>
+Line&nbsp;6 checks to see if there is any RCU grace-period work
+pending for this CPU, and if not, line&nbsp;8 leaves, telling
+the top-level state machine to remain in the idle state.
+If instead there is work to do, line&nbsp;11 increments the
+grace-period stage counter, line&nbsp;12 does a memory barrier
+to ensure that CPUs see the new counter before they see the
+request to acknowledge it, and lines&nbsp;13 and 14 set all of
+the online CPUs' <code>rcu_flip_flag</code>.
+Finally, line&nbsp;15 tells the top-level state machine to
+advance to the next state.
+
+<P>The <code>rcu_try_flip_waitack()</code> function checks to see
+if all online CPUs have acknowledged the counter flip (AKA "increment",
+but called "flip" because the bottom bit, which <code>rcu_read_lock()</code>
+uses to index the <code>rcu_flipctr</code> array, <I>does</I> flip).
+If they have, it tells the top-level grace-period state machine to
+move to the next state.
+<p>
+<blockquote>
+<PRE>
+  1 static int rcu_try_flip_waitack(void)
+  2 {
+  3   int cpu;
+  4 
+  5   RCU_TRACE_ME(rcupreempt_trace_try_flip_a1);
+  6   for_each_cpu_mask(cpu, rcu_cpu_online_map)
+  7     if (per_cpu(rcu_flip_flag, cpu) != rcu_flip_seen) {
+  8       RCU_TRACE_ME(rcupreempt_trace_try_flip_ae1);
+  9       return 0;
+ 10     }
+ 11   smp_mb();
+ 12   RCU_TRACE_ME(rcupreempt_trace_try_flip_a2);
+ 13   return 1;
+ 14 }
+</PRE>
+</blockquote>
+<p>
+<P>Line&nbsp;6 cycles through all of the online CPUs, and line&nbsp;7
+checks to see if the current such CPU has acknowledged the last counter
+flip.
+If not, line&nbsp;9 tells the top-level grace-period state machine to
+remain in this state.
+Otherwise, if all online CPUs have acknowledged, then line&nbsp;11
+does a memory barrier to ensure that we don't check for zeroes before
+the last CPU acknowledges.
+This may seem dubious, but CPU designers have sometimes done strange
+things.
+Finally, line&nbsp;13 tells the top-level grace-period state machine
+to advance to the next state.
+
+<P>The <code>rcu_try_flip_waitzero()</code> function checks to see if
+all pre-existing RCU read-side critical sections have completed,
+telling the state machine to advance if so.
+
+<p>
+<blockquote>
+<pre>
+  1 static int rcu_try_flip_waitzero(void)
+  2 {
+  3   int cpu;
+  4   int lastidx = !(rcu_ctrlblk.completed &amp; 0x1);
+  5   int sum = 0;
+  6 
+  7   RCU_TRACE_ME(rcupreempt_trace_try_flip_z1);
+  8   for_each_possible_cpu(cpu)
+  9     sum += per_cpu(rcu_flipctr, cpu)[lastidx];
+ 10   if (sum != 0) {
+ 11     RCU_TRACE_ME(rcupreempt_trace_try_flip_ze1);
+ 12     return 0;
+ 13   }
+ 14   smp_mb();
+ 15   for_each_cpu_mask(cpu, rcu_cpu_online_map)
+ 16     per_cpu(rcu_mb_flag, cpu) = rcu_mb_needed;
+ 17   RCU_TRACE_ME(rcupreempt_trace_try_flip_z2);
+ 18   return 1;
+ 19 }
+</pre>
+</blockquote>
+<p>
+
+Lines&nbsp;8 and 9 sum the counters, and line&nbsp;10 checks
+to see if the result is zero, and, if not, line&nbsp;12 tells
+the state machine to stay right where it is.
+Otherwise, line&nbsp;14 executes a memory barrier to ensure that
+no CPU sees the subsequent call for a memory barrier before it
+has exited its last RCU read-side critical section.
+This possibility might seem remote, but again, CPU designers have
+done stranger things, and besides, this is anything but a fastpath.
+Lines&nbsp;15 and 16 set all online CPUs' <code>rcu_mb_flag</code>
+variables, and line&nbsp;18 tells the state machine to advance to
+the next state.
+
+<P>The <code>rcu_try_flip_waitmb()</code> function checks to see
+if all online CPUs have executed the requested memory barrier,
+telling the state machine to advance if so.
+
+<p>
+<blockquote>
+<pre>
+  1 static int rcu_try_flip_waitmb(void)
+  2 {
+  3   int cpu;
+  4 
+  5   RCU_TRACE_ME(rcupreempt_trace_try_flip_m1);
+  6   for_each_cpu_mask(cpu, rcu_cpu_online_map)
+  7     if (per_cpu(rcu_mb_flag, cpu) != rcu_mb_done) {
+  8       RCU_TRACE_ME(rcupreempt_trace_try_flip_me1);
+  9       return 0;
+ 10     }
+ 11   smp_mb();
+ 12   RCU_TRACE_ME(rcupreempt_trace_try_flip_m2);
+ 13   return 1;
+ 14 }
+</pre>
+</blockquote>
+<p>
+
+<P>Lines&nbsp;6 and 7 check each online CPU to see if it has
+done the needed memory barrier, and if not, line&nbsp;9 tells
+the state machine not to advance.
+Otherwise, if all CPUs have executed a memory barrier, line&nbsp;11
+executes a memory barrier to ensure that any RCU callback invocation
+follows all of the memory barriers, and line&nbsp;13 tells the
+state machine to advance.
+
+<P>The <code>__rcu_advance_callbacks()</code> function advances
+callbacks and acknowledges the counter flip.
+
+<p>
+<blockquote>
+<pre>
+  1 static void __rcu_advance_callbacks(struct rcu_data *rdp)
+  2 {
+  3   int cpu;
+  4   int i;
+  5   int wlc = 0;
+  6 
+  7   if (rdp-&gt;completed != rcu_ctrlblk.completed) {
+  8     if (rdp-&gt;waitlist[GP_STAGES - 1] != NULL) {
+  9       *rdp-&gt;donetail = rdp-&gt;waitlist[GP_STAGES - 1];
+ 10       rdp-&gt;donetail = rdp-&gt;waittail[GP_STAGES - 1];
+ 11       RCU_TRACE_RDP(rcupreempt_trace_move2done, rdp);
+ 12     }
+ 13     for (i = GP_STAGES - 2; i &gt;= 0; i--) {
+ 14       if (rdp-&gt;waitlist[i] != NULL) {
+ 15         rdp-&gt;waitlist[i + 1] = rdp-&gt;waitlist[i];
+ 16         rdp-&gt;waittail[i + 1] = rdp-&gt;waittail[i];
+ 17         wlc++;
+ 18       } else {
+ 19         rdp-&gt;waitlist[i + 1] = NULL;
+ 20         rdp-&gt;waittail[i + 1] =
+ 21           &amp;rdp-&gt;waitlist[i + 1];
+ 22       }
+ 23     }
+ 24     if (rdp-&gt;nextlist != NULL) {
+ 25       rdp-&gt;waitlist[0] = rdp-&gt;nextlist;
+ 26       rdp-&gt;waittail[0] = rdp-&gt;nexttail;
+ 27       wlc++;
+ 28       rdp-&gt;nextlist = NULL;
+ 29       rdp-&gt;nexttail = &amp;rdp-&gt;nextlist;
+ 30       RCU_TRACE_RDP(rcupreempt_trace_move2wait, rdp);
+ 31     } else {
+ 32       rdp-&gt;waitlist[0] = NULL;
+ 33       rdp-&gt;waittail[0] = &amp;rdp-&gt;waitlist[0];
+ 34     }
+ 35     rdp-&gt;waitlistcount = wlc;
+ 36     rdp-&gt;completed = rcu_ctrlblk.completed;
+ 37   }
+ 38   cpu = raw_smp_processor_id();
+ 39   if (per_cpu(rcu_flip_flag, cpu) == rcu_flipped) {
+ 40     smp_mb();
+ 41     per_cpu(rcu_flip_flag, cpu) = rcu_flip_seen;
+ 42     smp_mb();
+ 43   }
+ 44 }
+</pre>
+</blockquote>
+<p>
+
+Line&nbsp;7 checks to see if the global <code>rcu_ctrlblk.completed</code>
+counter has advanced since the last call by the current CPU to this
+function.
+If not, callbacks need not be advanced (lines&nbsp;8-37).
+Otherwise, lines&nbsp;8 through 37 advance callbacks through the lists
+(while maintaining a count of the number of non-empty lists in the
+<code>wlc</code> variable).
+In either case, lines&nbsp;38 through 43 acknowledge the counter flip
+if needed.
+
+<A NAME="Quick Quiz 3"></a><P><B>Quick Quiz 3</B>:
+How is it possible for lines&nbsp;38-43 of
+<code>__rcu_advance_callbacks()</code> to be executed when
+lines&nbsp;7-37 have not?
+Won't they both be executed just after a counter flip, and
+never at any other time?
+
+
+<H3>Read-Side Primitives</H3>
+
+This section examines the <code>rcu_read_lock()</code> and
+<code>rcu_read_unlock()</code> primitives, followed by a
+discussion of how this implementation deals with the fact
+that these two primitives do not contain memory barriers.
+
+<H4>rcu_read_lock()</H4>
+
+The implementation of <code>rcu_read_lock()</code> is as follows:
+
+<pre>
+  1 void __rcu_read_lock(void)
+  2 {
+  3   int idx;
+  4   struct task_struct *me = current;
+  5   int nesting;
+  6 
+  7   nesting = ACCESS_ONCE(me-&gt;rcu_read_lock_nesting);
+  8   if (nesting != 0) {
+  9     me-&gt;rcu_read_lock_nesting = nesting + 1;
+ 10   } else {
+ 11     unsigned long flags;
+ 12 
+ 13     local_irq_save(flags);
+ 14     idx = ACCESS_ONCE(rcu_ctrlblk.completed) &amp; 0x1;
+ 15     smp_read_barrier_depends();  /* @@@@ might be unneeded */
+ 16     ACCESS_ONCE(__get_cpu_var(rcu_flipctr)[idx])++;
+ 17     ACCESS_ONCE(me-&gt;rcu_read_lock_nesting) = nesting + 1;
+ 18     ACCESS_ONCE(me-&gt;rcu_flipctr_idx) = idx;
+ 19     local_irq_restore(flags);
+ 20   }
+ 21 }
+</pre>
+
+(Note: this code is under review and will likely change somewhat.
+This version matches
+<A HREF="http://lkml.org/lkml/2007/9/10/213">
+that posted to LKML on September 10, 2007</A>.)
+
+<P>Line&nbsp;7 fetches this task's RCU read-side critical-section nesting
+counter.
+If line&nbsp;8 finds that this counter is non-zero,
+then we are already protected by an outer
+<code>rcu_read_lock()</code>, in which case line&nbsp;9 simply increments
+this counter.
+
+<P>However, if this is the outermost <code>rcu_read_lock()</code>,
+then more work is required.
+Lines&nbsp;13 and 19 suppress and restore irqs to ensure that the
+intervening code is neither preempted nor interrupted by a
+scheduling-clock interrupt (which runs the grace period state machine).
+Line&nbsp;14 fetches the grace-period counter, line&nbsp;15 is likely
+to be unnecessary (but was intended to ensure that changes to the index
+and value remain ordered, and is a no-op on all CPUs other than Alpha),
+line&nbsp;16 increments the current counter for
+this CPU, line&nbsp;17 increments the nesting counter,
+and line&nbsp;18 records the old/new counter index so that
+<code>rcu_read_unlock()</code> can decrement the corresponding
+counter (but on whatever CPU it ends up running on).
+
+<P>The <code>ACCESS_ONCE()</code> macros force the compiler to
+emit the accesses in order.
+Although this does not prevent the CPU from reordering the accesses
+from the viewpoint of other CPUs, it does ensure that NMI and
+SMI handlers running on this CPU will see these accesses in order.
+This is critically important:
+
+<OL>
+<LI>	In absence of the <code>ACCESS_ONCE()</code> in the assignment
+	to <code>idx</code>, the compiler would be within its rights
+	to: (a) eliminate the local variable <code>idx</code> and
+	(b) compile the increment on line&nbsp;16 as a
+	fetch-increment-store sequence, doing separate accesses to
+	<code>rcu_ctrlblk.completed</code> for the fetch and the
+	store.
+	If the value of <code>rcu_ctrlblk.completed</code> had
+	changed in the meantime, this would corrupt the
+	<code>rcu_flipctr</code> values.
+<p>
+<LI>	If the assignment to <code>rcu_read_lock_nesting</code>
+	(line&nbsp;17) were to be reordered to precede the increment
+	of <code>rcu_flipctr</code> (line&nbsp;16), and if an
+	NMI occurred between these two events, then an
+	<code>rcu_read_lock()</code> in that NMI's handler
+	would incorrectly conclude that it was already under the
+	protection of <code>rcu_read_lock()</code>.
+<p>
+<LI>	If the assignment to <code>rcu_read_lock_nesting</code>
+        (line&nbsp;17) were to be reordered to follow the assignment
+	to <code>rcu_flipctr_idx</code> (line&nbsp;18), and if an
+	NMI occurred between these two events, then an
+	<code>rcu_read_lock()</code> in that NMI's handler
+	would clobber <code>rcu_flipctr_idx</code>, possibly
+	causing the matching <code>rcu_read_unlock()</code> to
+	decrement the wrong counter.
+	This in turn could result in premature ending of a
+	grace period, indefinite extension of a grace period,
+	or even both.
+</OL>
+
+<P>It is not clear that the <code>ACCESS_ONCE</code> on the assignment to
+<code>nesting</code> (line&nbsp;7) is required.
+It is also unclear whether the <code>smp_read_barrier_depends()</code>
+(line&nbsp;15) is needed: it was added to ensure that changes to index
+and value remain ordered.
+
+<P>The reasons that irqs must be disabled from line&nbsp;13 through
+line&nbsp;19 are as follows:
+
+<OL>
+<LI>	Suppose one CPU loaded <code>rcu_ctrlblk.completed</code>
+	(line&nbsp;14), then a second CPU incremented this counter,
+	and then the first CPU took a scheduling-clock interrupt.
+	The first CPU would then see that it needed to acknowledge
+	the counter flip, which it would do.
+	This acknowledgment is a promise to avoid incrementing
+	the newly old counter, and this CPU would break this
+	promise.
+	Worse yet, this CPU might be preempted immediately upon
+	return from the scheduling-clock interrupt, and thus
+	end up incrementing the counter at some random point
+	in the future.
+	Either situation could disrupt grace-period detection.
+<p>
+<LI>	Disabling irqs has the side effect of disabling preemption.
+	If this code were to be preempted between fetching
+	<code>rcu_ctrlblk.completed</code> (line&nbsp;14) and
+	incrementing <code>rcu_flipctr</code> (line&nbsp;16),
+	it might well be migrated to some other CPU.
+	This would result in it non-atomically incrementing
+	the counter from that other CPU.
+	If this CPU happened to be executing in <code>rcu_read_lock()</code>
+	or <code>rcu_read_unlock()</code> just at that time, one
+	of the increments or decrements might be lost, again
+	disrupting grace-period detection.
+	The same result could happen on RISC machines if the preemption
+	occurred in the middle of the increment (after the fetch of
+	the old counter but before the store of the newly incremented
+	counter).
+<p>
+<LI>	Permitting preemption in the midst
+	of line&nbsp;16, between selecting the current CPU's copy
+	of the <code>rcu_flipctr</code> array and the increment of
+	the element indicated by <code>rcu_flipctr_idx</code>, can
+	result in a similar failure.
+	Execution might well resume on some other CPU.
+	If this resumption happened concurrently with an
+	<code>rcu_read_lock()</code> or <code>rcu_read_unlock()</code>
+	running on the original CPU,
+	an increment or decrement might be lost, resulting in either
+	premature termination of a grace period, indefinite extension
+	of a grace period, or even both.
+<p>
+<LI>	Failing to disable preemption can also defeat RCU priority
+	boosting, which relies on <code>rcu_read_lock_nesting</code>
+	to determine when a given task is in an RCU read-side
+	critical section.
+	So, for example, if a given task is indefinitely
+	preempted just after incrementing <code>rcu_flipctr</code>,
+	but before updating <code>rcu_read_lock_nesting</code>,
+	then it will stall RCU grace periods for as long as it
+	is preempted.
+	However, because <code>rcu_read_lock_nesting</code> has not
+	yet been incremented, the RCU priority booster has no way
+	to tell that boosting is needed.
+	Therefore, in the presence of CPU-bound realtime threads,
+	the preempted task might stall grace periods indefinitely,
+	eventually causing an OOM event.
+</OL>
+
+<P>The last three reasons could of course be addressed by disabling
+preemption rather than disabling of irqs, but given that the first
+reason requires disabling irqs in any case, there is little reason
+to separately disable preemption.
+It is entirely possible that the first reason might be tolerated
+by requiring an additional grace-period stage, however, it is not
+clear that disabling preemption is much faster than disabling
+interrupts on modern CPUs.
+
+<H4>rcu_read_unlock()</H4>
+
+The implementation of <code>rcu_read_unlock()</code> is as follows:
+<p>
+<blockquote>
+<pre>
+  1 void __rcu_read_unlock(void)
+  2 {
+  3   int idx;
+  4   struct task_struct *me = current;
+  5   int nesting;
+  6 
+  7   nesting = ACCESS_ONCE(me-&gt;rcu_read_lock_nesting);
+  8   if (nesting &gt; 1) {
+  9     me-&gt;rcu_read_lock_nesting = nesting - 1;
+ 10   } else {
+ 11     unsigned long flags;
+ 12 
+ 13     local_irq_save(flags);
+ 14     idx = ACCESS_ONCE(me-&gt;rcu_flipctr_idx);
+ 15     smp_read_barrier_depends();  /* @@@ Needed??? */
+ 16     ACCESS_ONCE(me-&gt;rcu_read_lock_nesting) = nesting - 1;
+ 17     ACCESS_ONCE(__get_cpu_var(rcu_flipctr)[idx])--;
+ 18     rcu_read_unlock_unboost();
+ 19     local_irq_restore(flags);
+ 20   }
+ 21 }
+</pre>
+</blockquote>
+<p>
+<P>(Again, please note that this code is under review and will likely change
+somewhat.
+This version matches
+<A HREF="http://lkml.org/lkml/2007/9/10/213">
+that posted to LKML on September 10, 2007</A>.)
+
+<P>Line&nbsp;7 fetches the <code>rcu_read_lock_nesting</code> counter,
+which line&nbsp;8 checks to see if we are under the protection of an
+enclosing <code>rcu_read_lock()</code> primitive.
+If so, line&nbsp;9 simply decrements the counter.
+
+<P>However, as with <code>rcu_read_lock()</code>, we otherwise must do
+more work.
+Lines&nbsp;13 and 19 disable and restore irqs in order to prevent
+the scheduling-clock interrupt from invoking the grace-period state machine 
+while in the midst of <code>rcu_read_unlock()</code> processing.
+Line&nbsp;14 picks up the <code>rcu_flipctr_idx</code> that was
+saved by the matching <code>rcu_read_lock()</code>,
+line&nbsp;15 is likely
+to be unnecessary (but was intended to ensure that changes to the index
+and value remain ordered, and is a no-op on all CPUs other than Alpha),
+line&nbsp;16
+decrements <code>rcu_read_lock_nesting</code> so that irq and
+NMI/SMI handlers will henceforth update <code>rcu_flipctr</code>,
+line&nbsp;17 decrements the counter (with the same index as, but possibly
+on a different CPU than, that incremented by the matching
+<code>rcu_read_lock()</code>.
+Finally, line&nbsp;18 checks to see if this task has been subject to
+RCU priority boosting, deboosting it if so (see the
+<A HREF="http://lwn.net/Articles/220677/">LWN RCU priority-boosting article</A>
+for more details).
+
+<P>The <code>ACCESS_ONCE()</code> macros and irq disabling
+are required for similar reasons that they are in
+<code>rcu_read_lock()</code>.
+
+<A NAME="Quick Quiz 4"></a><P><B>Quick Quiz 4</B>:
+What problems could arise if the lines containing
+<code>ACCESS_ONCE()</code> in <code>rcu_read_unlock()</code>
+were reordered by the compiler?
+
+<A NAME="Quick Quiz 5"></a><P><B>Quick Quiz 5</B>:
+What problems could arise if the lines containing
+<code>ACCESS_ONCE()</code> in <code>rcu_read_unlock()</code>
+were reordered by the CPU?
+
+<A NAME="Quick Quiz 6"></a><P><B>Quick Quiz 6</B>:
+What problems could arise in
+<code>rcu_read_unlock()</code> if irqs were not disabled?
+
+<H4>Memory-Barrier Considerations</H4>
+
+<P>Note that these two primitives contains no memory barriers, so there is
+nothing to stop the CPU from executing the critical section
+before executing the <code>rcu_read_lock()</code> or after executing
+the <code>rcu_read_unlock()</code>.
+The purpose of the <code>rcu_try_flip_waitmb_state</code> is to
+account for this possible reordering, but only at the beginning or end of
+a grace period.
+To see why this approach is helpful, consider the following figure,
+which shows the conventional approach of placing
+a memory barrier at the beginning and end of each RCU read-side critical
+section
+(diagram taken from the
+<a HREF="http://www.rdrop.com/users/paulmck/RCU/OLSrtRCU.2006.08.11a.pdf">
+2006 OLS paper</A>):
+
+<P>
+<blockquote>
+<IMG SRC="/images/ns/kernel/rcu/RCUrt-MBwaste.png" WIDTH=403 height=483
+alt="[Memory barrier waste]">
+</blockquote>
+
+<P>The "MB"s represent memory barriers, and only the emboldened
+barriers are needed, namely the first and last on a given CPU
+for each grace period.
+This preemptible RCU implementation therefore associates the memory
+barriers with the grace period, as shown below
+(diagram taken from the
+<a HREF="http://www.rdrop.com/users/paulmck/RCU/OLSrtRCU.2006.08.11a.pdf">
+2006 OLS paper</A>):
+
+<P>
+<blockquote>
+<IMG SRC="/images/ns/kernel/rcu/RCUrt-MBnowaste.png" WIDTH=403 height=413
+alt="[Memory barrier nowaste]">
+</blockquote>
+
+<P>Given that the Linux kernel can execute literally millions of RCU
+read-side critical sections per grace period, this latter approach
+can result in substantial read-side savings, due to the fact that it
+amortizes the cost of the memory barrier over all the read-side critical
+sections in a grace period.
+
+<H2>Validation of Preemptible RCU</H2>
+
+<H3>Testing</H3>
+
+The preemptible RCU algorithm was tested with a two-stage grace period
+on weakly ordered POWER4 and POWER5 CPUs using rcutorture running for
+more than 24 hours on each machine, with 15M and 20M grace periods,
+respectively, and with no errors.
+Of course, this in no way proves that this algorithm is correct.
+At most, it shows either that these two machines were extremely
+lucky or that any bugs remaining in preemptible RCU have an extremely
+low probability of occurring.
+We therefore required additional assurance that this algorithm works,
+or, alternatively, identification of remaining bugs.
+
+<P>This task requires a conceptual approach,
+which is taken in the next section.
+
+<H3>Conceptual Validation</H3>
+
+Because neither <code>rcu_read_lock()</code> nor <code>rcu_read_unlock()</code>
+contain memory barriers, the RCU read-side critical section can bleed
+out on weakly ordered machines.
+In addition, the relatively loose coupling of this RCU implementation
+permits CPUs to disagree on when a given grace period starts and ends.
+This leads to the question as to how long a given RCU read-side critical
+section can possibly extend relative to the grace-period state machine.
+
+<P>The worst-case scenario is as follows:
+
+<P>
+<blockquote>
+<IMG SRC="/images/ns/kernel/rcu/RCUpreemptValidation.png" WIDTH=474
+height=570 alt="[worst-case scenario]">
+</blockquote>
+
+<P>Here, CPU&nbsp;0 is executing the shortest possible
+removal and reclamation sequence,
+while CPU&nbsp;1 executes the longest possible RCU read-side critical
+section.
+Because the callback queues are advanced just before acknowledging a
+counter flip, the latest that CPU&nbsp;0 can execute its
+<code>list_del_rcu()</code> and <code>call_rcu()</code> is just before
+its scheduling-clock interrupt that acknowledges the counter flip.
+The <code>call_rcu()</code> invocation places the callback on CPU&nbsp;0's
+<code>next</code> list, and the interrupt will move the callback from
+the <code>next</code> list to the <code>wait[0]</code> list.
+This callback will move again (from the <code>wait[0]</code> list
+to the <code>wait[1]</code> list) at CPU&nbsp;0's first scheduling-clock
+interrupt following the next counter flip.
+Similarly, the callback will move from the <code>wait[1]</code> list
+to the <code>done</code> list at CPU&nbsp;0's first scheduling-clock
+interrupt following the counter flip resulting in the value 3.
+The callback might be invoked immediately afterward.
+
+<P>Meanwhile, CPU&nbsp;1 is executing an RCU read-side critical section.
+Let us assume that the <code>rcu_read_lock()</code> follows the first
+counter flip (the one resulting in the value 1), so that the
+<code>rcu_read_lock()</code> increments CPU&nbsp;1's
+<code>rcu_flipctr[1]</code> counter.
+Note that because <code>rcu_read_lock()</code> does not contain any
+memory barriers, the contents of the critical section might be executed
+early by the CPU.
+However, this early execution cannot precede the last memory barrier
+executed by CPU&nbsp;1, as shown on the diagram.
+This is nevertheless sufficiently early that an <code>rcu_dereference()</code>
+could fetch a pointer to the item being deleted by CPU&nbsp;0's
+<code>list_del_rcu()</code>.
+
+<P>Because the <code>rcu_read_lock()</code> incremented an index-1 counter,
+the corresponding <code>rcu_read_unlock()</code> must
+precede the "old counters zero" event for index 1.
+However, because <code>rcu_read_unlock()</code> contains no memory
+barriers, the contents of the corresponding RCU read-side critical
+section (possibly including a reference to the item deleted by
+CPU&nbsp;0) can be executed late by CPU&nbsp;1.
+However, it cannot be executed after CPU&nbsp;1's next memory barrier,
+as shown on the diagram.
+Because the latest possible reference by CPU&nbsp;1 precedes the
+earliest possible callback invocation by CPU&nbsp;0, two passes
+through the grace-period state machine suffice to constitute
+a full grace period, and hence it is safe to do:
+
+<pre>
+    #define GP_STAGES 2
+</pre>
+
+<A NAME="Quick Quiz 7"></a><P><B>Quick Quiz 7</B>:
+Suppose that the irq disabling in
+<code>rcu_read_lock()</code> was replaced by preemption disabling.
+What effect would that have on <code>GP_STAGES</code>?
+
+<A NAME="Quick Quiz 8"></a><P><B>Quick Quiz 8</B>:
+Why can't the <code>rcu_dereference()</code>
+precede the memory barrier?
+<p>
+<A NAME="Formal Validation"></a>
+<H3>Formal Validation</H3>
+
+Formal validation of this algorithm is quite important, but remains
+as future work.
+One tool for doing this validation is described in
+<A HREF="http://lwn.net/Articles/243851/">an earlier LWN article</A>.
+
+<A NAME="Quick Quiz 9"></a><P><B>Quick Quiz 9</B>:
+What is a more precise way to say "CPU&nbsp;0
+might see CPU&nbsp;1's increment as early as CPU&nbsp;1's last previous
+memory barrier"?
+
+<H2>Answers to Quick Quizzes</H2>
+
+<P><B>Quick Quiz 1</B>: Why is it important that blocking primitives
+called from within a preemptible-RCU read-side critical section be
+subject to priority inheritance?
+
+<P><B>Answer</B>: Because blocked readers stall RCU grace periods,
+which can result in OOM.
+For example, if a reader did a <code>wait_event()</code> within
+an RCU read-side critical section, and that event never occurred,
+then RCU grace periods would stall indefinitely, guaranteeing that
+the system would OOM sooner or later.
+There must therefore be some way to cause these readers to progress
+through their read-side critical sections in order to avoid such OOMs.
+Priority boosting is one way to force such progress, but only if
+readers are restricted to blocking such that they can be awakened via
+priority boosting.
+
+<P>Of course, there are other methods besides priority inheritance
+that handle the priority inversion problem, including priority ceiling,
+preemption disabling, and so on.
+However, there are good reasons why priority inheritance is the approach
+used in the Linux kernel, so this is what is used for RCU.
+
+<P><A HREF="#Quick Quiz 1"><P>Back to Quick Quiz 1.</A>
+
+<P><B>Quick Quiz 2</B>: Could the prohibition against using primitives
+that would block in a non-<code>CONFIG_PREEMPT</code> kernel be lifted,
+and if so, under what conditions?
+
+<P><B>Answer</B>: If testing and benchmarking demonstrated that the
+preemptible RCU worked well enough that classic RCU could be dispensed
+with entirely, and if priority inheritance was implemented for blocking
+synchronization primitives
+such as <code>semaphore</code>s, then those primitives could be
+used in RCU read-side critical sections.
+
+<P><A HREF="#Quick Quiz 2"><P>Back to Quick Quiz 2.</A>
+
+<P><B>Quick Quiz 3</B>: How is it possible for lines&nbsp;38-43 of
+<code>__rcu_advance_callbacks()</code> to be executed when
+lines&nbsp;7-37 have not?
+Won't they both be executed just after a counter flip, and
+never at any other time?
+
+<P><B>Answer</B>:
+Consider the following sequence of events:
+<OL>
+<LI>	CPU 0 executes lines&nbsp;5-12 of
+	<code>rcu_try_flip_idle()</code>.
+<p>
+<LI>	CPU 1 executes <code>__rcu_advance_callbacks()</code>.
+	Because <code>rcu_ctrlblk.completed</code> has been
+	incremented, lines&nbsp;7-37 execute.
+	However, none of the <code>rcu_flip_flag</code> variables
+	have been set, so lines&nbsp;38-43 do <i>not</i> execute.
+<p>
+<LI>	CPU 0 executes lines&nbsp;13-15 of
+	<code>rcu_try_flip_idle()</code>.
+<p>
+<LI>	Later, CPU 1 again executes <code>__rcu_advance_callbacks()</code>.
+	The counter has not been incremented since the earlier
+	execution, but the <code>rcu_flip_flag</code> variables have
+	all been set, so only lines&nbsp;38-43 are executed.
+</OL>
+
+<P><A HREF="#Quick Quiz 3"><P>Back to Quick Quiz 3.</A>
+
+<P><B>Quick Quiz 4</B>: What problems could arise if the lines containing
+<code>ACCESS_ONCE()</code> in <code>rcu_read_unlock()</code>
+were reordered by the compiler?
+
+<P><B>Answer</B>:
+<OL>
+<LI>	If the <code>ACCESS_ONCE()</code> were omitted from the
+	fetch of <code>rcu_flipctr_idx</code> (line&nbsp;14), then the compiler
+	would be within its rights to eliminate <code>idx</code>.
+	It would also be free to compile the <code>rcu_flipctr</code>
+	decrement as a fetch-increment-store sequence, separately fetching
+	<code>rcu_flipctr_idx</code> for both the fetch and the store.
+	If an NMI were to occur between the fetch and the store, and
+	if the NMI handler contained an <code>rcu_read_lock()</code>,
+	then the value of <code>rcu_flipctr_idx</code> would change
+	in the meantime, resulting in corruption of the
+	<code>rcu_flipctr</code> values, destroying the ability
+	to correctly identify grace periods.
+<p>
+<LI>	Another failure that could result from omitting the
+	<code>ACCESS_ONCE()</code> from line&nbsp;14 is due to
+	the compiler reordering this statement to follow the
+	decrement of <code>rcu_read_lock_nesting</code>
+	(line&nbsp;16).
+	In this case, if an NMI were to occur between these two
+	statements, then any <code>rcu_read_lock()</code> in the
+	NMI handler could corrupt <code>rcu_flipctr_idx</code>,
+	causing the wrong <code>rcu_flipctr</code> to be
+	decremented.
+	As with the analogous situation in <code>rcu_read_lock()</code>,
+	this could result in premature grace-period termination,
+	an indefinite grace period, or even both.
+<p>
+<LI>	If <code>ACCESS_ONCE()</code> macros were omitted such that
+	the update of <code>rcu_read_lock_nesting</code> could be
+	interchanged by the compiler with the decrement of
+	<code>rcu_flipctr</code>, and if an NMI occurred in between,
+	any <code>rcu_read_lock()</code> in the NMI handler would
+	incorrectly conclude that it was protected by an enclosing
+	<code>rcu_read_lock()</code>, and fail to increment the
+	<code>rcu_flipctr</code> variables.
+</OL>
+
+<P>It is not clear that the <code>ACCESS_ONCE()</code> on the
+fetch of <code>rcu_read_lock_nesting</code> (line&nbsp;7) is required.
+
+<P><A HREF="#Quick Quiz 4"><P>Back to Quick Quiz 4.</A>
+
+<P><B>Quick Quiz 5</B>: What problems could arise if the lines containing
+<code>ACCESS_ONCE()</code> in <code>rcu_read_unlock()</code>
+were reordered by the CPU?
+
+<P><B>Answer</B>: Absolutely none!!!  The code in <code>rcu_read_unlock()</code>
+interacts with the scheduling-clock interrupt handler
+running on the same CPU, and is thus insensitive to reorderings
+because CPUs always see their own accesses as if they occurred
+in program order.
+Other CPUs do access the <code>rcu_flipctr</code>, but because these
+other CPUs don't access any of the other variables, ordering is
+irrelevant.
+
+<P><A HREF="#Quick Quiz 5"><P>Back to Quick Quiz 5.</A>
+
+<P><B>Quick Quiz 6</B>: What problems could arise in
+<code>rcu_read_unlock()</code> if irqs were not disabled?
+
+<P><B>Answer</B>: 
+<OL>
+<LI>	Disabling irqs has the side effect of disabling preemption.
+	Suppose that this code were to be preempted in the midst
+	of line&nbsp;17 between selecting the current CPU's copy
+	of the <code>rcu_flipctr</code> array and the decrement of
+	the element indicated by <code>rcu_flipctr_idx</code>.
+	Execution might well resume on some other CPU.
+	If this resumption happened concurrently with an
+	<code>rcu_read_lock()</code> or <code>rcu_read_unlock()</code>
+	running on the original CPU,
+	an increment or decrement might be lost, resulting in either
+	premature termination of a grace period, indefinite extension
+	of a grace period, or even both.
+<p>
+<LI>	Failing to disable preemption can also defeat RCU priority
+	boosting, which relies on <code>rcu_read_lock_nesting</code>
+	to determine which tasks to boost.
+	If preemption occurred between the update of
+	<code>rcu_read_lock_nesting</code> (line&nbsp;16) and of
+	<code>rcu_flipctr</code> (line&nbsp;17), then a grace
+	period might be stalled until this task resumed.
+	But because the RCU priority booster has no way of knowing
+	that this particular task is stalling grace periods, needed
+	boosting will never occur.
+	Therefore, if there are CPU-bound realtime tasks running,
+	the preempted task might never resume, stalling grace periods
+	indefinitely, and eventually resulting in OOM.
+</OL>
+
+<P>Of course, both of these situations could be handled by disabling
+preemption rather than disabling irqs.
+(The CPUs I have access to do not show much difference between these
+two alternatives, but others might.)
+
+<P><A HREF="#Quick Quiz 6"><P>Back to Quick Quiz 6.</A>
+
+<P><B>Quick Quiz 7</B>: Suppose that the irq disabling in
+<code>rcu_read_lock()</code> was replaced by preemption disabling.
+What effect would that have on <code>GP_STAGES</code>?
+
+<P><B>Answer</B>: No finite value of <code>GP_STAGES</code> suffices.
+The following scenario, courtesy of Oleg Nesterov, demonstrates this:
+
+<P>Suppose that low-priority Task&nbsp;A has executed
+<code>rcu_read_lock()</code> on CPU 0,
+and thus has incremented <code>per_cpu(rcu_flipctr, 0)[0]</code>,
+which thus has a value of one.
+Suppose further that Task&nbsp;A is now preempted indefinitely.
+
+<P>Given this situation, consider the following sequence of events:
+<OL>
+<LI>	Task&nbsp;B starts executing <code>rcu_read_lock()</code>, also on
+	CPU 0, picking up the low-order bit of
+	<code>rcu_ctrlblk.completed</code>, which is still equal to zero.
+<p>
+<LI>	Task&nbsp;B is interrupted by a sufficient number of scheduling-clock
+	interrupts to allow the current grace-period stage to complete,
+	and also be sufficient long-running interrupts to allow the
+	RCU grace-period state machine to advance the
+	<code>rcu_ctrlblk.complete</code> counter so that its bottom bit
+	is now equal to one and all CPUs have acknowledged this increment
+	operation.
+<p>
+<LI>	CPU 1 starts summing the index==0 counters, starting with
+	<code>per_cpu(rcu_flipctr, 0)[0]</code>, which is equal to one
+	due to Task&nbsp;A's increment.
+	CPU 1's local variable <code>sum</code> is therefore equal to one.
+<p>
+<LI>	Task&nbsp;B returns from interrupt, resuming its execution of
+	<code>rcu_read_lock()</code>, incrementing
+	<code>per_cpu(rcu_flipctr, 0)[0]</code>, which now has a value
+	of two.
+<p>
+<LI>	Task&nbsp;B is migrated to CPU 2.
+<p>
+<LI>	Task&nbsp;B completes its RCU read-side critical section, and executes
+	<code>rcu_read_unlock()</code>, which decrements
+	<code>per_cpu(rcu_flipctr, 2)[0]</code>, which is now -1.
+<p>
+<LI>	CPU 1 now adds <code>per_cpu(rcu_flipctr, 1)[0]</code> and 
+	<code>per_cpu(rcu_flipctr, 2)[0]</code> to its
+	local variable <code>sum</code>, obtaining the value zero.
+<p>
+<LI>	CPU 1 then incorrectly concludes that all prior RCU read-side
+	critical sections have completed, and advances to the next
+	RCU grace-period stage.
+	This means that some other task might well free up data structures
+	that Task&nbsp;A is still using!
+</OL>
+
+<P>This sequence of events could repeat indefinitely, so that no finite
+value of <code>GP_STAGES</code> could prevent disrupting Task&nbsp;A.
+This sequence of events demonstrates the importance of the promise
+made by CPUs that acknowledge an increment of
+<code>rcu_ctrlblk.completed</code>, as the problem illustrated by the
+above sequence of events is caused by Task&nbsp;B's repeated failure
+to honor this promise.
+
+<P>Therefore, more-pervasive changes to the grace-period state will be
+required in order for <code>rcu_read_lock()</code> to be able to safely
+dispense with irq disabling.
+
+<P><A HREF="#Quick Quiz 7"><P>Back to Quick Quiz 7.</A>
+
+<P><B>Quick Quiz 8</B>: Why can't the <code>rcu_dereference()</code>
+precede the memory barrier?
+
+<P><B>Answer</B>: Because the memory barrier is being executed in
+an interrupt handler, and interrupts are exact in the sense that
+a single value of the PC is saved upon interrupt, so that the
+interrupt occurs at a definite place in the code.
+Therefore, if the
+<code>rcu_dereference()</code> were to precede the memory barrier,
+the interrupt would have had to have occurred after the
+<code>rcu_dereference()</code>, and therefore
+the interrupt would also have had to have occurred after the
+<code>rcu_read_lock()</code> that begins the RCU read-side critical
+section.
+This would have forced the <code>rcu_read_lock()</code> to use
+the earlier value of the grace-period counter, which would in turn
+have meant that the corresponding <code>rcu_read_unlock()</code>
+would have had to precede the first "Old counters zero [0]" rather
+than the second one.
+This in turn would have meant that the read-side critical section
+would have been much shorter -- which would have been counter-productive,
+given that the point of this exercise was to identify the longest
+possible RCU read-side critical section.
+
+<P><A HREF="#Quick Quiz 8"><P>Back to Quick Quiz 8.</A>
+
+<P><B>Quick Quiz 9</B>: What is a more precise way to say "CPU&nbsp;0
+might see CPU&nbsp;1's increment as early as CPU&nbsp;1's last previous
+memory barrier"?
+
+<P><B>Answer</B>: First, it is important to note that the problem with
+the less-precise statement is that it gives the impression that there
+might be a single global timeline, which there is not, at least not for
+popular microprocessors.
+Second, it is important to note that memory barriers are all about
+perceived ordering, not about time.
+Finally, a more precise way of stating above statement would be as
+follows: "If CPU&nbsp;0 loads the value resulting from CPU&nbsp;1's
+increment, then any subsequent load by CPU&nbsp;0 will see the
+values from any relevant stores by CPU&nbsp;1 if these stores
+preceded CPU&nbsp;1's last prior memory barrier."
+
+<P>Even this more-precise version leaves some wiggle room.
+The word "subsequent" must be understood to mean "ordered after", either
+by an explicit memory barrier or by the CPU's underlying memory ordering.
+In addition, the memory barriers must be strong enough to order the relevant
+operations.
+For example, CPU&nbsp;1's last prior memory barrier must order stores
+(for example, <code>smp_wmb()</code> or <code>smp_mb()</code>).
+Similarly, if CPU&nbsp;0 needs an explicit memory barrier to ensure that
+its later load follows the one that saw the increment, then this memory
+barrier needs to be an <code>smp_rmb()</code> or <code>smp_mb()</code>.
+
+<P>In general, much care is required when proving parallel algorithms.
+
+<P><A HREF="#Quick Quiz 9"><P>Back to Quick Quiz 9.</A>
+
+<H2>Acknowledgments</H2>
+
+I owe thanks to Steve Rostedt, Oleg Nesterov, Andy Whitcroft, Nivedita Singhvi,
+Robert Bauer, and Josh Triplett
+for their help in getting this document into a human-readable state.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Read-copy-update">Read-copy-update</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#McKenney_Paul_E.">McKenney, Paul E.</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/253651/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor253949"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The design of preemptible read-copy-update</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2007 12:00 UTC (Thu)
+                               by <b>i3839</b> (guest, #31386)
+                              [<a href="/Articles/253949/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Good and very detailed article.<br>
+<p>
+Are there any benchmarks which show how it compares to normal RCU?<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/253949/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor254076"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The design of preemptible read-copy-update</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2007 23:50 UTC (Thu)
+                               by <b>PaulMcKenney</b> (<b>&#x272D; supporter &#x272D;</b>, #9624)
+                              [<a href="/Articles/254076/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      On the read side, the new CONFIG_PREEMPT_RT implementation is about double the overhead of the CONFIG_PREEMPT variant of RCU.  Of course your mileage will vary depending on your hardware -- this is on a recent Opteron.<br>
+<p>
+The benchmarks for grace-period latency are obsolete, since they used four (rather than two) stages of grace-period processing.  And of course, kudos to Steve Rostedt for convincing me to check whether four stages was really required!<br>
+<p>
+This update-side latency can be avoided by using call_rcu() rather that synchronize_rcu(), but synchronize_rcu() is still preferable in most cases due to its simplicity and ease of use.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/254076/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor704342"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The design of preemptible read-copy-update</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2016 2:11 UTC (Sun)
+                               by <b>rednoah</b> (guest, #54933)
+                              [<a href="/Articles/704342/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;Of course, if the RCU read-side critical section has been preempted, rcu_read_lock() might be decrementing the counter </font><br>
+it should be rcu_read_unlock from context<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/704342/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor706953"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Quick Quiz 8 : interrupt would also have had to have occurred after the rcu_read_lock()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 21, 2016 11:50 UTC (Mon)
+                               by <b>Neeraju</b> (guest, #112470)
+                              [<a href="/Articles/706953/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hi, for cases where rcu_dereference is reordered before rcu_read_lock(), I didn't get how interrupt occuring after rcu_dereference, also implies that, interrupt  should have happened after rcu_read_lock. Can you please help understand?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/706953/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor783995"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The design of preemptible read-copy-update</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 26, 2019 6:05 UTC (Tue)
+                               by <b>firolwn</b> (guest, #96711)
+                              [<a href="/Articles/783995/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Could anyone help me to understand the following sentence?<br>
+ In contrast to SRCU, preemptible RCU only permits blocking within primitives that are both subject to priority inheritance and non-blocking in a non-CONFIG_PREEMPT kernel. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/783995/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2007, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

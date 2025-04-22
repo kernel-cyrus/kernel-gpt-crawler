@@ -1,0 +1,872 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Speeding up the page allocator [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/320556/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/319939/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/320556/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Speeding up the page allocator</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>We're bad at marketing</b>
+<p>
+We can admit it, marketing is not our strong suit. Our strength is
+writing the kind of articles that developers, administrators, and
+free-software supporters depend on to know what is going on in the
+Linux world. Please <a href="/Promo/nsn-bad/subscribe">subscribe today</a> to help us keep doing that, and so
+we don’t have to get good at marketing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 25, 2009</br>
+           </div>
+It is a rare kernel operation that does not involve the allocation and
+freeing of memory.  Beyond all of the memory-management requirements that
+would normally come with a complex system, kernel code must be written with
+extremely tight stack limits in mind.  As a result, variables which would
+be declared as automatic (stack) variables in user-space code require
+dynamic allocation in the kernel.  So the efficiency of the memory
+management subsystem has a pronounced effect on the performance of the
+system as a whole.  That is why the kernel currently has three slab-level
+allocators (the original slab allocator, SLOB, and <a
+href="http://lwn.net/Articles/229984/">SLUB</a>), with another one (<a
+href="http://lwn.net/Articles/311502/">SLQB</a>) waiting for the 2.6.30
+merge window to open.  Thus far, nobody has been able to create a single
+slab allocator which provides the best performance in all situations, and
+the stakes are high enough to make it worthwhile to keep trying.
+<p>
+While many kernel memory allocations are done at the slab level (using
+<tt>kmem_cache_alloc()</tt> or <tt>kmalloc()</tt>), there is another layer
+of memory management below the slab allocators.  In the end, all dynamic
+memory management comes down to the page allocator, which hands out memory
+in units of full pages.  The page allocator must manage memory without
+allowing it to become overly fragmented; it also must deal with details
+like CPU and NUMA node affinity, DMA accessibility, and high memory.  It
+also clearly needs to be fast; if it is slowing things down, there is
+little that the higher levels can do to make things better.  So one might
+do well to be concerned when memory management hacker Mel Gorman <a
+href="http://lwn.net/Articles/320279/">writes</a>:
+<p>
+<div class="BigQuote">
+	The complexity of the page allocator has been increasing for some
+	time and it has now reached the point where the SLUB allocator is
+	doing strange tricks to avoid the page allocator. This is obviously
+	bad as it may encourage other subsystems to try avoiding the page
+	allocator as well.
+</div>
+<p>
+As might be expected, Mel has come up with a set of patches designed to
+speed up the page allocator and do away the the temptation to try to work
+around it.  The result appears to be a significant cleaning-up of the code
+and a real improvement in performance; it also shows the kind of work which
+is necessary to keep this sort of vital subsystem in top shape.
+<p>
+Mel's 20-part patch (linked with the quote, above) attacks the problem in a
+number of ways.  Many of them are small tweaks; for example, the core page
+allocation function (<tt>alloc_pages_node()</tt>) includes the following
+test:
+<p>
+<pre>
+    if (unlikely(order &gt;= MAX_ORDER))
+	return NULL;
+</pre>
+<p>
+But, as Mel puts it, no proper user of the page allocator should be
+allocating something larger than <tt>MAX_ORDER</tt> in any case.  So his
+patch set removes this test from the fast path of the allocator, replacing
+it with a rather more attention-getting test (<tt>VM_BUG_ON</tt>) in the
+slow path.  The fast allocation path gets a little faster, and misuse of
+the interface should eventually be caught (and complained about) anyway.
+<p>
+Then, there is the little function <tt>gfp_zone()</tt>, which takes the
+flags passed to the allocation request and decides which memory zone to try
+to allocate from.  Different requests must be satisfied from different
+regions of memory, depending on factors like whether the memory will be
+used for DMA, whether high memory is acceptable, or whether the memory can
+be relocated if needed for defragmentation purposes.  The current code
+accomplishes this test with a series of four <tt>if</tt> tests, but lots of
+jumps can be expensive in fast-path code.  So Mel's patch replaces the
+tests with a table lookup.
+<p>
+There are a number of other changes along these lines - seeming
+micro-optimizations that one would not normally bother with.  But, in
+fast-path code deep within the system, this level of optimization can be
+worth doing.  The patch set also reorganizes things to make the fast path
+more explicit and contiguous; that, too, can speed things up, but it also
+helps ensure that developers know when they are working with
+performance-critical code.
+<p>
+The change which provoked the most discussion, though, was the removal of
+the distinction between hot and cold pages.  This feature, <a
+href="http://lwn.net/Articles/14768/">merged for 2.5.45</a>, attempts to
+track which pages are most likely to be present in the processor's caches.
+If the memory allocator can give cache-warm pages to requesters, memory
+performance should improve.  But, notes Mel, it turns out that very few
+pages are being freed as "cold," and that, in general, the decisions on
+whether to tag specific pages as being hot or cold are questionable.  This
+feature adds some complexity to the page allocator and doesn't seem to
+improve performance, so Mel decided to take it out.  After <a
+href="/Articles/320568/">running some benchmarks</a>, though, he concluded
+that, in fact, he has no idea whether the feature helps or not.  So the
+second version of the patch has left out the hot/cold removal, but this
+topic will be revisited in the future.
+<p>
+
+Mel claims some good results:
+<p>
+<div class="BigQuote">
+	Running all of these through a profiler shows me the cost of page
+	allocation and freeing is reduced by a nice amount without
+	drastically altering how the allocator actually works. Excluding
+	the cost of zeroing pages, the cost of allocation is reduced by 25%
+	and the cost of freeing by 12%.  Again excluding zeroing a page,
+	much of the remaining cost is due to counters, debugging checks and
+	interrupt disabling.  Of course when a page has to be zeroed, the
+	dominant cost of a page allocation is zeroing it.
+</div>
+<p>
+A number of standard user-space benchmarks also show improvements with this
+patch set.  The reviews are generally good, so the chances are that these
+changes could avoid the lengthy delays that characterize memory management
+patches and head for the mainline in the relatively near future.  Then
+there should be no excuse for trying to avoid the page allocator.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Page_allocator">Memory management/Page allocator</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/320556/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor320783"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2009 4:12 UTC (Thu)
+                               by <b>bluefoxicy</b> (guest, #25366)
+                              [<a href="/Articles/320783/">Link</a>] (20 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Can we run the page allocator faster by copying to zero... probably not, due to cache issues.  But, consider.<br>
+<p>
+mov 4096, %ecx<br>
+@@j0:<br>
+mov 0, [addr+%ecx]<br>
+loop @@j0 ; dec %ecx + jnz @@j0<br>
+<p>
+versus...<br>
+<p>
+mov srcaddr, %esi ; Source<br>
+mov dstaddr, %edi ; Destination<br>
+mov 1024, %ecx ; Number to copy<br>
+rep movsd ; Copy 4-byte double-words<br>
+<p>
+This is easily pipelined, internalized, and also runs 1/4 the operations.  Unfortunately it requires a big sweep through two pages of data; the CPU's cache algorithms should keep this up to date, but will probably destroy 8k of cache in the process.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/320783/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor320789"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2009 4:28 UTC (Thu)
+                               by <b>agrover</b> (guest, #55381)
+                              [<a href="/Articles/320789/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Zeroing pages? How about using a DMA engine, such as I/OAT? I think at least on recent Intel servers this should generally be available.<br>
+<p>
+You can use it to zero the page and not touch CPU cache.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/320789/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor320839"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2009 12:09 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/320839/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That would be useful if one often allocates pages and then doesn't access them for a long time, even to initialize them... but is this really common enough to be worth optimizing?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/320839/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor320858"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2009 14:35 UTC (Thu)
+                               by <b>etienne_lorrain@yahoo.fr</b> (guest, #38022)
+                              [<a href="/Articles/320858/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ The right time to zero a page is maybe when they are free'd, and then a DMA operation would tell the cache subsystem to use his local memory for something more interresting than blank pages (hoping that a dirty non-accessed cache line is preferably evicted to be used for another address needing cache).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/320858/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor320952"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2009 20:17 UTC (Thu)
+                               by <b>bluefoxicy</b> (guest, #25366)
+                              [<a href="/Articles/320952/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Zeroing a page on free is incorrect.  What if you free, allocate, don't use, free, allocate, don't use, free... kalloc() for example allocates units of 4k, 8k, 16k, 32k, 64k, 128k.  A 65k alloc will bring in 15 untouched pages, that then get freed.  The proper time to zero a page is just-in-time on read/write (which, coincidentally, is also the time to commit an allocation to a real physical memory page)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/320952/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor321013"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 27, 2009 1:21 UTC (Fri)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/321013/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <P>While it's true that zeroing <I>all</I> freed pages is a bad idea, keeping a pool of freed pages that's refilled during idle periods isn't so crazy.  I believe the Windows NT kernel does something along those lines. You do end up putting more code in the fast-path to detect whether the "prezeroed pool" is non-empty, and it only applies to GFP_ZERO pages anyway, so I suspect it ends up not being a win under Linux.</P>
+<P>Mel's patches bring a noticeable speedup at the benchmark level, and suggest to me that GFP_ZERO pages are not the most numerous allocations in the system.  This makes intuitive sense--most allocations back other higher-level allocators in the kernel and/or provide buffer space that's about to be filled.  There's no reason to zero it.  Complicating those allocations for a minor speedup in GFP_ZERO allocations seems misplaced.</P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/321013/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor321050"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 27, 2009 10:26 UTC (Fri)
+                               by <b>etienne_lorrain@yahoo.fr</b> (guest, #38022)
+                              [<a href="/Articles/321050/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ Please note that I was more talking about DMA zeroing, which is nearly "free" in CPU time (on some tests I did on PPC, it is more than 10 times faster than the CPU zeroing - excluding dcbz which cannot be used on un-cached memory to be precise).<br>
+ The big advantage is that it should also remove those cache-lines from the memory cache (layer 1, 2 and 3 if present) at time of free(), so it should still be better if you "free, allocate, don't use, free, allocate, don't use" because the allocated and unused memory isn't even fetched into the memory cache, and isn't made dirty for the other processors cache.<br>
+ But it is probably more complex (multiprocessor DMA semaphore), and for these kind of things only testing can tell the truth, and that truth is only valid for the tested environment.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/321050/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor321221"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 27, 2009 23:14 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/321221/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's nearly free, but is it worth the complexity? How many pages are <br>
+zeroed, and then not used soon enough that it's still in cache?<br>
+<p>
+IIRC the zero page was removed from the kernel because zeroing pages was <br>
+faster than doing pagetable tricks to share a single zero page. Pagetable <br>
+manipulation is particularly expensive, but even so...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/321221/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor321755"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">we have /dev/zero, why not use the hardware implementation?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 4, 2009 8:03 UTC (Wed)
+                               by <b>xoddam</b> (guest, #2322)
+                              [<a href="/Articles/321755/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yep.  Zeroing memory before handing it to userspace is a *very* common operation (an absolute requirement for security reasons) and every memory controller worth its salt should supply an efficient way of doing so without trashing the CPU cache.  If the Linux kernel doesn't already make use of it wherever it is available, that's madness.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/321755/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor320859"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2009 14:42 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/320859/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why would you copy zeros instead of filling with them?  There are no reads in the fill, and therefore never any cache misses.  The cache will merge the writes, too.  All of the operations are independent in a fill, too.  In a copy, you have to wait for reads to complete.<br>
+<p>
+If you want to get really fancy on a modern ISAs but not touch DMA engines, you'd use the various prefetch-for-write and streaming write instructions that write 128 bits or more at a go.  (I'm not limiting myself to x86 and SSE variants here.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/320859/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor320953"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2009 20:23 UTC (Thu)
+                               by <b>bluefoxicy</b> (guest, #25366)
+                              [<a href="/Articles/320953/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well the zero page is persistent anyway, but...<br>
+<p>
+You'd copy because the whole "copy 4096 bytes" instruction is ONE instruction, "rep movsd" (or "rep movsb" which is probably internally optimized to operate on words except for non-word-aligned start/end data).  The entire loop logic is internalized on the CPU, and there's no stepping through macroinstructions like "cmp," "jnz," "dec," or "loop"<br>
+<p>
+The assumption here is that the CPU's internal microcode for running a loop is a lot faster than stepping through two instructions:<br>
+<p>
+rep movsd ; Copy based on registers %esi, %edi, %ecx<br>
+<p>
+vs...<br>
+<p>
+@j00: ; label, not an instruction<br>
+mov 0,[addr+%ecx] ; Write 0x00 to addr+offset<br>
+loop ; dec %ecx &amp;&amp; jnz @j00<br>
+<p>
+One of these involves branching, and thus branch prediction.  One of these involves cache, and thus prefetching... but also works internally.  Which is faster?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/320953/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor320956"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2009 20:46 UTC (Thu)
+                               by <b>bcopeland</b> (subscriber, #51750)
+                              [<a href="/Articles/320956/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The assumption here is that the CPU's internal microcode for </font><br>
+<font class="QuotedText">&gt; running a loop is a lot faster than stepping through two instructions:</font><br>
+<p>
+I admit I haven't kept up with the ISAs since pentium era, but for a while the rep functions were in fact slower than open-coded loops.  Anyway if it were true that rep movs was faster than dec/jmp, there is rep stosd which does the same thing but without copying.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/320956/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor321002"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 27, 2009 0:00 UTC (Fri)
+                               by <b>bluefoxicy</b> (guest, #25366)
+                              [<a href="/Articles/321002/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+stosd ... now you're talking.  That's obviously a better solution:  store a binary string of IMMEDIATE data, not copy memory data!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/321002/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor320965"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2009 21:24 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/320965/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The one that doesn't consume twice the memory bandwidth, i.e., not the <br>
+copy.<br>
+<p>
+Uncached memory is *far* slower than CPUs, and cache is precious and <br>
+limited.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/320965/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor320968"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2009 21:46 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/320968/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I came here to say pretty much the same thing.  Instructions in general are waaaaay faster than memory, so caring about branch predictor performance on an "easy" case (in this case, a long-running memory fill loop) is just silly.  Modern CPUs issue multiples of instructions per cycle and still measure run time in cycles per instruction, because memory is slooooooow.<br>
+<p>
+I believe AMD recommended "rep stosd" for filling memory at one time.  If you want to go faster still, I imagine there are SSE equivalents that store 128 or 256 bits at a go.  (I haven't kept up with the latest SSE2 and SSE3.  I focus on C6000-family TI DSPs.)<br>
+<p>
+If you throw in "prefetch for write" instructions, you optimize the cache transfers too.  I believe on AMD devices at least, it moves the line into the "O"wner state in its MOESI protocol directly, rather than waiting for the "S"hared -&gt; "O"wner transition on the first write.  (In a traditional MESI, it seems like it'd pull the line to the "E"xclusive state.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/320968/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor321011"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 27, 2009 1:08 UTC (Fri)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/321011/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, it appears AMD K7 and beyond go one better and have a "streaming store" that doesn't even do a cache allocate.  Nice.<br>
+<p>
+Here's the MMX and AMD optimized copies and fills the kernel currently uses.  I can't imagine they'd settle for a crappy loop here, and it looks like some thought was put into these.<br>
+<p>
+<a href="http://lxr.linux.no/linux+v2.6.28.7/arch/x86/lib/mmx_32.c">http://lxr.linux.no/linux+v2.6.28.7/arch/x86/lib/mmx_32.c</a><br>
+<p>
+On regular x86, they do indeed use "rep stosl".  (I guess the AT&amp;T syntax spells it "stosl" instead of "stosd"?)  See around like 92.<br>
+<p>
+<a href="http://lxr.linux.no/linux+v2.6.28.7/arch/x86/include/asm/string_32.h">http://lxr.linux.no/linux+v2.6.28.7/arch/x86/include/asm/...</a><br>
+<p>
+Rampant speculation is fun and all, but I suspect Arjan actually measured these.  :-)  (Or, at least the ones in the MMX file.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/321011/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor320969"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2009 22:45 UTC (Thu)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/320969/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why would the processor be any less likely to mispredict rep than loop? In both cases, the processor can tell exactly how many iterations should go into the pipeline because nothing else in the loop writes to the count register.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/320969/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor321003"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 27, 2009 0:01 UTC (Fri)
+                               by <b>bluefoxicy</b> (guest, #25366)
+                              [<a href="/Articles/321003/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was more banking on the processor realizing it doesn't even have to attempt branch prediction.  *shrug*<br>
+<p>
+As another poster said, rep may or may not be faster/slower than open coded loops.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/321003/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor321288"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 28, 2009 17:53 UTC (Sat)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/321288/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+You'd copy because the whole "copy 4096 bytes" instruction is ONE instruction, "rep movsd"
+</blockquote>
+
+And filling is also just one instruction: "rep stosd".
+
+<p>Concerning speed, this stuff is probably bandwidth-limited in the
+usual case (when the page has cooled down for a while), so the time
+for the in-core execution probably does not really matter.  The branch
+in the looping version should be very well predictable.  Hmm, I think
+it's more likely that "rep stosd" avoids the write-allocation
+cache-line reads than the looping version, and that would have an
+effect with the page being cold. If you want to know for certain, just
+measure it.
+
+<p>About using the DMA engine, I remember (but could not find last I
+looked) a posting (by IIRC Linus Torvalds) many years ago that
+compared the Linux approach of clearing on-demand with some other OS
+(BSD?) that cleared pages in the idle process or something (where it
+costs nothing in theory).  In the bottom line (i.e., when measuring
+application performance) the Linux approach was faster, because the
+page was warm in the cache afterwards, and accesses to the page did
+not incur cache misses.  This should still hold, even with clearing by
+a DMA engine.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/321288/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor321974"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 5, 2009 8:18 UTC (Thu)
+                               by <b>efexis</b> (guest, #26355)
+                              [<a href="/Articles/321974/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Plus you usually don't want empty pages sitting around doing nothing; it's a waste of memory. All "free" pages can instead be used as swap/filesystem cache. If a memory request comes in, then the page is yanked from the page cache, wiped, and given straight to whoever needs it. If the original contents (before it was yanked) are needed by the pagecache, it's merely faulted back in, pulling the data from its backing store, into a new location (and doesn't need pre-wiping for this purpose). Yes there is a case for fresh memory upon system boot, but as that only occures once per page, it's really not worth bogging the kernel down with code for.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/321974/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor321982"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 5, 2009 8:37 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/321982/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Don't get hung up on the fact that "rep stosd" is one instruction.  The number of instructions isn't what matters, it's the number of memory operations.  The CPU expands "rep stosd" and "rep movsd" into lots of "mov" instructions under the hood.  Talking about the number of instructions here is just talking about code size, not how fast it actually fills memory.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/321982/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor321166"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Speeding up the page allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 27, 2009 18:04 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/321166/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+A number of standard user-space benchmarks also show improvements with this patch set.
+</blockquote>
+<p>
+Strange that the article states this as an afterthought, after giving details about a meaningless measurement: reduction in allocation time as a fraction of the former allocation time.  I wonder how much the changes speed up something people care about (such as these standard benchmarks measure).
+<p>
+The improvements mentioned in the article just don't <em>seem</em> like they would make a noticeable improvement.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/321166/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2009, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,825 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Non-blocking buffered file read operations [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/612483/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/612436/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/612483/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Non-blocking buffered file read operations</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 23, 2014</br>
+           </div>
+It is natural to think of buffered I/O on Unix-like systems as being
+asynchronous.  In Linux, the page cache exists to separate process-level
+I/O requests from the physical requests sent to the storage media.  But, in
+truth, some operations are synchronous; in particular, a read operation
+cannot complete until the data is actually read into the page cache.  So a
+call to <tt>read()</tt> on a normal file descriptor can always block; most
+of the time this blocking causes no difficulties, but it can be problematic
+for programs that need to always be responsive.  Now, a partial solution is
+in the works for this kind of code, but it comes at the cost of adding as
+many as four
+new system calls.
+<p>
+The problem of blocking buffered reads is not new, of course, so
+applications have worked around it in a number of ways.  One common
+approach is to create a set of threads dedicated to performing buffered
+I/O.  Those threads can block while other threads in the program continue
+to do other work.  This solution works and can be efficient, but it
+inevitably  adds a
+certain amount of inter-thread communication overhead, especially in cases
+where the desired data is already in the page cache and a <tt>read()</tt>
+call could have completed immediately.
+<p>
+A recent <a href="/Articles/612421/">patch set</a> from Milosz Tanski
+attempts to solve the problem a different way.  Milosz's approach is to
+allow a program to request non-blocking behavior at the level of a single
+<tt>read()</tt> call.  Unfortunately, the current <tt>read()</tt> and
+variants do not have a "flags" argument, so there is no way to express that
+request using them.  So Milosz adds two new versions of each
+of <tt>read()</tt> and <tt>write()</tt>:
+<p>
+<pre>
+    int readv2(unsigned long fd, struct iovec *vec, unsigned long vlen, int flags);
+    int writev2(unsigned long fd, struct iovec *vec, unsigned long vlen, int flags);
+    int preadv2(unsigned long fd, struct iovec *vec, unsigned long vlen,
+		unsigned long pos_l, unsigned long pos_h, int flags);
+    int pwritev2(unsigned long fd, struct iovec *vec, unsigned long vlen,
+		 unsigned long pos_l, unsigned long pos_h, int flags);
+</pre>
+<p>
+In each case, the system call is just like its predecessor with the
+exception of the addition of the <tt>flags</tt> argument.  Note that the
+two offset parameters (<tt>pos_l</tt> and <tt>pos_h</tt>) to
+<tt>preadv2()</tt> and <tt>pwritev2()</tt> will 
+be combined into a single <tt>off_t</tt> parameter at the C library level.
+<p>
+In Milosz's patch set, the only supported flag is <tt>RWF_NONBLOCK</tt>,
+which requests non-blocking operation.  If a read request is accompanied by
+this flag, it will only complete if (at least some of) the requested data
+is already in the page cache; otherwise it returns <tt>EAGAIN</tt>.  The
+current patch does not start any sort of readahead operation if it is
+unable to satisfy a non-blocking read request.  The new write operations do
+not support non-blocking operation; the <tt>flags</tt> argument must be
+zero when calling them.  Adding non-blocking behavior to <tt>write()</tt>
+is possible; such a write would only complete if memory were immediately
+available for a copy of the data in the page cache.  But that
+implementation has been left as a future exercise.
+<p>
+<h4>Considering the alternatives</h4>
+<p>
+The patch is relatively simple and straightforward, but one might well
+wonder: why is it necessary to add a new set of system calls for
+non-blocking operation when the kernel has long supported this mode via
+either the <tt>O_NONBLOCK</tt> flag to <tt>open()</tt> or <tt>fcntl()</tt>?
+There are, it seems, a couple of reasons for not wanting to implement
+ordinary non-blocking I/O behavior for regular files, the first of which
+being that it will break applications.
+<p>
+Given that non-blocking I/O is an optional behavior that must be explicitly
+requested, it is not obvious that supporting it for regular
+files would create 
+trouble.  It comes down to the fact that passing <tt>O_NONBLOCK</tt> to an
+<tt>open()</tt> call actually requests two different things: (1)&nbsp;that
+the <tt>open()</tt> call, itself, not block, and (2)&nbsp;that subsequent
+I/O be non-blocking.  There are applications that use <tt>O_NONBLOCK</tt>
+for the first reason; Samba uses it, for example, to keep an
+<tt>open()</tt> call from blocking in the presence of locks on the file.
+Since buffered reads have always blocked regardless of <tt>O_NONBLOCK</tt>,
+applications do not concern themselves with calling <tt>fcntl()</tt> to
+reset the flag before calling <tt>read()</tt>.  If those <tt>read()</tt>
+calls start returning <tt>EAGAIN</tt>, the application, which is not
+expecting that behavior, will fail.  
+<p>
+
+One could argue that this behavior is incorrect, but it has worked for
+decades; breaking these applications with a kernel change is not
+acceptable.  Samba is not the only application to run into trouble here;
+evidently <a href="/Articles/612805/">squid and GQview</a> fail as well.
+So the problem is clearly real.
+
+<p>
+Beyond that, as Volker Lendecke <a href="/Articles/612806/">explained</a>,
+full non-blocking behavior would not play well with how applications like
+Samba want to use this feature.  The wish is to attempt to read the needed
+data in the non-blocking mode; should the data not be available, the
+request will be turned over to the thread pool for synchronous execution.
+If the thread pool is using the same file descriptor, its attempts to
+perform blocking reads will fail.  If it uses a different file descriptor,
+it can run into weird problems relating to the surprising semantics of
+POSIX file locks (see <a href="/Articles/586904/">this article</a> for more
+information).  So the ability to request non-blocking behavior on a
+per-read basis is needed.
+<p>
+Another possibility would be to add a version of the <tt>fincore()</tt>
+system call, which allows a process to ask the kernel whether a specific
+range of file data is present in the page cache.  Patches adding
+<tt>fincore()</tt> have been around since <a href="/Articles/371538/">at
+least 2010</a>.  But <tt>fincore()</tt> is seen as a bit of an indirect
+route toward the real goal, and there is always the possibility that the
+situation might change between a call to <tt>fincore()</tt> and the
+application's decision to do something based on the result.  Requesting
+non-blocking behavior with the <tt>read()</tt> avoids that particular race
+condition. 
+<p>
+Finally, one could also consider the kernel's asynchronous I/O subsystem,
+which allows an application to obtain non-blocking behavior on a
+per-request basis.  But asynchronous I/O has never been supported for
+buffered I/O, and <a href="/Articles/73847/">attempts to add that
+functionality</a> have bogged down in the sheer complexity of the problem.
+Adding non-blocking behavior to <tt>read()</tt> — where, unlike with
+asynchronous I/O, a request can simply fail if it cannot be satisfied
+immediately — is far simpler.
+<p>
+So the end result would appear to be that we will get a new set of
+Linux-specific system calls allowing applications to request non-blocking
+<tt>read()</tt> behavior on regular files.  The rate of change on this
+patch set is slowing — though it is worth noting that <tt>readv2()</tt> and
+<tt>writev2()</tt> have been removed from <a href="/Articles/613068/">the
+latest version</a> (as of this writing) of the patch set.
+It is getting late to have this code ready for the 
+3.18 development cycle, but it should be more than ready for 3.19.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Asynchronous_IO">Asynchronous I/O</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#System_calls">System calls</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/612483/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor613080"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2014 3:06 UTC (Thu)
+                               by <b>shemminger</b> (subscriber, #5739)
+                              [<a href="/Articles/613080/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Of course if AIO in Linux were not so fundamentally brain dead, no one would have to reinvent it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613080/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor613139"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2014 13:17 UTC (Thu)
+                               by <b>sorokin</b> (guest, #88478)
+                              [<a href="/Articles/613139/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not familiar with POSIX AIO. Could you elaborate why it is brain dead. After a quick reading, API seems pretty straightforward. Surely I'd prefer to have notifications enqueued in an epoll descriptor, instead of aio_suspend(). But this seems to be achievable using SIGEV_SIGNAL + signalfd.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613139/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor613143"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2014 13:21 UTC (Thu)
+                               by <b>ejr</b> (subscriber, #51652)
+                              [<a href="/Articles/613143/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Different cases.  This appears to be "if it's already here, gimme a quick memory copy" while AIO is "read this when you can, I'll check back later" (or at least was on AIX &amp; Solaris when last I used it). A server can use the first to lower latency on fast-path responses.  For the former, the permissions and meta-data are assumed also to be in memory.  The latter is more useful with pre-allocated spaces to avoid eating memory twice.  But it's been a while using non-MPI-AIO, so I could have missed AIO changes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613143/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor613198"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2014 15:10 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/613198/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      "if it's already here, gimme a quick memory copy" sounds like the file analogue of <a href="http://lwn.net/Articles/602650/">volatile ranges</a>.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613198/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor615285"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 8, 2014 7:19 UTC (Wed)
+                               by <b>dgm</b> (subscriber, #49227)
+                              [<a href="/Articles/615285/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It looks like a recurring pattern. Apparently there's a desire to delegate caching from applications into the kernel. And it makes sense, if you ask me. The kernel can manage resources, be it memory or disk space, on a global scale. Just think of the vast amount of memory "trapped" into each application internal caches that could be much efficiently handled by the kernel, if only the right abstractions existed (basically: a system call for "remember this if you can"). This could also be applied to disk space, for instance, allowing full use of your disks for caching network data in a controlled way and without affecting the behavior of the rest of the system.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615285/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor613122"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2014 10:34 UTC (Thu)
+                               by <b>simlo</b> (guest, #10866)
+                              [<a href="/Articles/613122/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Please, just give me a flag, saying the O_NONBLOCK option to also cover disk-io.<br>
+<p>
+In general I code with non-blocking io. Everything is a file descriptor, so I can the same code to handle data from a TCP connection, a serial interface, fifo - and a file. It is a pain that a read from a file is blocking, and the inconsistent, when I have set O_NONBLOCK on the socket.<br>
+<p>
+In general file IO ought to be handled more like network io, due to network file systems. A blocking io from a network file system can make applications hang. This happens a lot for many desktop applications.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613122/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor613126"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2014 10:55 UTC (Thu)
+                               by <b>mpr22</b> (subscriber, #60784)
+                              [<a href="/Articles/613126/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>It seems to me that your proposal doesn't achieve what is desired:</p>
+<blockquote>The wish is to attempt to read the needed data in the non-blocking mode; should the data not be available, the request will be turned over to the thread pool for synchronous execution. If the thread pool is using the same file descriptor, its attempts to perform blocking reads will fail. If it uses a different file descriptor, it can run into weird problems relating to the surprising semantics of POSIX file locks (see this article for more information). So the ability to request non-blocking behavior on a per-read basis is needed.</blockquote>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613126/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor613261"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2014 21:48 UTC (Thu)
+                               by <b>simlo</b> (guest, #10866)
+                              [<a href="/Articles/613261/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't see why I can't get the option of making file io behave as non-blocking TCP:<br>
+<p>
+Use of select()/poll() to get an event on a read- and/or write-able file descriptor, and read returns whatever is available, write writes unblocking until the kernel-buffer is full. In both cases the DMA interupt comes back and marks the filedescriptor read- or writeable again, such select or poll will wake up. Just as a the network interrupt wakes up my TCP socket.<br>
+<p>
+I know with the current UNIX behaviour, where files are seen as an extension of the direct memory rather than IO, it doesn't make sense to be non-blocking for file-io.<br>
+But files are much, much slower than memory, file-io can fail, file-io can via a network file system. It does not make sense to make file IO behave differently than network IO.<br>
+<p>
+So I turn the UNIX philosophy around: Instread of describing a network connection with a file descriptor, I will rather use a network descriptor for a files.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613261/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor613553"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 26, 2014 23:45 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/613553/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      The analogous function for regular files to the select and nonblocking read function of a socket is for select to wait until there is data in the file at the current file pointer, and a blocking read to wait at eof until it isn't eof anymore because the file got bigger.
+<p>
+The problem discussed in the article is a different one from the one involved in blocking vs nonblocking socket I/O.  In the socket case, it's a question of whether to wait for data to exist, while in the article it's about whether to wait to get existing data, since it may or may not be gettable quickly.
+<p>
+If you want to use select and nonblocking I/O to avoid waiting for file data to be read from the backing store, you need a rather different protocol.  You need a system call to start a stream of file data into memory, and then read system calls to consume that data.  (And you'd probably use a socket for that).
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613553/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor613274"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RWF_ATOMIC and RWF_COMPARE_AND_WRITE</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2014 22:55 UTC (Thu)
+                               by <b>dougg</b> (guest, #1894)
+                              [<a href="/Articles/613274/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In the subject line there are two suggestions for write flags. They could be used when the file descriptor was a block device opened O_DIRECT.<br>
+<p>
+They would tie in with the recent SCSI commands: WRITE ATOMIC and COMPARE AND WRITE (see SBC-4 draft). For the latter command the first half of the buffer would be the compare and the second half the optional write. An errno would be needed to convey the idea of MISCOMPARE (i.e. when the optional write is not done).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613274/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor613365"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 26, 2014 12:07 UTC (Fri)
+                               by <b>eNovance</b> (guest, #92805)
+                              [<a href="/Articles/613365/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"If a read request is accompanied by this flag, it will only complete if (at least some of) the requested data is already in the page cache; otherwise it returns EAGAIN. The current patch does not start any sort of readahead operation if it is unable to satisfy a non-blocking read request."<br>
+<p>
+I don't understand how this API should be used. If I get EAGAIN, how can I asynchronously get more bytes?<br>
+<p>
+Is there an asynchronous "readahead" syscall? Or should I fallback to the blocking read()?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613365/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor613366"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 26, 2014 12:23 UTC (Fri)
+                               by <b>JGR</b> (subscriber, #93631)
+                              [<a href="/Articles/613366/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I don't understand how this API should be used. If I get EAGAIN, how can I asynchronously get more bytes?</font><br>
+<p>
+<font class="QuotedText">&gt; Is there an asynchronous "readahead" syscall? Or should I fallback to the blocking read()?</font><br>
+<p>
+The idea is that if you get an EAGAIN you can then do a blocking read using your thread pool.<br>
+However if the data is already in the page cache, you get it instantly without having incurred the overhead of context switching to/from a thread pool, and without the risk of blocking your "main" thread potentially indefinitely.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613366/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor613556"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 26, 2014 23:49 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/613556/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      And there must be some applications where if you can't get the data quickly and cheaply, you'll just do without it.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613556/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor613468"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 26, 2014 17:04 UTC (Fri)
+                               by <b>jonabbey</b> (guest, #2736)
+                              [<a href="/Articles/613468/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Any word on how the BSD folks handle this?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613468/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614072"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 29, 2014 20:11 UTC (Mon)
+                               by <b>justincormack</b> (subscriber, #70439)
+                              [<a href="/Articles/614072/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As far as I know not particularly well. The interfaces are there for compatibility but are fairly basic.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614072/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor613533"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 26, 2014 21:44 UTC (Fri)
+                               by <b>ppisa</b> (subscriber, #67307)
+                              [<a href="/Articles/613533/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am not big Windows fan but VMS concepts inspired solution with option to provide event object (lpOverlapped) to ReadFile and WriteFile is elegant solution. It allows to continue with program code and when data are really required then sychronization/wait for that even can be used. Even more objects can be wait for (WaitForMultipleObjects) but only to maximum of 64 which is quite limited if we speak about epoll(), poll() or even select(). Both are almost unlimited - 100000 descriptors are not any problem. For ancient select it requires allocation of larger size for set than default libc stuff does but it is manageable.<br>
+<p>
+On the other hand I am not sure if handle based explicits transfers are interesting these days. 64-bit space is bing enough to map portion or whole file to the process address space and then madvise and some clever completion event check/wait mechanism would be better option. I can imagine operation which creates event descriptor (similar to eventfd) and application declares set of ranges which should be made present in physical memory to signal that "eventfd" ready. The fd could be added to thread-loops epolls. Simpler implementation can be done to signal only single ready even per fd, more complex option could report ready ranges back through read of that "memreadyfd". The second solution would need less "memreadyfd" to be opened for complex case but complexity moves into "memreadyfd" implementation. The flag to mlock ready pages from requested range can be used to ensure that unnecessary trashing is not caused by missed reads. Process could used it ulimit permitted amount of allowed pages for these ranges requests.<br>
+<p>
+With above approach big database engine can request sets of ranges for each pending transaction. These ranges in given set can be even from  different files - i.e. double-entry bookkeeping - and actual transactions are processed in order of data availability in main memory.<br>
+<p>
+I have even looked some time ago into notification mechanisms in pagecache some years ago and I think that described feature would need minimal or no changes there - changes limited mostly to new user-kernel API only. But my knowledge is not enough to do these changes without cooperation and mainly review of idea by somebody who can predicts caveats and real usability and performance of such approach.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/613533/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor614112"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 30, 2014 10:16 UTC (Tue)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/614112/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Two comments:<br>
+<p>
+- Why not just add a new flag to fcntl (NON_BLOCKING_IO?), rather than new system calls? Then applications that want the full non-blocking experience can just do open+NON_BLOCK, fcntl+NON_BLOCKING_IO, and hey presto?<br>
+<p>
+- If system calls have to be added then, given the other problems there have been with adding new flags, it might be a good idea to have a way to distinguish between mandatory and optional new flags. I.e. if an application is compiled to use some new flag, but is run on a kernel that doesn't support it, the old kernel can still do something sensible if it can at least know whether the application requires that flag to be supported or not. ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614112/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor614309"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 1, 2014 11:25 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/614309/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm wondering why there's this obsession with adding flags for every new feature. System calls are not a fundamentally limited resource: we're not going to run out.<br>
+<p>
+You want a flag if it is likely that a program will want to call the function both with and without the flag from the same locus: changing the flags programmatically is a tiny bit easier than changing what function you're calling. But it will be rare to want to sometimes synchronously and sometimes asynchronously read() from the same read()-calling locus. And for this we're getting system calls with the viciously ugly names of '*v2()' and a bunch of flags? (This is particularly true given that the iovec-based interface proposed, while the only possible one, is clumsy enough that nobody will use this call unless they want asychronous I/O. So we have a flag here that will never be left out! Not until more flags are proposed, anyway.)<br>
+<p>
+Tell me, which is easier to read?<br>
+<p>
+reada(foo, bar, baz);<br>
+readv2(foo, bar, baz, RWF_NONBLOCK);<br>
+<p>
+I'd say it's the former. It's not so SHOUTY, and the name is a bit clearer. (Though there's not much in it.)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614309/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor614558"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 2, 2014 9:34 UTC (Thu)
+                               by <b>ssokolow</b> (guest, #94568)
+                              [<a href="/Articles/614558/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Correct me if I'm wrong, but I seem to remember an LWN article from a few years ago where room for new system calls being a limited resource WAS listed as a concern because the kernel ABI distinguished syscalls by integer identifiers rather than character strings for performance reasons.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/614558/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor615219"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 7, 2014 17:01 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/615219/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What, so we can only have billions of them? That's not limited enough to provide a reason to not make something a system call. :)<br>
+<p>
+(More relevant is that you need to wait until support percolates into glibc to use a system call, or have applications hardwire the call themselves during the transition period -- but the same applies to adding new flag bits, since you need to wait for their symbolic constants to hit glibc, or have applications hardwire the call themselves.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615219/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor615503"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Non-blocking buffered file read operations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2014 10:04 UTC (Thu)
+                               by <b>kevinm</b> (guest, #69913)
+                              [<a href="/Articles/615503/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This entire discussion revolves around a fundamental imprecision of language.<br>
+<p>
+Ordinary files *never* block, and this is why O_NONBLOCK does not affect them.  select() and poll() will always show ordinary files as readable and writeable.<br>
+<p>
+However, if the data is not immediately available, then the thread enters "disk wait" (this is the origin of the D state, as opposed to the S state shown by threads that are blocked).  Waiting and blocking are not the same thing, though.<br>
+<p>
+So really, the flag should be RWF_NO_WAIT.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/615503/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

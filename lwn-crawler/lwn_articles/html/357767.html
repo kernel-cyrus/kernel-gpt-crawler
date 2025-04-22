@@ -1,0 +1,424 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>File holes, races, and mmap() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/357767/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/357104/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/357767/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>File holes, races, and mmap()</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="GAByline">
+           <p>October 21, 2009</p>
+           <p>This article was contributed by Goldwyn Rodrigues</p>
+           </div>
+<p>
+File operations using <tt>truncate()</tt> have always had race conditions.
+Developers have always been concerned with file writes racing against file
+size modifications.
+Various corner cases exist where data could either be
+lost or ignored when an error occurs or unexpected data may
+occur where zeros are expected for holes in the file.  Jan Kara's
+<a href="http://lwn.net/Articles/353240/">patch</a> is an
+attempt to fix such races, and it depends on the  <a
+href="http://lwn.net/Articles/341352/">new truncate sequence</a>,  
+which corrects the way the inode size of the file is set.
+
+<h4> Holes</h4>
+<p>
+A hole in a file is an area represented by zeros. It
+is created when data is written at an offset beyond the current
+file size, or the file size is "truncated" to something larger than the
+current file size.
+The space between the old file size and the offset (or new file size)
+is filled by zeros. Most filesystems are smart enough to mark the
+holes in the inode, and not store them physically on disk (these are also known
+as sparse files). The filesystem marks blocks in the inode to denote that
+they are part of a hole.  When a
+user requests data from an offset in a hole, the filesystem creates
+a page filled with zeroes and passes it to user space.
+
+<p>
+The handling of holes becomes a little tricky when the holes
+are not aligned to the filesystem block boundary.  In that case, parts of 
+blocks must be zeroed to represent the holes.
+For example, a 12k file on a filesystem with 4k block size with a
+hole at offset 2500 of size 8192, would require the last 1596
+(4096-2500) bytes of the first block to be set to zero and the first 2500 bytes
+of the third block to be set to zeroes. The second block is bypassed in
+the inode's list of data blocks and does not occupy any space on
+disk.
+
+<p>
+<img src="https://static.lwn.net/images/file-hole.png" alt="[File hole]" width=600 height=321>
+
+
+<h4>Mmap</h4>
+
+<p>
+<tt>mmap()</tt> is a system call to map the contents of a file into memory.
+The call takes the address where the file should be mapped, 
+a file descriptor, the offset within the file to be mapped, and the length
+of data from the offset to be mapped. Usually, the address
+passed is NULL, so that the kernel can choose an address and provide
+it to the process. Mmap can be performed in two ways:
+<ul>
+<li> Private mapping - defined by MAP_PRIVATE, this map is private to
+the process. Any modifications to the data are not reflected to the
+file. If the process modifies the data, the page is copied and
+modifications are performed in the new page. This is popularly known
+as copy-on-write (COW)
+
+<li> Shared mapping - defined by MAP_SHARED, this map can be shared
+among processes, and can be used as an effective tool for
+Inter-Process Communication (IPC). Any modification performed in the
+file are written back to the disk, and is available for other processes
+to read. However, data writes to disk are not guaranteed to be
+immediate, and are usually performed when the process calls <tt>msync()</tt> or
+<tt>munmap()</tt>.
+</ul>
+
+When a process calls <tt>mmap()</tt>, the kernel sets up Virtual Memory Address
+(VMA) region to map the pages of the file to disk. It assigns the file's
+<tt>struct vm_operations</tt> to <tt>vma->vm_ops</tt>. <tt>struct
+vm_operations</tt> contains pointers to a set of functions which assist in
+getting the pages to memory on demand. 
+<a
+href="http://lwn.net/Articles/242625/"><tt>vm_operations.fault()</tt></a>  
+is called when the user access a virtual memory area not present in
+main memory. It is responsible for fetching the page from disk and putting
+it into memory. If the vma is shared,
+<tt>vm_operations.page_mkwrite()</tt> makes the page writable, otherwise the
+page is duplicated using COW. <tt>page_mkwrite()</tt> is responsible for
+keeping track of all information required by the filesystem, such as
+buffer_heads, to put the data back on disk. Typically, this means
+preparing the block for write, checking that there is enough disk space
+(returning <tt>ENOSPC</tt> if not), and
+committing the write.
+
+<p>
+The current sequence in <tt>page_mkwrite()</tt> can race with 
+file size changes performed by <tt>truncate()</tt>. File truncates
+happening while the data is written back from a shared <tt>mmap()</tt>
+could lead to unexpected results, such as loss of data or data
+in places where zeros are expected.
+
+<h4>Data loss</h4>
+<p>
+Data loss in a program can occur in a specific case where a program
+maps a file into memory bigger than the current file size.
+To explain how data loss can occur, consider the following code snippet for
+writing a file, on a 
+system with a block size of 1024 bytes and a page size of 4096 bytes:
+
+<pre>
+    ftruncate(fd, 0);
+    pwrite(fd, buf, 1024, 0);
+
+    map = mmap(NULL, 4096, PROT_WRITE, MAP_SHARED, fd, 0);
+    map[0] = 'a';  /* page_mkwrite() for index 0 is called */
+</pre>
+<p>
+Note that even though the file size is set to 1024 bytes, the map is
+mapped to 4096, which is beyond the current file size. This is
+feasible because pages from a file are mapped in page size chunks. 
+Since there is a change to the shared memory, this causes the entry in
+the page table to become writable.
+
+<pre>
+    pwrite(fd, buf, 1, 10000);
+    map[3000] = 'b';
+    fsync(fd); /* writepage() for index 0 is called */
+</pre>
+
+<p>
+When the first <tt>page_mkwrite()</tt> is called, only block 0 is allocated because
+the file size can fit in 1024 bytes. However, when the program later increases
+the file size and calls <tt>fsync()</tt>, the <tt>writepage()</tt> needs to
+allocate 3
+more blocks to complete the write caused by changing <tt>map[3000]</tt>. 
+In that situation, if the user's quota exhausts or the filesystem has
+no more space, the data modified by <tt>map[3000]</tt> is silently ignored. 
+
+
+<h4>Unexpected non-zeroes in a hole</h4>
+<p>
+A non-zero character can end up in a hole if the process dies after
+extending the file, but before zeroing the page and writing it.
+To understand the problem, consider the following code snippet:
+
+<pre>
+    ftruncate(fd, 1000);
+    map = mmap(NULL, 4096, PROT_WRITE, MAP_SHARED, fd, 0);
+    while (1)
+        map[1020] = 'a';
+</pre>
+
+<p>
+The program continuously writes at offset 1020. The kernel zeroes the
+page from offset 1000 to 4096 before writing the page to disk. However,
+<tt>map[1020]</tt> can be set after the kernel has zeroed the page. The page is
+unlocked and set for write-back. In this case, a non-zero character
+will be written to the disk. This is not a problem because it is out
+of the range of the file size. However, if another process increases
+the file size (and thus the size of the hole), and is killed before
+re-zeroing and writing the page, the "dirty character" will be
+included in the file the next time the file is read. This problem
+exists regardless of the block size of the filesystem. The complete
+program to demonstrate this problem is posted <a
+href="http://news.gmane.org/find-root.php?message_id=<20090616144217.GA18063%40duck.suse.cz>">here</a>.
+
+<h4>Solution</h4>
+
+<p>
+Jan's patch introduces helper functions which facilitate the creation
+of holes: <tt>block_prepare_hole()</tt> and <tt>block_finish_hole()</tt>.
+These functions are respectively called in <tt>write_begin()</tt> and
+<tt>write_end()</tt> sequence of address space operations if the current
+file position is detected to be beyond the current file size, that is,
+for creation of a hole. <tt>write_begin()</tt> and <tt>write_end()</tt>
+are usually called in <tt>page_mkwrite()</tt>. The part of the page in the
+hole is zeroed in 
+<tt>block_prepare_hole()</tt> instead of <tt>block_write_full_page()</tt>.
+The page remains locked during the entire <tt>page_mkwrite()</tt> sequence, so it
+is protected against writes from other processes.
+The truncate operation can only occur once the page lock is
+released, serializing the sequence. This resolves the problem of the
+stray data that can land in the hole.
+
+<p>
+On the other hand, <tt>block_finish_hole()</tt> is responsible for
+marking the part of the page in the hole as read-only. If the process
+attempts to write anything in the part of the hole belonging to the
+page,  <tt>page_mkwrite()</tt> will be called. The kernel gets an opportunity to
+allocate <tt>buffer_heads</tt>, if required, for the additional write,
+or return an error in the case of <tt>ENOSPC</tt> or <tt>EDQUOT</tt>. If
+there is an error, 
+<tt>write_begin()</tt> will return it, thus, modifying the
+mapped memory area, will return an error (<tt>SIGSEGV</tt>). 
+The function to write data back to disk,
+<tt>block_write_full_page()</tt>, checks for all pages' buffers in the
+page instead of just those within the file size, which are delayed or
+mapped. The new truncate sequence guarantees that the file is not
+truncated while this is performed. This resolves the problem of data
+loss.
+
+<p>
+The patch introduces a new field <tt>new_writepage</tt> in
+<tt>struct address_space_operations</tt>, to store the
+new method used to perform the <tt>writepage()</tt>. Like the new truncate
+sequence, this field is a temporary hack and will go away once all filesystems
+adhere to the new standards of writing the pages to disk.
+Filesystems implementing the new method of <tt>writepage</tt> must set the
+<tt>new_writepage</tt> and handle blocks with holes, by preparing the creation of
+holes in <tt>write_begin()</tt>, and to terminate it in
+<tt>write_end()</tt>. The old behavior of handling
+<tt>page_mkwrite()</tt> is restored in <tt>noalloc_page_mkwrite()</tt>. It does
+not allocate any blocks on page fault and marks all the unmapped
+buffers in the page as delayed so that <tt>block_write_full_page()</tt> writes them.
+
+
+<p>
+<tt>simple_create_hole()</tt> is a new function analogous to the rest of the
+<tt>simple_*</tt> functions; it is a simple way of creating hole in a file. 
+The function zeros out the part of the pages which are a part of the
+hole. This function is called whenever file size is truncated beyond
+the current file size.
+
+<p>
+This posting is the third revision of the patch, and most of the
+objections have been ironed out in the earlier two passes. Since this
+patch deals with closing a race condition, it is probable that it will be
+included eventually. However, this series 
+depends on the new truncate series, so it must wait for those
+patches to be incorporated in the mainline kernel. Moreover, the
+hackish method of distinguishing the new writepage must be removed. This 
+requires all filesystems transition to using the new writepage sequence.
+
+<p>
+[ Thanks to Jan Kara for reviewing the article. ]<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems">Filesystems</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Rodrigues_Goldwyn">Rodrigues, Goldwyn</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/357767/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor358428"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">example typos</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2009 21:06 UTC (Fri)
+                               by <b>bfields</b> (subscriber, #19510)
+                              [<a href="/Articles/358428/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>pwrite(fd, buf, 1, 10000);<br>
+...<br>
+Note that even though the file size is set to 1000 bytes<br>
+</blockquote>
+
+<p>Was the fourth argument to pwrite() intended to be 1000, not 10000?  (After which the file size should be 1001 bytes, not 1000.)
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358428/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor358717"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">example typos</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 26, 2009 17:43 UTC (Mon)
+                               by <b>jan.kara</b> (subscriber, #59161)
+                              [<a href="/Articles/358717/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, the argument should really be 10000. But the sentence below the example is confusing (and has a typo). It should be something like:<br>
+Note that 4096 bytes of the file are mapped (even though the file size at the time of mmap was 1024 bytes) because files are mapped in page-sized chunks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358717/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor358800"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">example typos</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 26, 2009 23:26 UTC (Mon)
+                               by <b>goldwynr</b> (guest, #55322)
+                              [<a href="/Articles/358800/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, thats right. Correct the article now. Thanks!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358800/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2009, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

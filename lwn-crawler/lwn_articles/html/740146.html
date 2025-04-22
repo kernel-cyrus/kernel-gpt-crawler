@@ -1,0 +1,681 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>BPF-based error injection for the kernel [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/740146/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/739336/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/740146/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>BPF-based error injection for the kernel</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 29, 2017</br>
+           </div>
+Diligent developers do their best to anticipate things that can go wrong
+and write appropriate error-handling code.  Unfortunately, error-handling
+code is especially hard to test and, as a result, often goes untested; the
+code meant to deal with errors, in other words, is likely to contain errors
+itself.  One way of finding those bugs is to inject errors into a running
+system and watching how it responds; the kernel may soon have a new
+mechanism for doing this sort of injection.
+<p>
+As an example of error handling in the kernel, consider memory
+allocations.  There are few tasks that can be performed in kernel space
+without allocating memory to work with.  Memory allocation operations can
+fail (<a href="/Articles/627419/">in theory, at least</a>), so any code
+that contains a call to a function like <tt>kmalloc()</tt> must check the
+returned pointer and do the right thing if the requested memory was not
+actually allocated.  But <tt>kmalloc()</tt> almost never fails in a running
+kernel, so testing the failure-handling paths is hard.  It is probably fair
+to say that a large percentage of allocation-failure paths in the kernel
+have never been executed; some of those are certainly wrong.
+<p>
+The kernel gained <a href="/Articles/209257/">a fault-injection
+framework</a> back in 2006; it can be used to test error-handling paths by
+causing memory allocation 
+requests to fail.  Just making <tt>kmalloc()</tt> fail universally is
+unlikely to be helpful, though; execution will almost certainly never make
+it to the code that the developer actually wants to test.  The
+fault-injection framework has some parameters to control which allocation
+attempts should fail, but the mechanism is somewhat awkward to use and is
+not as flexible as one might like.  So the number of developers actually
+using this framework is small.
+<p>
+Fully generalizing fault injection would be a lot of work.  A developer may
+want to see what happens when a specific <tt>kmalloc()</tt> call fails, but
+perhaps only when it is invoked from a specific call path or when some
+other condition is true.  It has not been possible in the past to describe
+these conditions to the framework but, in recent years, a new technology
+has come along that can provide the required flexibility: the BPF virtual
+machine.
+<p>
+It is already possible to attach a BPF program to an arbitrary function
+using the kprobe mechanism.  Such programs are useful for information
+gathering, but they cannot be used to affect the execution of the function
+they are attached to.  Thus, they are not usable for error injection.  That
+situation changes, though, with <a href="/Articles/739442/">this patch
+set</a> from Josef Bacik, which is intended to turn BPF into a generalized
+mechanism for the injection of errors into a running kernel.
+<p>
+The core of the new mechanism is a BPF-callable function called
+<tt>bpf_override_return()</tt>.  If a BPF program attached to a kprobe
+calls this function, the execution of the function the program is attached
+to will be shorted out and its return value will be replaced with a value
+supplied by that BPF program.  The patch set contains <a
+href="/Articles/740148/">an example</a> in the form of a test program:
+<p>
+<pre>
+    SEC("kprobe/open_ctree")
+    int bpf_prog1(struct pt_regs *ctx)
+    {
+	unsigned long rc = -12;
+
+	bpf_override_return(ctx, rc);
+	return 0;
+    }
+</pre>
+<p>
+
+This function can be compiled to BPF using the LLVM compiler.  The
+<tt>SEC()</tt> directive at the top specifies that this function should be
+attached to a kprobe placed at the beginning of <a
+href="http://elixir.free-electrons.com/linux/v4.14.2/source/fs/btrfs/disk-io.c#L2555"><tt>open_ctree()</tt></a>,
+a function in the Btrfs filesystem implementation.  After the placement of
+this probe and the attachment of the BPF function, a call to
+<tt>open_ctree()</tt> will be overridden and the value -12
+(<tt>-ENOMEM</tt>) will be returned.  This is a relatively simplistic
+example, of course; it is expected that many uses will require more
+sophisticated BPF programs to narrow down the set of situations where the
+injection will occur.
+<p>
+This patch set had been through several revisions and appeared ready for
+inclusion into the mainline; it had even been <a
+href="/Articles/740149/">applied</a> to the networking tree for the 4.15
+merge window.  Things came to a halt, though, when Ingo Molnar <a
+href="/Articles/740151/">blocked</a> the progress of this patch set out of
+worries that it violated one of the basic promises behind the BPF virtual
+machine and could destabilize the kernel:
+<p>
+<div class="BigQuote">
+	One of the major advantages of having an in-kernel BPF sandbox is
+	to never crash the kernel - and allowing BPF programs to just
+	randomly modify the return value of kernel functions sounds
+	immensely broken to me.
+</div>
+<p>
+After some discussion, a solution was agreed to: BPF programs would retain
+the ability to override kernel functions, but only for functions that have
+been specifically marked to allow this to happen.  A new macro called
+<tt>BPF_ALLOW_ERROR_INJECTION()</tt> was introduced; it can be used to add
+the required annotation to a function.  See, for example, <a
+href="/Articles/740152/">this patch</a> adding the marking for
+<tt>open_ctree()</tt>.  Molnar <a href="/Articles/740155/">suggested</a>
+some additional conditions — only functions whose return value cannot crash
+the kernel should be annotated, and the override function should only
+change integer error values — but nothing enforces those rules in the
+current patch set.
+<p>
+Bacik's patch set only marks that one function; it is not clear whether
+those markings will be added in any quantity to the mainline kernel, or
+whether they will, instead, be maintained as private patches by the
+developers who use them.  One can imagine that there could be some
+resistance to marking up the mainline in this way.  But, on the other hand,
+there would be value in marking functions like <tt>kmalloc()</tt> to enable
+the development of generic tools that can be used to test specific
+allocation-error handling paths.  
+<p>
+That question is only likely to be resolved once the mechanism is in place
+and patches marking functions for error injection start to appear.  
+Meanwhile, the objections to the core mechanism have been addressed, and
+its path into the mainline appears to be clear.  It has missed the 4.15
+merge window, though, so it will almost certainly have to wait until 4.16.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Development_tools-Kernel_debugging">Development tools/Kernel debugging</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Fault_injection">Fault injection</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/740146/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor740264"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kernel-corrupting BFF programs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 29, 2017 20:12 UTC (Wed)
+                               by <b>darwish</b> (guest, #102479)
+                              [<a href="/Articles/740264/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I honestly agree with Ingo here. At the theoretical level, this is the anti-thesis of BPF! Having a sound design is criical for operating systems progress in the long term..<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740264/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor740268"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kernel-corrupting BFF programs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 29, 2017 21:05 UTC (Wed)
+                               by <b>SEJeff</b> (guest, #51588)
+                              [<a href="/Articles/740268/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Somewhere out of the public eye, Brad Spengler (aka spender) is coming up with ways that this can turn into root exploits and is writing code to ensure grsecurity prevents it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740268/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor740398"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kernel-corrupting BFF programs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2017 1:02 UTC (Fri)
+                               by <b>JdGordy</b> (subscriber, #70103)
+                              [<a href="/Articles/740398/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+dumb question but don't you already need root to attach these programs?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740398/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor740271"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kernel-corrupting BFF programs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 29, 2017 22:00 UTC (Wed)
+                               by <b>NAR</b> (subscriber, #1313)
+                              [<a href="/Articles/740271/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe most code cannot be unit tested without mock objects/functions/BPF programs. So I see the value of this code, but I find it strange if it's not between #ifdef DEBUG and #endif directives...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740271/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor740306"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kernel-corrupting BFF programs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2017 19:55 UTC (Thu)
+                               by <b>k3ninho</b> (subscriber, #50375)
+                              [<a href="/Articles/740306/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I believe most code cannot be unit tested without mock objects/functions/BPF programs.</font><br>
+<p>
+I applaud the spirit of your sentence, but the specific meaning of the words you used is wrong. A unit test is an isolatable unit which should never touch outside and can be run in embarrassingly-parallel concurrent fashion; integration tests are the counterpart which validate that the functional units integrate correctly with the rest of the program and system. This matches up nicely with the design paradigm of 'separation of interfaces and implementation' which has benefits in refactoring and deprecating old implementation details while presenting the same interface to consumers (plus optionally allowing different versions of your interfaces to be in use, maintained and stable). Having the right words for these situations helps clear thinking when designing and implementing systems.<br>
+<p>
+A unit test shouldn't need a lot of state supplied by the test harness; shouldn't need to reach outside its function, procedure or method to show that it's doing what you believe it should be doing. There's a 'bad code smell' that comes with complex units. You know those times when they're flaky because they're vulnerable to side effects? I typically advise people with complex unit tests to refactor and simplify the tests as well as simplifying the underlying code. How can you not like simpler code plus you get embarrassingly-parallel concurrency for running these tests when they're little atoms of logic?  <br>
+<p>
+<font class="QuotedText">&gt; I find it strange if it's not between #ifdef DEBUG and #endif directives...</font><br>
+You might even wrap the BPF_ALLOW_ERROR_INJECTION() annotation macro in a config wrapper so that no prod system has this injector but someone looking to replicate an observed failure can work on it. It's a given that you'd have to be careful that you're running through the exact same logic as the production binary that failed. <br>
+<p>
+K3n.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740306/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor740405"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kernel-corrupting BFF programs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2017 13:58 UTC (Fri)
+                               by <b>hkario</b> (subscriber, #94864)
+                              [<a href="/Articles/740405/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; A unit test shouldn't need a lot of state supplied by the test harness;</font><br>
+<font class="QuotedText">&gt; shouldn't need to reach outside its function, procedure or method to show</font><br>
+<font class="QuotedText">&gt; that it's doing what you believe it should be doing. There's a 'bad code smell'</font><br>
+<font class="QuotedText">&gt; that comes with complex units. You know those times when they're flaky</font><br>
+<font class="QuotedText">&gt; because they're vulnerable to side effects? I typically advise people with</font><br>
+<font class="QuotedText">&gt; complex unit tests to refactor and simplify the tests as well as simplifying the</font><br>
+<font class="QuotedText">&gt; underlying code. How can you not like simpler code plus you get</font><br>
+<font class="QuotedText">&gt; embarrassingly-parallel concurrency for running these tests when they're</font><br>
+<font class="QuotedText">&gt; little atoms of logic? </font><br>
+<p>
+that's the theory, the practice is that they're needed to test interfaces and sometimes even code designed and written two decades ago<br>
+<p>
+theoretical purism also doesn't help in the initial refactoring of the code - how can you refactor code if you can't know if you're not changing its behaviour because you don't have test cases for it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740405/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor740687"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kernel-corrupting BFF programs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 5, 2017 16:37 UTC (Tue)
+                               by <b>k3ninho</b> (subscriber, #50375)
+                              [<a href="/Articles/740687/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; that's the theory, the practice is that they're needed to test interfaces ...</font><br>
+<p>
+Oh, so you're talking about integration testing, which is something I'm keen that you know to be distinct from unit testing? Conflating these two things is bad for your code!<br>
+<p>
+<font class="QuotedText">&gt; how can you refactor code if you can't know if you're not changing its behaviour because you don't have test cases for it?</font><br>
+<p>
+One of my favourite books is Michael C. Feathers' "Working Effectively with Legacy Code" which calmly and politely says, again and again:<br>
+0. write tests round the code as it is, as best you understand it*<br>
+1. change the code, i.e. refactor or add functionality<br>
+2. ensure the tests keep working<br>
+<p>
+*: ...and write more tests as you come to understand it better<br>
+<p>
+You might sample existing data on the live system and replay it, but that's unlikely to protect against embarrassing edge cases. You might instrument your existing code and log its data flows while live, then reproduce them in your test framework, but it loses validity over time. The shortest route to a reliable system when you don't understand it is, from experience, the workflow which loops through "wrap with tests as best you understand it / change the code / ensure the tests continue to pass."<br>
+<p>
+K3n.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740687/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor740731"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kernel-corrupting BFF programs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 5, 2017 17:22 UTC (Tue)
+                               by <b>hkario</b> (subscriber, #94864)
+                              [<a href="/Articles/740731/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Oh, so you're talking about integration testing, which is something I'm keen that </font><br>
+<font class="QuotedText">&gt; you know to be distinct from unit testing? </font><br>
+<p>
+if you don't have units that can be tested in isolation (most of kernel code) then by definition you don't have unit tests :)<br>
+<p>
+<font class="QuotedText">&gt; One of my favourite books is Michael C. Feathers' "Working Effectively with </font><br>
+<font class="QuotedText">&gt; Legacy Code"</font><br>
+<p>
+that's what I was had in mind<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740731/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor740275"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kernel-corrupting BFF programs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2017 0:32 UTC (Thu)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/740275/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the BPF part of this is perfectly reasonable. After all, BPF programs have always been about specifying something different that happens instead of what was requested. On the other hand, I'd expect it to get attached to something like "fault/open_ctree", which would only be a possible target if you'd compiled in fault injection. That is, a BPF program can never crash the kernel, but the kernel could consult a BPF program to decide whether to crash itself, assuming the kernel supports conditionally crashing itself.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740275/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor740289"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kernel-corrupting BFF programs?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2017 7:28 UTC (Thu)
+                               by <b>mjthayer</b> (guest, #39183)
+                              [<a href="/Articles/740289/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Perhaps a way for the person loading the BPF programme to say that they really wanted to do that, rather than having to say at kernel build time what can be overridden?  I would expect this to be interesting to a very different audience to typical BPF users, and one that can live with the occasional kernel crash.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740289/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor740294"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">disable this in production kernels, please</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2017 9:00 UTC (Thu)
+                               by <b>sasha</b> (guest, #16070)
+                              [<a href="/Articles/740294/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In my experience, out-of-memory linux machine always needs reboot, especially if it uses NFS homes.  Allowing a BPF program to bring the computer completely to unusable state does not differ from allowing it to crash kernel.<br>
+<p>
+I understand that "out-of-memory linux machine always needs reboot" is the point they are trying to fix, but the way chosen looks strange for me.  I think there should be a way to disable this feature for production kernels.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740294/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor740399"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">disable this in production kernels, please</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2017 3:37 UTC (Fri)
+                               by <b>josefbacik</b> (subscriber, #90083)
+                              [<a href="/Articles/740399/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's a config option, I suspect most distros will have it off.  And I don't just want it for memory, in fact I originally did it for testing NBD's handling of getting EINTR back from kernel_sendmsg since that path is hard to test in a targeted way.  I've used it for memory stuff as well, cases where we do GFP_ATOMIC allocations and expect that it may fail and should be handling the failure gracefully but weren't, so it was handy for that as well.  There are a myriad of reasons to use this beyond just randomly OOM'ing in certain places.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740399/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor740297"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF-based error injection for the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2017 9:28 UTC (Thu)
+                               by <b>error27</b> (subscriber, #8346)
+                              [<a href="/Articles/740297/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Just making kmalloc() fail universally is unlikely to be helpful".<br>
+<p>
+I actually wrote a patch once where you would boot, then write to a sysfs file and after that every kmalloc() would fail the first time you call it.  You had to start applications five times before they had triggered the allocation failures and were able to run but it all worked surprisingly well.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740297/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor740384"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF-based error injection for the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2017 19:36 UTC (Thu)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/740384/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How did you identify "it"? Call stack?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740384/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor740448"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">BPF-based error injection for the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2017 20:20 UTC (Fri)
+                               by <b>error27</b> (subscriber, #8346)
+                              [<a href="/Articles/740448/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I renamed kmalloc() to kmalloc_real() and then made a macro named kmalloc() to call kmalloc_real().  The macro returned NULL the first time it was called when the sysfs flag was set.<br>
+<p>
+Something like this (written on phone).<br>
+<p>
+#define kmalloc(size, gfp) ({<br>
+Void *ret;<br>
+Static int tested;<br>
+If (sysfs &amp;&amp; !tested) {<br>
+    Ret = NULL;<br>
+    Tested = 1;<br>
+} Else {<br>
+    Ret = kmalloc_real(size, gfp);<br>
+}<br>
+Ret;<br>
+})<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/740448/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2017, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

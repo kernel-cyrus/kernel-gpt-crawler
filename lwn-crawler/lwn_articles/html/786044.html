@@ -1,0 +1,809 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Avoiding page reference-count overflows [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/786044/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/785681/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/786044/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Avoiding page reference-count overflows</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 16, 2019</br>
+           </div>
+The <a href="/Articles/786002/">5.1-rc5 announcement</a> mentioned
+"<q>changes all over</q>" and highlighted a number of the areas that
+had been touched.  One thing that was <i>not</i> mentioned there was the
+addition of four patches fixing a security-related issue in the core
+memory-management subsystem.  The vulnerability is sufficiently difficult
+to exploit that almost nobody should feel the need to rush out a kernel
+update, but it is still interesting to look at as a demonstration of how
+things can go wrong.
+<p>
+One of the many things crammed into <a
+href="https://elixir.bootlin.com/linux/v5.0/source/include/linux/mm_types.h#L31"><tt>struct
+page</tt></a> is a field called <tt>_refcount</tt>; it is an
+<tt>atomic_t</tt> variable that counts the number of references to the page
+in question.  As an <tt>atomic_t</tt>, it's a signed, 32-bit quantity.  As
+long as this count is nonzero, references to the page exist and it cannot
+be reused for other purposes; once it drops to zero, the page can be
+freed.
+<p>
+As with any counter in the kernel, <tt>_refcount</tt> should be manipulated
+with care lest it overflow.  If one looks at the definition of <a
+href="https://elixir.bootlin.com/linux/v5.0/source/include/linux/mm.h#L968"><tt>get_page()</tt></a>,
+one will see this check:
+<p>
+<pre>
+    VM_BUG_ON_PAGE(page_ref_count(page) &lt;= 0, page);
+</pre>
+<p>
+If the reference count is incremented beyond the maximum positive value
+that can be held in a 32-bit signed variable (2,147,483,647), it will wrap
+around to the largest-magnitude negative value (-2,147,483,648).  That,
+of course, wanders into undefined behavior, so the compiler is entitled to
+set it to <tt>0xdeadbeef</tt> and erase the disk drives instead if it so
+chooses.  With reasonable 
+compilers and a two's complement representation, though, one can expect the
+count to go negative when it overflows; that is what the above test is
+checking for.
+<p>
+There are a couple of interesting things to note about this test.
+One is that it happens <i>before</i> <tt>_refcount</tt> is incremented, so
+it will only trigger on the second overflow.  That is not a problem,
+though, since the system will behave as expected — even with negative
+reference counts — as long as the count is not incremented all the way back
+to zero.  The other thing to note is that, while
+<tt>VM_BUG_ON_PAGE()</tt> will crash the kernel when the
+<tt>CONFIG_DEBUG_VM</tt> configuration option is selected, it does
+precisely nothing in production builds.  So, on most systems, an overflow
+of the page reference count will go undetected.  That is potentially bad:
+if the reference count can be incremented to the point where it
+returns to zero, the page will be freed while a vast number of references
+remain, and a variety of use-after-free vulnerabilities will result.
+Good things do not generally ensue after an event like that.
+<p>
+That said, memory-management developers have had good reason to be
+unworried about this eventuality.  Overflowing the reference count to zero
+would require 
+creating a full four-billion references to the page in question (the
+negative reference counts for the second two-billion references would look
+weird, but things will work as intended), and that is not an easy thing to
+do.  As it turns out, according to <a
+href="https://git.kernel.org/linus/6b3a70773630">this merge commit</a>,
+Jann Horn has figured out how to do it, and it was indeed not easy:
+<p>
+<div class="BigQuote">
+	To have more than four billion references to a page requires a
+	minimum of 32GB of kernel memory just for the pointers to the
+	pages, much less any metadata to keep track of those pointers.
+	Jann needed a total of 140GB of memory and a specially crafted
+	filesystem that leaves all reads pending (in order to not ever free
+	the page references and just keep adding more).
+</div>
+<p>
+Most of us are unlikely to give such resources to an attacker, even when
+asked nicely.  But a bug is a bug, and the developers who were privy to the
+information about Horn's exploit decided to fix it.  The result was four
+commits (from Linus Torvalds and Matthew Wilcox) making this particular
+hole even harder to exploit.
+<p>
+The "specially crafted filesystem" mentioned above is necessary because it
+is not easy for an attacker running in user space to create large numbers
+of references to a given page.  Simply creating a lot of mappings using
+<tt>mmap()</tt> or <tt>fork()</tt> would run into other limits long before
+the reference count overflowed.  One way that does seem to work, though, is
+to create large numbers of direct-I/O requests, each of which acquires a
+reference while the operation is underway.  Should the filesystem be
+extremely slow to finish those operations — even slower than VFAT — the
+references could eventually add up to the magic number.
+
+<p>
+The first step toward preventing such exploits was to create a macro to
+check whether a given reference count is getting close to going negative:
+<p>
+<pre>
+    #define page_ref_zero_or_close_to_overflow(page) \
+	    ((unsigned int) page_ref_count(page) + 127u &lt;= 127u)
+</pre>
+<p>
+The <tt>VM_BUG_ON_PAGE()</tt> check shown above was then changed to use
+this macro.  On systems where <tt>VM_BUG_ON_PAGE()</tt> does anything at
+all, this new test should 
+prevent reference counts from going negative, thus stopping things far
+short of incrementing all the way to zero.
+<p>
+That said, if <tt>CONFIG_DEBUG_VM</tt> is set on a target system, an
+attacker could 
+still use this overflow for denial-of-service attacks.  To prevent that,
+Torvalds <a href="https://git.kernel.org/linus/88b1a17dfc3e">created a new
+<tt>try_get_page()</tt> function</a> that will refuse to acquire a
+reference if the count is close to overflowing.  Then, <a
+href="https://git.kernel.org/linus/8fde12ca79af"><tt>get_user_pages()</tt>
+was changed</a> to use <tt>try_get_page()</tt> and to fail the entire
+operation if the needed references cannot be acquired.  With those changes
+in place, direct-I/O requests that threaten to overflow a reference count
+will simply fail, and the attacker will be left looking for other good uses
+for 140GB of free memory.  Another possible exploit, using pipes, was <a
+href="https://git.kernel.org/linus/15fab63e1e57">closed off</a> in a
+similar fashion by Wilcox.
+<p>
+While these changes were added late in the release cycle like an urgent
+fix, this clearly isn't a vulnerability that has a lot of people worried.
+In fact, it was first
+discussed in January on the closed kernel security list, but then the
+developers involved <a 
+href="/ml/linux-kernel/CAHk-=wj7jgMOVFW0tiU-X+zhg6+Rn7mEBTej+f26rV3zXezOSA@mail.gmail.com/">simply forgot
+about it</a> for a while.  That lapse has now been rectified, which is a good
+thing; one never knows when somebody might discover an easier way to force
+the page reference count to overflow.  When that happens, the patches
+merged for 5.1-rc5 should be able to prevent a severe compromise of the
+system.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-struct_page">Memory management/struct page</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Reference_counting">Reference counting</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Vulnerabilities">Security/Vulnerabilities</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Linux_kernel-Vulnerabilities">Linux kernel/Vulnerabilities</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/786044/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor786069"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2019 1:52 UTC (Tue)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/786069/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Was there a reason this wasn't just changed to refcount_t, which cannot overflow (once it gets too big, it stays there) ???<br>
+<p>
+And if refcount_t isn't suitable here, is it suitable anywhere?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786069/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786070"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2019 4:52 UTC (Tue)
+                               by <b>eru</b> (subscriber, #2753)
+                              [<a href="/Articles/786070/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Doesn't a reference count that gets stuck to its highest value cause the page to be never freed?<br>
+Allowing it to be decremented from the saturated value would also be dangerous, because the page might get then freed prematurely.<br>
+It seems to me a reference count overflow simply must be handled as an error, otherwise you introduce rare bugs.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786070/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786076"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2019 10:49 UTC (Tue)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/786076/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree with you, but I don't know how the "getting stuck" is handled, perhaps it triggers some special handling to free the resource.<br>
+<p>
+Anyone knows more?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786076/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786080"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">refcount_t</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2019 12:57 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/786080/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Once a <tt>refcount_t</tt> value hits its max, it will no longer be changed — it gets "stuck".  Any resource controlled by that count will then never be freed.  A resource leak is considered to be less threatening than a premature free.  More information in <a href="/Articles/693038/">this article</a> and <a href="/Articles/706498/">this one</a>.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786080/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor786079"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2019 12:54 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/786079/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is pretty much correct. Consider somebody using this attack against a page of libc (using it as the source for an O_DIRECT write). If we want to be able to fork() in the future, we need to have _those_ refcount increments succeed while further attempts to do O_DIRECT I/Os fail.<br>
+<p>
+And that's what this patch does. Once the refcount reaches 2^31, "safe" increments are still allowed but "potentially exploitable" ones fail.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786079/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786083"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2019 14:41 UTC (Tue)
+                               by <b>nivedita76</b> (guest, #121790)
+                              [<a href="/Articles/786083/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe I'm misunderstanding the macro, but does that make the BUG_ON now only trigger once it reaches 2^32-127, rather than 2^31?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786083/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786107"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2019 15:08 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/786107/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's right. There are now essentially four ranges for the page refcount -- 0 (unreferenced), up to 2^31 (normal), 2^31 to 2^32-127 (heavily used) and -127 to -1 (underflow)<br>
+<p>
+The macro is misnamed, I now realise.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786107/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor786078"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2019 12:47 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/786078/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Page refcount is biased so -1 is used to represent 0. We were looking for a small change, not a wholesale rework<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786078/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor786108"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2019 17:07 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/786108/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; And if refcount_t isn't suitable here, is it suitable anywhere?</font><br>
+<p>
+I think it's a question of tradeoffs (as so much of programming is). Getting an object that uses a refcount_t always succeeds. It may have the side-effect of making the object indestructible, but there's no new rarely-executed, security-critical code-path to test.<br>
+<p>
+get_user_pages() can already fail, so all users should be prepared for that. If not, they're currently a security hole -- consider one thread which calls munmap() on addresses that another thread is passing to a syscall.<br>
+<p>
+refcount_t isn't the appropriate fix for this problem, but is generally a better approach than a silently overflowing / wrapping atomic_t<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786108/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786125"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2019 0:33 UTC (Wed)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/786125/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks!  The distinction between uses where failure must be allowed, and those where is isn't, is helpful.<br>
+<p>
+I wonder if a refcount_get_may_fail() could be useful elsewhere.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786125/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor786131"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2019 7:43 UTC (Wed)
+                               by <b>mm7323</b> (subscriber, #87386)
+                              [<a href="/Articles/786131/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was wondering the same.  This change feels almost against the principal of improving existing mechanisms rather than adding new ones.<br>
+<p>
+But then I looked up the refcount_t overflow protection and noted it was first designed by PaXTeam with work to mainline it being done by Kees along with impressive benchmarking results.<br>
+<p>
+The reputation of PaXTeam needs no comment, though I admit an unhealthy amount of admiration for Kees for continuing excellent work in the face of past fierce and unkind put downs from the Linux project leader in chief and friction elsewhere.<br>
+<p>
+While we now have 'nice Linus', he himself had a hand in this patch set, so perhaps the reason for not using or adapting refcount_t is one of personal politics rather than technical merit.<br>
+<p>
+I may well be blind to something here (and certainly I'm not close enough to this sub-system) but personally I just don't buy that refcount_t couldn't be used here, or slightly improved for use.  The refcount_t saturating behaviour sounds right, as does producing a call stack on first saturation of the counter and then never decrementing the count again.  Killing the calling process on first saturation of a count may not be suitable in case a call originates from a kernel thread itself, but I'm sure that could be adapted if needed (or not already) - with possible benefits and uses in other parts of the kernel too.<br>
+<p>
+Hopefully a later comment will clearly explain the technical limitation of refcount_t which could only be overcome by adding a new esoteric mechanism.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786131/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786198"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2019 6:49 UTC (Thu)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/786198/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You should write for The Register. Your ability to string together half-understood concepts with innuendo into a full-blown conspiracy theory would ensure your employment at a semi-mainstream news site dependent on sensationalistic clicks for a living. It is, however, unworthy of an LWN comment.<br>
+<p>
+For the record, the original idea of using the negative reference count in this way was mine. I didn't consider switching to refcount_t for a second, not because I have a long-standing problem with Spender, but because it would be a ridiculous amount of change for a fix. And as my earlier comment said, it would have had significant downsides.<br>
+<p>
+All the things you ask to be explained have already been explained in earlier responses; I'm not going to type them out again.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786198/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786284"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2019 7:44 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/786284/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can blame The Register for a number of things (even more if you take it seriously when it doesn't), but... "conspiracy theory", really? Citation needed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786284/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor786286"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2019 9:45 UTC (Fri)
+                               by <b>mm7323</b> (subscriber, #87386)
+                              [<a href="/Articles/786286/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+You should write for The Register....
+</Blockquote>
+<P>
+If you are going to tell me where I should write, may I respectfully suggest that as a leading linux kernel developer, perhaps you should read the <a href="https://lwn.net/Articles/765108/">CoC</a> and at least choose a more respectful tone in your replies.  This isn't the lkml and serves a more diverse audience.  It's reasonable to expect different levels of understanding here.
+</P>
+<Blockquote>
+It is, however, unworthy of an LWN comment.
+</Blockquote>
+<P>That is just your opinion; I don't believe you speak on behalf of LWN.</p>
+<Blockquote>
+it would be a ridiculous amount of change for a fix.
+</Blockquote>
+<P>
+Having read and re-read the article and comments, that seems to be the crux of the argument for making a new mechanism.  Apart from "refcount_t isn't the appropriate fix for this problem", I don't see where any critical technical limitation of refcount_t is stated.</p>
+<P>Short-cutting the work to make this change might have been the best option here, but it's surely creating technical debt.  For a "vulnerability [that] is sufficiently difficult to exploit that almost nobody should feel the need to rush out a kernel update", I hope it is worth it.</p>
+<p>Thanks for all your hard work all the same</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786286/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786500"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 22, 2019 23:17 UTC (Mon)
+                               by <b>jschrod</b> (subscriber, #1646)
+                              [<a href="/Articles/786500/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; &gt; It is, however, unworthy of an LWN comment. </font><br>
+<font class="QuotedText">&gt; That is just your opinion; I don't believe you speak on behalf of LWN.</font><br>
+<p>
+Of course, he didn't speak on behalf of LWN -- but he didn't claim to do so, too.<br>
+<p>
+He spoke on behalf of us long-time LWN readers who don't want to see ad-hominem attacks or comments with random assumptions expressing negative connotations on a personal level, why kernel developers did implement a change in a certain way besides them explaining explicitly why it was done this way here in this LWN thread.<br>
+<p>
+Please abstain with this kind of comments in the future. It's not welcome here.<br>
+<p>
+Thank you.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786500/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor786268"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2019 20:16 UTC (Thu)
+                               by <b>naptastic</b> (guest, #60139)
+                              [<a href="/Articles/786268/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; VM_BUG_ON_PAGE(page_ref_count(page) &lt;= 0, page);</font><br>
+<font class="QuotedText">&gt; </font><br>
+<font class="QuotedText">&gt; (...)</font><br>
+<font class="QuotedText">&gt; </font><br>
+<font class="QuotedText">&gt;  ...That, of course, wanders into undefined behavior, so the compiler is entitled to set it to 0xdeadbeef and erase the disk drives instead if it so chooses...</font><br>
+<p>
+Why not just panic if a page's refcount &lt; -1?<br>
+<p>
+(I'm assuming &lt;-1 and not ≤-1 based on Willy's comment)<br>
+<p>
+As Willy pointed out earlier, this change makes the refcount have four ranges instead of two (or one, depending on how you count.) That seems like a lot of added complexity (hidden behind a macro) to accommodate a use case... actually, can anyone suggest when it would be useful to have 2^32 or more references to a page? I can't think of a good use case, but what do I know? :-)<br>
+<p>
+(Also, who's Willy?)<br>
+<p>
+Regardless, congratulations and thank you to all the developers who identified and fixed this before it became more than a theoretical problem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786268/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786301"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2019 15:07 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/786301/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Why not just panic if a page's refcount &lt; -1?</font><br>
+<p>
+It's generally considered unfriendly to panic ... we tend to prefer BUG_ON() which just kills the task.<br>
+<p>
+<font class="QuotedText">&gt; can anyone suggest when it would be useful to have 2^32 or more references to a page?</font><br>
+<p>
+I don't think it's ever useful to have 2^32 actual references to a page. The four ranges are really there to help the system behave well in the presence of an attack.<br>
+<p>
+That said, with huge pages, we often increment refcounts by the number of base pages in the huge page. If we supported 1GB THPs, that would be 2^18 references per task. So with 2^14 tasks mapping the same page, we'd overflow in an entirely legitimate manner. Fortunately, we only support 2MB THPs today, so this doesn't yet apply. (hugetlbfs handles refcounts differently from THP)<br>
+<p>
+<font class="QuotedText">&gt; (Also, who's Willy?)</font><br>
+<p>
+Matthew Wilcox. I've been using 'willy' as my online nickname since about 1994.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786301/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786309"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2019 15:21 UTC (Fri)
+                               by <b>naptastic</b> (guest, #60139)
+                              [<a href="/Articles/786309/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's nice to meet you, and thanks for the kind reply! I didn't know about BUG_ON, or that aspect of hugepages. I've got some reading to do, apparently. :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786309/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor788382"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding page reference-count overflows</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2019 18:44 UTC (Tue)
+                               by <b>mcortese</b> (guest, #52099)
+                              [<a href="/Articles/788382/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not sure I understand it. The only real fix I see here is to convert all users of get_page() to try_get_page(). What is the new macro for? If BUG_ON does not crash your kernel, then nothing changes. If it does, it simply lifts the limit from one astronomical value to another.<br>
+<p>
+What am I missing? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/788382/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2019, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

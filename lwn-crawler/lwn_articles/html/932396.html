@@ -1,0 +1,277 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Mitigating vmap lock contention [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/932396/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/932928/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/932396/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Mitigating vmap lock contention</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Benefits for LWN subscribers</b>
+<p>
+The primary benefit from <a href="/Promo/nst-nag5/subscribe">subscribing to LWN</a>
+       is helping to keep us publishing, but, beyond that, subscribers get
+       immediate access to all site content and access to a number of extra
+       site features.  Please sign up today!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 26, 2023</br>
+           <hr>
+<a href="/Articles/lsfmmbpf2023">LSFMM+BPF</a>
+</div>
+The "vmap area" is a range of kernel address space used when the kernel
+needs to virtually map a range of memory; among other things, memory
+allocations obtained from <tt>vmalloc()</tt> and loadable modules are
+placed there.  At the <a href="/Articles/lsfmmbpf2023">2023 Linux Storage,
+Filesystem, Memory-Management and BPF Summit</a>, Uladzislau Rezki,
+presenting remotely, 
+explained a performance problem related to the vmap area and discussed
+possible solutions.
+<p>
+The problem, he said, is that the vmap area is protected by three global
+spinlocks.  The global free-space area is covered by
+<tt>free_vmap_area_lock</tt>, the tracking of mapped areas by
+<tt>vmap_area_lock</tt>, and the list of lazily freed areas by
+<tt>purge_vmap_area_lock</tt>.  These locks, he said, can turn into a
+significant bottleneck on systems with a large number of CPUs.  The
+<tt>vmap_area_lock</tt> controls access to a <a
+href="/Articles/184495/">red-black tree</a> that can be used to find an
+allocated area using an address within it.  These areas can be seen by
+looking at <tt>/proc/vmallocinfo</tt>.  The <tt>free_vmap_area_lock</tt>,
+instead, regulates access to free space and can experience high lock
+contention.
+<p>
+
+<a href="/Articles/932400/"><img
+src="https://static.lwn.net/images/conf/2023/lsfmm/UladzislauRezki-sm.png" alt="[Uladzislau
+Rezki]" title="Uladzislau Rezki" class="rthumb"></a>
+
+The allocation path has to acquire both <tt>free_vmap_area_lock</tt> (to
+find a free range) and <tt>vmap_area_lock</tt> (to mark that range as
+busy).  The freeing path, instead, needs <tt>vmap_area_lock</tt> and
+<tt>purge_vmap_area_lock</tt>.  This pattern means that the three areas
+cannot be accessed concurrently.  Running some tests on a "super-powerful
+computer", Rezki measured a basic <tt>vmalloc()</tt> call as taking about
+2µs when a single thread was running.  With 32&nbsp;threads calling
+<tt>vmalloc()</tt> 
+simultaneously, that time grew to 50µs — 25&nbsp;times greater.  That
+slowdown is the result of contention on the vmap-area locks.
+<p>
+The biggest problem, he said, is <tt>vmap_area_lock</tt>.  This is partly
+due to a fair amount of fragmentation in the allocated areas, he said; the
+free and purge lists have fewer, larger areas and, as a result, less
+contention.  Rezki proposed addressing this problem by adding a per-CPU cache;
+each CPU would pre-fetch some address space into its cache, then allocate
+pieces of that space to satisfy requests.
+<p>
+An attendee pointed out that the problem of allocating vmap-area space
+looks similar to allocating user-space address space and asked whether the same
+infrastructure could be used for both.  Rezki answered that user-space
+allocation is a bigger problem, so the solution is heavier, and optimized
+implementations are still in development.  The real problem with the vmap
+area is the serialization of requests across CPUs, which is amenable to a
+simpler solution.
+<p>
+Liam Howlett said that the <tt>vmap_area_lock</tt> is used for both
+allocation and freeing operations; if it could be avoided in one of the two
+paths, that could reduce contention.  Rezki said that is true in theory,
+but that the bookkeeping has to be done somehow regardless.  Howlett
+repeated that the problem is similar to the allocation of virtual-memory
+areas for user space.  Memory-management developers should learn from each
+other, he said, rather than going off and doing their own things.
+<p>
+Rezki moved on to the management of free space in the vmap area.  When a
+range in that area is freed, the approach would be to convert the address
+into the appropriate per-CPU zone, lock that zone, and remove the
+allocation.  Then the lazy-free zone could be locked, and the newly freed
+area added there.  A separate context would occasionally drain that lazy
+list; in his patch set it is being drained to the global area for now.
+<p>
+He concluded by asking what his next steps should be; the answer was to
+post patches and follow the usual process.  He was asked for performance
+numbers, but had none available.  When asked where this contention has been
+observed, he said it shows up on Android systems during video playback.
+The session ended with Michal Hocko suggesting that Rezki join his work
+with the efforts to improve user-space address allocation if possible.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Scalability">Memory management/Scalability</a></td></tr>
+            <tr><td><a href="/Archives/ConferenceIndex/">Conference</a></td><td><a href="/Archives/ConferenceIndex/#Storage_Filesystem_Memory-Management_and_BPF_Summit-2023">Storage, Filesystem, Memory-Management and BPF Summit/2023</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/932396/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor933180"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Mitigating vmap lock contention</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 29, 2023 14:56 UTC (Mon)
+                               by <b>wens</b> (subscriber, #115438)
+                              [<a href="/Articles/933180/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We hit this bottleneck hard. Our service involves a large number of incoming SSH connections. The bottleneck happens in two places: a) per-process kernel stack (if VMAP_STACK is enabled) allocation and b) pty (always allocated through vmalloc) allocation. In the end we rewrote a suitable SSH backend, instead of using OpenSSH.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/933180/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor933225"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Mitigating vmap lock contention</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2023 10:13 UTC (Tue)
+                               by <b>sima</b> (subscriber, #160698)
+                              [<a href="/Articles/933225/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So yeah if this is for video playback only, that's a userspace/driver issue, not a vmap issue. Of all gpu workloads video codec really should be the most predictable, allocate all buffers you need upfront and then recycle. If there's enough reallocations during playback to matter something is really busted.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/933225/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor933262"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Mitigating vmap lock contention</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2023 12:58 UTC (Tue)
+                               by <b>kazer</b> (subscriber, #134462)
+                              [<a href="/Articles/933262/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To me it seems like video playback is an example, not the only case at all.<br>
+<p>
+Regarding video playback, can you tell what happens during streaming when bitrate changes and so forth? To me there is plenty of variation that needs to be accounted for..<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/933262/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

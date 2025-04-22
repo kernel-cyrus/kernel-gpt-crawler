@@ -1,0 +1,375 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A retry-based AIO infrastructure [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/73847/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/73100/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/73847/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A retry-based AIO infrastructure</h1>
+<div class="Byline">[Posted March 2, 2004 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+The asynchronous I/O infrastructure was added in 2.5 as a way to allow
+processes to initiate I/O operations without having to wait for their
+completion.  The underlying mechanism is documented in <a
+href="http://lwn.net/Articles/24366/">this Driver Porting Series
+article</a>.  The actual implementation of asynchronous I/O in the kernel
+has been somewhat spotty, however.  It works for some devices (which have
+specifically implemented that support) and for direct file I/O.  Other
+sorts of potentially interesting uses, such as with regular buffered file
+I/O, have remained unimplemented.
+<p>
+Part of the problem is that buffered file I/O integrates deeply with the
+page cache and virtual memory subsystem.  It is not all that easy to graft
+asynchronous I/O operations into those complex bodies of code.  So the
+kernel developers have, for the most part, simply punted on cases like
+that.
+<p>
+Suparna Bhattacharya, however, has not given up so easily.  For over a
+year, now, she has been working on a set of patches which bring the
+asynchronous mode to the buffered I/O realm.  <a
+href="http://lwn.net/Articles/72678/">A new set of patches</a> has
+recently been posted which trims down the buffered AIO changes to the bare
+minimum.  So this seems like a good time to take a look at what is involved
+in making asynchronous buffered I/O work.
+<p>
+
+The architecture implemented by these patches is based on retries.  When an
+asynchronous file operation is requested, the code gets things started and
+goes as far as it can until something would block; at that point it makes a
+note and returns to the caller.  Later, when the roadblock has been taken
+care of, the operation is retried until the next blocking point is hit.
+Eventually, all the work gets done and user space can be notified that the
+requested operation is complete.  The initial work is done in the context
+of the process which first requested the operation; the retries are handled
+out of a workqueue.
+<p>
+
+For things to work in this mode, kernel code in the buffered I/O path must
+be taught not to block when it is working on an asynchronous request.  The
+first step in this direction is the concept of an asynchronous wait queue
+entry.  Wait queue entries are generally used, surprisingly, for waiting;
+they include a pointer to the process which is to be awakened when the wait
+is complete.  With the AIO retry patch, a wait queue entry which has a
+<tt>NULL</tt> process pointer is taken to mean that actually waiting is not
+desired.  When this type of wait queue entry is encountered, functions like
+<tt>prepare_to_wait()</tt> will not put the process into a sleeping state
+(though it does add the wait queue entry to the associated wait queue),
+and some functions will return the new error code <tt>-EIOCBRETRY</tt>
+rather than actually sleeping.
+<p>
+The next step is to add a new <tt>io_wait</tt> entry to the task
+structure.  When AIO retries are being performed, that entry is pointed to
+an asynchronous wait queue entry associated with the specific AIO request.  
+This task structure field is, for all practical purposes, being used in a
+hackish manner to pass the wait queue entry into functions deep inside the
+virtual memory subsystem.  It might have been clearer to pass it explicitly
+as a parameter, but that would require changing large numbers of internal
+interfaces to support a rarely-used functionality.  The <tt>io_wait</tt>
+solution is arguably less clean, but it also makes for a far less invasive patch.
+It does mean, however, that work can only proceed on a single AIO request
+at a time.
+<p>
+Finally, a few low-level functions have been patched to note the existence
+of a special wait queue entry in the <tt>io_wait</tt> field and to use it
+instead of the local entry that would normally have been used.  In
+particular, page cache functions like <tt>wait_on_page_locked()</tt> and
+<tt>wait_on_page_writeback()</tt> have been modified in this way.  These
+functions are normally used to wait until file I/O has been completed on a
+page; they are the point where buffered I/O often blocks.  When AIO is
+being performed, instead, they will return the <tt>-EIOCBRETRY</tt> error
+code immediately.
+<p>
+The AIO code also takes advantage of the fact that wait queue entries, in
+2.6, contain a pointer to the function to be called to wake up the waiting
+process.  With an asynchronous request, there may be no
+such process; instead, the kernel needs to attempt the next retry.  So the
+AIO code sets up its own wakeup function which does not actually wake any
+processes, but which does restart the relevant I/O request.
+<p>
+Once that structure is in place, all that's left is a bit of housekeeping
+code to keep track of the status of the request between retries.  This work
+is done entirely within the AIO layer; as each piece of the request is
+satisfied, the request itself as seen by the filesystem layer is modified
+to take that into account.  When the operation is retried to transfer the
+next chunk of data, it looks like a new request with the already-done
+portion removed.  
+<p>
+Add in a few other hacks (telling the readahead code about the entire AIO
+request, for example, and an AIO implementation for pipes) and the patch
+set is complete.  It does not attempt to fix every spot which might block
+(that would be a large task), but it should take care of the most important
+ones.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Asynchronous_IO">Asynchronous I/O</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/73847/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor74738"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A retry-based AIO infrastructure</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2004 13:55 UTC (Mon)
+                               by <b>mwilck</b> (subscriber, #1966)
+                              [<a href="/Articles/74738/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+It does mean, however, that work can only proceed on a single AIO request at a time.
+</blockquote>
+
+<p>
+Hmm... and I thought the point of AIO was to be able to just fire off dozens of IO requests and not bother until some of them signal completion. What am I missing here?
+</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/74738/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor74748"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">One at a time</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2004 15:01 UTC (Mon)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/74748/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Perhaps I didn't express that quite as well as I could have.  What it means is that the kernel can be actively working on only one request per process at a time.  There can be several requests with I/O outstanding, but, once the CPU's attention is required, only one at a time can be worked on, even on multiprocessor systems.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/74748/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor74801"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">One at a time</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2004 20:23 UTC (Mon)
+                               by <b>mwilck</b> (subscriber, #1966)
+                              [<a href="/Articles/74801/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I figured that. Yet the term &quot;asynchronous&quot; suggests to me that the requests should be progressing independently - not the kind of serialized behavior that you describe. What if that current request is progressing slowly (think a floppy) and others in the queue never get worked on until it's completed?<p>My impression is that it should have been the other way around: instead of implementing AIO on top of buffered IO, asynchronous requests should be the basic IO primitive and all other IO should be implemented on top of that. I can't oversee what that'd imply for the page cache, though.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/74801/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor74825"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">One at a time</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 9, 2004 8:08 UTC (Tue)
+                               by <b>larryr</b> (guest, #4030)
+                              [<a href="/Articles/74825/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+I think the thread that is handling accessing a floppy is going to be asleep almost all the time, so there will be plenty of time for other threads to wake up, do some stuff, and either finish or go back to sleep themselves.
+</p>
+<p>
+Larry
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/74825/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor74967"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">AIO as replacement for mutlithreading ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 9, 2004 21:47 UTC (Tue)
+                               by <b>mwilck</b> (subscriber, #1966)
+                              [<a href="/Articles/74967/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      What are you referring to as a &quot;thread&quot;? An AIO request? How can other AIO requests &quot;wake up, do some stuff&quot; if the kernel is still handling the floppy request which blocks the single AIO entry for the process?<p>Guess I must read the code myself.<p>I may have put my concern in the wrong words though. One idea I have about AIO is that you can have an application behave like a multithreaded application with a singe thread. Instead of creating threads for certain IO tasks you just fire off AIO requests and they _proceed simultaneously_, as if they were driven by different threads. I wonder  how that'd be possible with the serialized approach described here. Perhaps the whole notion is wrong, though?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/74967/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor75433"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">AIO as replacement for mutlithreading ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 11, 2004 17:34 UTC (Thu)
+                               by <b>larryr</b> (guest, #4030)
+                              [<a href="/Articles/75433/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><em>How can other AIO requests "wake up, do some stuff" if the kernel is still handling the floppy request which blocks the single AIO entry for the process?</em></blockquote>
+<p>
+Most of the (wall clock) time the kernel is handling the floppy request is going to be spent sleeping (waiting for the floppy device), and while that request is sleeping  another request can proceed until it either completes or has to wait for a device (sleep).
+</p>
+<p>
+Larry
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/75433/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor82692"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">One at a time</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 29, 2004 11:29 UTC (Thu)
+                               by <b>suparna</b> (guest, #7766)
+                              [<a href="/Articles/82692/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      I'm not sure I read this correctly, but I don't think we have that kind of a limitation in the code. A workqueue thread's tsk-&gt;io_wait pointer is set to the address of the ki_wait field inside the iocb that it is handling at that particular time. There is no reason why a worker thread on another CPU cannot process another iocb, by setting its own tsk-&gt;io_wait pointer to point to another iocb's ki_wait. The point to notice here is that in these situations &quot;tsk&quot; refers to the task which is processing the iocb at a given time (not the task which originally issued the IO), and the io_wait pointer reflects the wait context of the iocb on whose behalf, so to say, the code is being executed.<p>That said, it may sometimes be more efficient not to have worker threads on multiple CPUs trying to process iocbs for the same ioctx at the same time (reduces spinlock bouncing on the ioctx lock, as observed by Chris Mason).<p>Hope that clarifies !
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/82692/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2004, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

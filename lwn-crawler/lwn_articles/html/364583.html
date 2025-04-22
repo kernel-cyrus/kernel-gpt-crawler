@@ -1,0 +1,568 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Eliminating rwlocks and IRQF_DISABLED [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/364583/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/363724/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/364583/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Eliminating rwlocks and IRQF_DISABLED</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>December 1, 2009</br>
+           </div>
+Reader-writer spinlocks and interrupt-enabled interrupt handlers both have
+a long history in the Linux kernel.  But both may be nearing the end of
+their story.  This article looks at the push for the removal of a pair of
+legacy techniques for mutual exclusion in the kernel.
+<p>
+Reader-writer spinlocks (rwlocks) behave like ordinary spinlocks, but with
+some significant exceptions.  Any number of readers can hold the lock at
+any given time; this allows multiple processors to access a shared data
+structure if none of them are making changes to it.  Reader locks are also
+naturally nestable; a single processor can acquire a given read lock more
+than once if need be.  Writers, instead, require exclusive access; before a
+write lock can be granted, all read locks must be released, and only one
+write lock can be held at any given time.
+<p>
+Rwlocks in Linux are inherently unfair in that readers can stall writers
+for an arbitrary period of time.  New read locks are allowed even if a
+writer is waiting, so a steady stream of readers can block a writer
+indefinitely.  In practice this problem rarely surfaces, but Nick Piggin
+has <a href="/Articles/364585/">reported</a> a case where the right
+user-space workload can cause an indefinite system livelock.  This is a
+performance problem for specific users, but it is also a potential denial
+of service attack vector on many systems.  In response, Nick started
+pondering on the challenge of implementing more fair rwlocks which do not
+create performance regressions.
+<p>
+That is not an easy task.  The obvious solution - blocking new readers when a
+writer gets in line - will not work for the most important rwlock
+(<tt>tasklist_lock</tt>) because that lock can be acquired by interrupt
+handlers.  If a processor already holding a read lock on
+<tt>tasklist_lock</tt> is interrupted, and the interrupt handler, too,
+needs that lock, forcing the handler to wait will deadlock the processor.
+So workable solutions require allowing nested reader locks to be acquired
+even when writers are waiting, or disabling interrupts when
+<tt>tasklist_lock</tt> is held.  Neither solution is entirely pleasing.
+<p>
+Beyond that, there has been a general sentiment toward the removal of
+rwlocks for some years.  The locking primitives themselves are
+significantly slower than plain spinlocks, so any performance gain from
+allowing multiple readers must be large enough to make up for that extra
+cost.  In many cases, that gain does not appear to actually exist.  So,
+over time, kernel developers have been changing rwlocks to normal spinlocks
+or replacing them with read-copy-update mechanisms.  Even so, a few hundred
+rwlocks remain in the kernel.  Perhaps it would be better to focus on
+removing them instead of putting a lot of work into making them more fair.
+<p>
+Almost all of those rwlocks could be turned into spinlocks tomorrow and
+nobody would ever notice.  But <tt>tasklist_lock</tt> is a bit of a thorny
+problem; it is acquired in many places in the core kernel and it's not
+always clear what this lock is protecting.  This lock is also taken in a
+number of critical kernel fast paths, so any change has to be done
+carefully to avoid performance regressions.  For these reasons,
+kernel developers have generally avoided messing with
+<tt>tasklist_lock</tt>.
+<p>
+Even so, it would appear that, over time, a number of the structures
+protected by <tt>tasklist_lock</tt> have been shifted to other protection
+mechanisms.  This lock has also been changed in the realtime preemption
+tree, though that code has not yet made it to the mainline.  Seeing all
+this, Thomas Gleixner <a href="/Articles/364601/">decided to try to get rid
+of this lock</a>, saying "<q>If nobody beats me I'm going to let sed
+loose on the kernel, lift the task_struct rcu free code from -rt and figure
+out what explodes.</q>"  As of this writing, the results of this
+exercise have not been posted.  But Thomas is still active on the mailing
+list, so one concludes that any explosions experienced cannot have been
+fatal.
+<p>
+If <tt>tasklist_lock</tt> can be converted successfully to an ordinary
+spinlock, the conversion of the remaining rwlocks is likely to happen
+quickly.  Shortly after that, rwlocks may go away altogether, simplifying
+the set of mutual exclusion primitives in Linux considerably.
+<p>
+<h4>IRQF_DISABLED</h4>
+<p>
+Meanwhile, a different sort of exclusion  happens with interrupt
+handlers.  In the early days of Linux, these handlers were divided into
+"fast" and "slow" varieties.  Fast handlers could be run with other
+interrupts disabled, but slow handlers needed to have other interrupts
+enabled.  Otherwise, a slow handler (perhaps doing a significant amount of
+work in the handler itself) could block the processing of more important
+interrupts, impacting the performance of the system.
+<p>
+Over the years, this distinction has slowly faded away, for a number of
+reasons.  The increase in processor speeds means that even an interrupt
+handler which does a fair amount of work can be "fast."  Hardware has
+gotten smarter, minimizing the amount of work which absolutely must be done
+immediately on receipt of the interrupt.  The kernel has gained improved
+mechanisms (threaded interrupt handlers, tasklets, and workqueues) for
+deferred processing.  And the quality of drivers has generally improved.
+So driver authors generally do not really even need to think about whether
+their handlers run with interrupts enabled or not.
+<p>
+Those authors still need to make that choice when setting up interrupt
+handlers, though.  Unless the handler is established with the
+<tt>IRQF_DISABLED</tt> flag set, it will be run with interrupts enabled.
+For added fun, handlers for shared interrupts (perhaps the majority on most
+systems) can never be assured of running with interrupts disabled; other
+handlers running on the same interrupt line might enable them at any time.
+So many handlers will be running with interrupts enabled, even though that
+is not needed.
+
+<p>
+The solution, it would seem, would be to eliminate the
+<tt>IRQF_DISABLED</tt> flag and just run all handlers with interrupts
+disabled.  In almost all cases, everything will work just fine.  There are
+just a few situations where interrupt handling still takes too long, or
+where one interrupt handler depends on interrupts for another device being
+delivered at any time.  Those handlers could be identified  and dealt with.
+
+"Dealt with" in this case could take a few forms.  One would be to equip
+the driver with a better-written interrupt handler which does not have this
+problem.  Another, related approach would be to move the driver to a
+threaded handler which, naturally, will run with interrupts enabled.  Or,
+finally, the handler could be set up with a new flag
+(<tt>IRQF_NEEDS_IRQS_ENABLED</tt>, perhaps) which would cause it to run
+with interrupts turned on in the old way.
+<p>
+It's not clear when all this might happen, but it could be that, in the
+near future, all hard interrupt handlers are expected to run - quickly -
+with interrupts disabled.  Few people will even notice, aside from some
+maintainers of out-of-tree drivers who will need to remove
+<tt>IRQF_DISABLED</tt> from their code.  But the kernel as a whole should
+be faster for it.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Interrupts">Interrupts</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Reader-writer_spinlocks">Reader-writer spinlocks</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Spinlocks">Spinlocks</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/364583/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor364955"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Eliminating rwlocks and IRQF_DISABLED</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2009 15:33 UTC (Thu)
+                               by <b>johnflux</b> (guest, #58833)
+                              [<a href="/Articles/364955/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How does this interact with the realtime kernel stuff?  Presumably keeping interrupts disabled for some arbitrary time conflicts with the realtime goals?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/364955/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor365018"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Eliminating rwlocks and IRQF_DISABLED</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2009 18:59 UTC (Thu)
+                               by <b>adamgundy</b> (subscriber, #5418)
+                              [<a href="/Articles/365018/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      the realtime branch makes all interrupts threaded (except maybe the timer tick?), hence they all run 'interrupts enabled'.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/365018/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor365019"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Eliminating rwlocks and IRQF_DISABLED</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2009 19:01 UTC (Thu)
+                               by <b>kjp</b> (guest, #39639)
+                              [<a href="/Articles/365019/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe the threaded interrupts handle that, by having a 'fast' handler that acks the interrupt but most processing runs in a thread.  <br>
+<p>
+I'm REALLY looking forward to threaded interrupts.  Right now, our network server spends so much time in hard and softirq (napi) that is makes the scheduler make really bad decisions (scheduler appears to not factor in processor interrupt usage).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/365019/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor365444"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Eliminating rwlocks and IRQF_DISABLED</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 6, 2009 16:25 UTC (Sun)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/365444/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Aha, glad I'm not the only one with this issue. We recently found out that if you have more than 8 CPUs the round-robin IRQ distribution of the IO-APIC is disabled so that *all* IRQs from a network card (soft and hard) all end up on one CPU. As you point out, the scheduler doesn't handle this very well. (It was the first time I saw a CPU spending 90% of its time in kernel space while the other CPUs were almost idle.)<br>
+<p>
+The only response we got from kernel developers was that "round-robin IRQs suck" which completely sidesteps the point that what happens now doesn't work at all, and any perceived suckyness of round-robin IRQs would at least be spread evenly.<br>
+<p>
+Threaded IRQs do seem to be the solution here, I hope they are implemented soon.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/365444/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor365446"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Eliminating rwlocks and IRQF_DISABLED</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 6, 2009 16:36 UTC (Sun)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/365446/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+there is the userspace tool to ballance interrupts between cpus, have you tried that?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/365446/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor365447"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Eliminating rwlocks and IRQF_DISABLED</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 6, 2009 16:47 UTC (Sun)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/365447/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sure, it makes it so the CPU with 90% usage is not always the same one, but jumps around every now and then. That doesn't actually solve the problem, actually it makes it worse because then you can't use CPU binding on other processes to avoid them landing on the unlucky CPU. <br>
+<p>
+What I would like is for the IRQs to be distributed over a few CPUs (say 4 CPUs that share the same L3 cache). Anything to avoid all traffic being handled by one CPU.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/365447/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor365487"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Eliminating rwlocks and IRQF_DISABLED</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 7, 2009 11:26 UTC (Mon)
+                               by <b>xav</b> (guest, #18536)
+                              [<a href="/Articles/365487/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+i don't think it's such a good solution. If all interrupts are related (say, you're receiving data from the network and must process it in an app), distributing the interrupts from CPU to CPU means the application must follow, and with it its cache, so you'll have lots of cache line bouncing, which is expensive.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/365487/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor365490"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Round-robin IRQs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 7, 2009 11:56 UTC (Mon)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/365490/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Since you cannot run the app on the same CPU as the one receiving the interrupts you're going to get a cache bounce *anyway*, right?<br>
+<p>
+But it's worse than that, it's not *an* app, there are several apps which all need to see the same data and since they are running on different CPUs you're going to get a cache bounce for each one anyway.<br>
+<p>
+What you're basically saying is: round-robin IRQ handling is bad because you're sometimes going to get 6 cache-bounces per packet instead of 5. BFD. Without round-robin IRQs if the amount of traffic doubles we have to tell the client we can't do it.<br>
+<p>
+The irony is, if you buy a more expensive network card you get MSI-X which gets the network card to do the IRQ distribution. You then get the same number of cache bounces as if we programmed the IO-APIC to do round-robin, but the load is more evenly distributed. So we've worked around a software limitation by modifying the hardware!<br>
+<p>
+I'm mostly irked by a built-in feature of the IO-APIC being summarily disabled on machines with 8+ CPUs with the comment "but you don't really want that" while I believe I should at least be given the choice.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/365490/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor365125"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Eliminating rwlocks and IRQF_DISABLED</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 4, 2009 5:05 UTC (Fri)
+                               by <b>naptastic</b> (guest, #60139)
+                              [<a href="/Articles/365125/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't understand how disabling interrupts during interrupt handlers is a good thing. I can see the increase in throughput because there's one less context switch, but isn't the added latency from non-interruptible interrupt handlers much worse?<br>
+<p>
+It's frustrating for someone like me to watch these decisions keep getting made in favor of throughput (which you could get just as easily by overclocking your processor another half percent) and at the expense of latency, which seems to never go down, especially when the costs and benefits are so lopsided.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/365125/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor365188"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Eliminating rwlocks and IRQF_DISABLED</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 4, 2009 14:19 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/365188/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Bear in mind that much of this work is being done by the principal developers behind the realtime preemption tree.  I suspect that they're uninterested in increasing latencies...
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/365188/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor365261"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Eliminating rwlocks and IRQF_DISABLED</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 4, 2009 18:49 UTC (Fri)
+                               by <b>naptastic</b> (guest, #60139)
+                              [<a href="/Articles/365261/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah... what are they seeing that I'm not?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/365261/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor365404"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Eliminating rwlocks and IRQF_DISABLED</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 5, 2009 23:51 UTC (Sat)
+                               by <b>smipi1</b> (subscriber, #57041)
+                              [<a href="/Articles/365404/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Provided interrupt handlers do nothing more than the absolute minimum in <br>
+interrupt context, this approach will not adversely affect latencies.<br>
+<p>
+Allowing interrupt handlers to be interrupted actually is far worse: It <br>
+introduces context switching overhead and screws up overall predictability.<br>
+<p>
+If all interrupt handlers simply feed threads (that actually do the <br>
+associated work) without interruption, latencies can be tuned by design and <br>
+not by accident. Balancing throughput and latency simply becomes a question <br>
+of educating your scheduler.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/365404/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2009, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

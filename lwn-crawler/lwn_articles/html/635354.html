@@ -1,0 +1,866 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Memory management when failure is not an option [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/635354/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/634983/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/635354/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Memory management when failure is not an option</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Please consider subscribing to LWN</b>
+<p>
+Subscriptions are the lifeblood of LWN.net.  If you appreciate this
+content and would like to see more of it, your subscription will
+help to ensure that LWN continues to thrive.  Please visit
+<a href="/Promo/nst-nag1/subscribe">this page</a> to join up and keep LWN on
+the net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 4, 2015</br>
+           </div>
+Last December, a discussion of system stalls related to low-memory
+situations led to the revelation that <a href="/Articles/627419/">small
+memory allocations never fail</a> in the kernel.  Since then, the
+discussion on how to best handle low-memory situations has continued,
+focusing in particular on situations where the kernel 
+cannot afford to let a memory allocation fail.  That discussion has exposed
+some significant differences of opinion on how memory allocation should
+work in the kernel.
+<p>
+<h4>Some introductory concepts</h4>
+<p>
+The kernel's memory-management subsystem is charged with ensuring that
+memory is available when it is needed by either the kernel or a user-space
+process.  That job is easy when a lot of memory is free, but it gets harder
+once memory fills up — as it inevitably does.  When memory gets tight and
+somebody is requesting more, the kernel has a couple of options:
+(1)&nbsp;free some memory currently in use elsewhere, or (2)&nbsp;deny
+(fail) the allocation request.
+<p>
+The process of freeing (or "reclaiming") memory may involve writing the
+current contents of that memory to persistent storage.  That, in turn,
+involves calling into the filesystem or block I/O code.  But if any of
+those subsystems are, in fact, the source of the allocation request,
+calling back into them can lead to deadlocks and other unfortunate
+situations.  For that reason (among others), allocation requests carry a
+set of flags describing the actions that can be performed in the handling
+of the request.  The two flags of interest in this article are
+<tt>GFP_NOFS</tt> (calls back into filesystems are not allowed), and
+<tt>GFP_NOIO</tt> (no type of I/O can be started).  The former inhibits
+attempts to write dirty pages back to files on disk; the latter can block
+activity like writing pages to swap.
+<p>
+Obviously, the more constrained the memory-management subsystem is, the
+higher the chances of it being unable to satisfy an allocation request at
+all.  Kernel developers have long been told that (almost) any allocation
+request can fail; as a result, the kernel is full of error-handling paths
+meant to deal with that eventuality.  But it became clear recently that the
+memory-management code does not actually allow smaller requests to fail; it
+will, instead, loop indefinitely trying to free some memory.  That behavior
+has been seen to lead occasionally to locked-up systems, despite the fact
+that the code involved is prepared to deal with allocation failures.  The
+"too small to fail" behavior is controversial, but would prove hard to
+change at this point.
+<p>
+There are, however, places in the kernel that are simply unprepared to deal
+with allocation failures, usually because the allocation happens deep
+within a complex series of operations that would be difficult to unwind.
+The <tt>__GFP_NOFAIL</tt> flag exists to explicitly state that failure is
+not an option for a given request, though its use is heavily discouraged.  
+<p>
+The following discussion, in the end, focuses on two related questions:
+(1)&nbsp;should the kernel really be treating small allocations as if they
+all had <tt>__GFP_NOFAIL</tt> set, and (2)&nbsp;should failure-proof
+allocations be supported at all, and, if so, how can that support be made
+more robust?
+<p>
+
+<h4>No longer too small to fail</h4>
+<p>
+The discussion (re)started when Tetsuo Handa <a
+href="/Articles/635360/">noted</a> that memory allocation behavior had
+changed in the 3.19 kernel; in particular, small allocations with the
+<tt>GFP_NOIO</tt> or <tt>GFP_NOFS</tt> flags would fail under severe memory
+pressure.  
+In previous kernels, such allocations would loop indefinitely if
+no memory was available.  Among other things, this change can cause
+filesystem operations to fail on memory-stressed systems where they would
+have (eventually) succeeded before.
+<p>
+The behavior change is the result of <a
+href="http://git.kernel.org/linus/9879de7373fcfb46">this patch from
+Johannes Weiner</a> which was aimed at avoiding the memory-allocation
+deadlocks that started the December discussion.  The intent was to avoid
+looping forever in an allocation attempt if it appeared that no progress
+was being made toward freeing some memory for that allocation, but, by
+accident, it also prevented looping entirely in the <tt>GFP_NOIO</tt> and
+<tt>GFP_NOFS</tt> cases.  So those allocations can now fail; that is a
+significant change from how previous kernels worked.
+<p>
+Johannes initially <a href="/Articles/635361/">wanted to keep the new
+behavior</a>, saying that it "<q>makes more sense</q>".  But the
+filesystem developers disagreed strongly.  It seems that there are numerous
+places in the filesystem code that depend on allocations succeeding
+reliably, and that many of them are not marked with <tt>__GFP_NOFAIL</tt>. 
+Ted Ts'o <a
+href="/Articles/635362/">threatened</a> to add a lot of <tt>__GFP_NOFAIL</tt>
+flags to allocation calls in the ext4 filesystem if the change were not
+reverted.  The memory-management developers were thus faced with the need
+to pick the option they disliked least.
+<p>
+In the end, the filesystem developers won out on this one; Johannes merged
+<a
+href="http://git.kernel.org/linus/cc87317726f851531ae8422e0c2d3d6e2d7b1955">a
+change</a> into 4.0-rc2 restoring the looping behavior for those allocation
+types.  This 
+change is likely to end up in the 3.19 stable series as well.  The original
+patch is a good argument for the approach of refusing "cleanup" patches
+late in the development cycle.  It was merged for the 3.19-rc7 prepatch,
+meaning that there was almost no time for problems to be noticed before the
+final 3.19 release came out.
+<p>
+The discussion was not limited to the unexpected effects of one
+late-arriving memory-management patch, though.  The bigger problems of how
+to avoid deadlocks in low-memory situations and how to ensure that
+important tasks can proceed in those situations remain unsolved.
+<p>
+<h4>The OOM killer</h4>
+<p>
+The out-of-memory (OOM) killer is implicated in a number of stall scenarios.  In
+the original problem reported last December, the OOM killer would choose a
+victim that was blocked on a lock, but that lock was held by the process
+waiting (forever) for a memory allocation to proceed.  As a result, the
+victim could not exit and, thus, could not free its memory. Since the OOM killer
+only goes after a single process at a time, everything would stop at that
+point. 
+<p>
+Johannes <a href="/Articles/635364/">suggested a change</a> to how the OOM
+killer works: if a targeted process failed to exit after five seconds, the
+OOM killer would give up and move on to another victim.  The idea was not
+hugely popular, though.  David Rientjes <a href="/Articles/635365/">pointed
+out</a> that there was no guarantee that the next victim would be any more
+appropriate than the one that came before.  Dave Chinner <a
+href="/Articles/635367/">claimed</a> more broadly that efforts to tweak the
+OOM killer are misdirected:
+<p>
+<div class="BigQuote">
+	I really don't care about the OOM Killer corner cases - it's
+	completely the wrong line of development to be spending time on
+	and you aren't going to convince me otherwise. The OOM killer a
+	crutch used to justify having a memory allocation subsystem that
+	can't provide forward progress guarantee mechanisms to callers that
+	need it.
+</div>
+<p>
+The end result is that OOM-killer timeouts will probably not find their way
+into the memory-management subsystem anytime soon.
+<p>
+<h4>__GFP_NOFAIL and looping</h4>
+<p>
+From the point of view of the memory-management developers, many things
+would get easier if any allocation request could fail when the necessary
+resources are not available.  That would mean getting rid of the implicit "small
+allocations never fail" rule, but, beyond that, it would also require
+getting rid of the explicit 
+<tt>__GFP_NOFAIL</tt> call sites.  Michal Hocko was perhaps the most
+outspoken in this regard, <a href="/Articles/635376/">saying</a> that
+<tt>__GFP_NOFAIL</tt> "<q>is deprecated and shouldn't be used</q>".
+He also suggested that existing <tt>__GFP_NOFAIL</tt> call sites should be
+reimplemented in a way that allows them to recover from allocation
+failures.
+<p>
+Dave <a href="/Articles/635378/">took issue</a> with that idea, saying that
+failure-proof allocations are a hard requirement for the XFS filesystem.
+To rework XFS to be able to roll back dirty transactions in the face of an
+allocation failure would increase its complexity significantly, he said;
+the project 
+would take a couple of years to reach a point where it could be put into
+production use.  He summarized by saying "<q>I'm not about to spend a
+couple of years rewriting XFS just so the VM can get rid of a GFP_NOFAIL
+user</q>".  Strangely enough, there were no other developers
+volunteering to take on that job either.
+<p>
+Contemporary filesystems are complex beasts that have to meet a wide
+variety of demands.  They incorporate complex transaction mechanisms that
+help them to maintain filesystem integrity in every situation possible.
+Implementing such a mechanism in a way that allows it to recover from a
+memory-allocation failure in the middle of a transaction, after resources
+have been committed, locks taken, etc., is not a simple task.  Filesystem
+developers on Linux have not taken on that task because, in the end, there
+has not been a need to.  Allocations that cannot be allowed to fail have
+proved sufficient in almost all situations.
+<p>
+Once one accepts that some sort of failure-proof allocation mechanism is
+needed, though, the next question is: how should it be done?  The
+<tt>__GFP_NOFAIL</tt> flag is one solution, but it turns out that quite a
+bit of code in the kernel does not make use of it.  Instead, there are a
+number of places in the kernel that implement their own retry loops on top
+of a <tt>kmalloc()</tt> call without <tt>__GFP_NOFAIL</tt>.  That is
+something that the memory-management developers don't like; those
+developers would 
+rather not see <tt>__GFP_NOFAIL</tt> used at all, but they still prefer its
+use to retry loops implemented outside of the memory-management subsystem.
+
+Consider, for example, <a href="/Articles/635381/">this message from
+Johannes</a> saying that the XFS developers should replace a retry loop
+with a single <tt>__GFP_NOFAIL</tt> call.
+<p>
+There are couple of reasons why such loops exist.  One of those is that
+<tt>__GFP_NOFAIL</tt> was <a
+href="http://git.kernel.org/linus/dab48dab37d2770824420d1e01730a107fade1aa">explicitly
+deprecated</a> in 2009; the patch (from Andrew Morton) said:
+<p>
+<div class="BigQuote">
+	__GFP_NOFAIL is a bad fiction.  Allocations _can_ fail, and callers
+	should detect and suitably handle this (and not by lamely moving
+	the infinite loop up to the caller level either).
+</div>
+<p>
+After this change went in, it became harder to get code containing
+<tt>__GFP_NOFAIL</tt> past reviewers.  
+Whether it is done lamely or not, a hand-coded infinite retry loop is
+easier to sneak into the kernel than an easily greppable
+<tt>__GFP_NOFAIL</tt> use.  So that is what developers did.
+<p>
+The memory-management developers dislike must-succeed allocations because
+they complicate the code and, as has occasionally been seen, create the
+possibility of deadlocks.  If such allocations must be made, they would
+rather see the looping done in the memory-management code, where behavior
+can be tweaked and appropriate action taken (starting the OOM killer, for
+example) if it becomes clear that no
+progress is being made.  In the real world, though, according to both <a
+href="/Articles/635383/">Ted</a> and <a href="/Articles/635384/">Dave</a>,
+looping actually works pretty well.  The XFS code has a "canary" that puts
+out a warning when the looping goes on for too long, but, Dave said:
+<p>
+<div class="BigQuote">
+	yet we *rarely* see the canary warnings we emit when we do too many
+	allocation retries, the code has been that way for 13-odd years.
+	Hence, despite your protestations that your way is *better*, we
+	have code that is tried, tested and proven in rugged production
+	environments. That's far more convincing evidence that the *code
+	should not change* than your assertions that it is broken and needs
+	to be fixed.
+</div>
+<p>
+One might take that as a statement that the XFS developers are currently
+uninterested in replacing their own loops with <tt>__GFP_NOFAIL</tt>
+invocations.  But they actually have another reason to maintain a loop
+outside of the memory-management code: <a href="/Articles/635385/">they
+want to retain control</a> over how the filesystem should respond to
+low-memory conditions.  It is, in their mind, a policy decision that the
+memory-management code lacks the information to handle.  There are
+currently plans afoot to expose some of that policy to user space, allowing
+administrators to configure what the filesystem's low-memory response
+should be.
+<p>
+<h4>Reservations</h4>
+<p>
+Still, there is no real disagreement over this idea: looping over a failing
+memory allocation is undesirable and best avoided whenever possible.  Thus
+it may well be that the most useful part of the discussion came when the
+developers got around to the topic of avoiding allocation failures
+altogether.  There are a few ways of working toward that goal.
+<p>
+One of those is preallocation — allocating all of the needed memory
+resources before the code gets to a point where it can't back out of a
+transaction.  Preallocation is used in many contexts in the kernel and
+works well, so it was natural for the memory-management developers to ask
+whether it can be used in this context.  Dave <a
+href="/Articles/635387/">shot that idea down</a> fairly quickly:
+<p>
+<div class="BigQuote">
+	 However, preallocation is dumb, complex, CPU and memory intensive
+	 and will have a *massive* impact on performance.  Allocating
+	 10-100 pages to a reserve which we will almost *never use* and
+	 then free them again *on every single transaction* is a lot of
+	 unnecessary additional fast path overhead.  Hence a "preallocate
+	 for every context" reserve pool is not a viable solution.
+</div>
+<p>
+<a href="/Articles/22909/#mempool">Mempools</a> were also raised as a
+possibility.  They are a form of preallocation that might avoid some of the
+overhead described above.  But they are, <a
+href="/Articles/635389/">according to Dave</a>, poorly suited to the
+problem at hand.  Mempools deal with a single size of object, while a
+filesystem transaction needs a wide variety of objects; that implies that
+several mempools would be needed at various levels in the stack.  There is
+also a 
+mismatch between object lifetimes that make mempools difficult to use
+across multiple transactions.  So mempools do not appear to be an option
+either.
+<p>
+Dave's suggestion, instead, is to add the concept of "reservations" to the
+memory-management subsystem.  Prior to entering a transaction, the
+filesystem code would inform the memory-management code that it will need
+guaranteed access to a certain amount of memory; calculating an approximate
+memory requirement is, apparently, not that hard.  The memory-management code
+would then ensure that the requisite amount of memory would be available;
+subsequent allocation requests would dip into the reserve if need be.  As
+long as the estimate for the size of the reserve is sufficient, there
+should be no problem with failing allocations during the transaction.
+<p>
+Reservations may look a lot like preallocation, but there is a crucial
+difference.  The memory-management code already maintains a "watermark," a
+level of free memory below which it is unwilling to go unless absolutely
+necessary.  A reservation would simply raise that watermark, making a bit
+less memory available to the system as a whole.  If a reservation would
+raise the watermark above the amount of memory that is currently free, the
+request would block until more memory could be reclaimed.  In the simplest
+case, a reservation would be represented as an increased value in a single
+integer variable.
+<p>
+There seems to be some general support for the addition of a reservation
+mechanism, but things get less clear once one looks at the details.  Andrew
+Morton <a href="/Articles/635390/">suggested a scheme</a> where a process
+making a reservation would get a number of "tokens"; subsequent allocations
+done by that process would come from the reserve first.  Dave <a
+href="/Articles/635391/">does not like that idea</a>, saying that it fails
+to account for the fact that many objects allocated during a transaction
+will be freed (perhaps by others) shortly and, thus, should not come from
+the reservation.  His view of the reservation, instead, is a range of
+memory that is not touched at all unless there is no alternative; even
+then, only allocations using the <tt>GFP_RESERVE</tt> flag would be able to
+get at that memory.  The reservation, in his view, comes into play when the
+kernel would have otherwise put the OOM killer into action.
+<p>
+Johannes, instead, <a href="/Articles/635392/">says</a> that this approach
+will not work.  The problem is that "<q>we simply don't KNOW the exact
+point when we ran out of reclaimable memory<q>", so the
+memory-management subsystem cannot easily guarantee the sort of loose
+reservation that Dave has described.  Dave disagreed with that assessment,
+it almost goes without saying.  And that is about where the conversation
+wound down.
+<p>
+Reservations are a promising idea for a solution to some of the kernel's
+memory-allocation challenges.  But, at this point, it is just an idea; it has
+neither code nor a design consensus behind it.  The discussion has slowed
+for the moment, but that is almost certain to be a temporary state of
+affairs.  The annual <a
+href="http://events.linuxfoundation.org/events/linux-storage-filesystem-and-mm-summit">Linux
+Storage, Filesystem, and Memory Management Summit</a> is less than one week
+away as of this writing.  This subject is on <a
+href="https://events.linuxfoundation.org/events/linux-storage-filesystem-and-mm-summit/program/schedule">the
+agenda</a>, and LWN will be there to report on the discussion.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Page_allocator">Memory management/Page allocator</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/635354/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor635664"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2015 3:05 UTC (Fri)
+                               by <b>reubenhwk</b> (guest, #75803)
+                              [<a href="/Articles/635664/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I realize this is easier said than done, but why not...
+
+<pre>
+
+if (!allocate_memory_up_front())
+    return -1;
+do_stuff()
+free()
+
+</pre>
+
+In what situations is that scheme not possible?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/635664/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor635696"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2015 12:05 UTC (Fri)
+                               by <b>vonbrand</b> (subscriber, #4458)
+                              [<a href="/Articles/635696/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>If it is just one allocation, fine. If it is a string of operations, with allocations (and freeings) dependent on earlier ones...</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/635696/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor635705"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preallocation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2015 14:09 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/635705/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      That is the preallocation scenario described in the article.  In relatively simple situations it can be done, and that pattern appears in a lot of places in the kernel.  In more complex situations, though, there is really no way to know how much to preallocate or in what form.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/635705/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor635707"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preallocation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2015 14:34 UTC (Fri)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/635707/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; In more complex situations, though, there is really no way to know how much to preallocate or in what form.</font><br>
+<p>
+You could sort-of say that the kernel already sets aside a few megabytes of preallocation, to be used during interrupts (GFP_ATOMIC).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/635707/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor635783"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2015 21:39 UTC (Fri)
+                               by <b>ddevault</b> (subscriber, #99589)
+                              [<a href="/Articles/635783/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The whole fork/exec model combined with the OOM killer is so ridiculously stupid. I wonder how that ever managed to become the standard in the first place.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/635783/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor636305"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 11, 2015 19:20 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/636305/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because the alternatives to optimistically hoping that there's enough storage and CoWing as needed, failing only if you actually run out, are also awful.<br>
+<p>
+You can reserve the entire process's dirty memory space on every fork(), as Solaris does, but that makes fork()/exec() require massive amounts of memory that is hardly ever used. As an Emacs user, I used to get really annoyed when I couldn't do a simple C-u M-! blah RET because there were 'only' a few gigabytes of free swap!<br>
+<p>
+Alternatively you can ditch fork()/exec() and go to a spawn-like model, like Windows does, eliminating the need to allocate that extra memory by constraining what you can do between the conceptual fork() and exec(). But that leads to a horrifyingly complex interface which is always too limited, since it's trying to reimplement "everything you might ever want to do in the child before executing" using something simple enough that allocation is constrained.<br>
+<p>
+There is no easy solution here. If there was, people would have found it by now.<br>
+<p>
+(Eliminating fork()/exec() also won't fix the problem -- among other things, stack allocations are still optimistic, even on Windows, IIRC.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636305/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor636308"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 11, 2015 19:24 UTC (Wed)
+                               by <b>ddevault</b> (subscriber, #99589)
+                              [<a href="/Articles/636308/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have written an operating system and kernel, and the model I use is to spawn a process (load it up into memory and give it space in the process table and so on) without actually starting it until the person calling it is ready. Then you have any number of interfaces for tweaking the environment it runs in before you finally give the go-ahead to start executing it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636308/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor636459"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2015 13:25 UTC (Thu)
+                               by <b>cortana</b> (subscriber, #24596)
+                              [<a href="/Articles/636459/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wish Linux had this--particularly if the first system call gave back a file descriptor corresponding to the process that could be used to monitor/kill the child.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636459/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor636521"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2015 17:14 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/636521/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It does: fork() gives back the PID, and you can use it to both monitor and kill the child.<br>
+<p>
+The API used to monitor the child (ptrace(), natch) is so terrible that nobody uses it for ordinary post-fork() actions, but still, you already have exactly that.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636521/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor636530"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2015 18:30 UTC (Thu)
+                               by <b>JGR</b> (subscriber, #93631)
+                              [<a href="/Articles/636530/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The PID that fork gives you only gets you so far. The child process may have died and the PID been recycled before you try to use the PID in the parent process. You can mostly handle this by handling SIGCHLD properly, but that can be fiddly, and doesn't really work when you get to grandchildren and so on.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636530/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor636560"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2015 21:45 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/636560/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Nah, it's safe: if you're going to use ptrace() you have to waitpid() anyway, and waitpid() is exactly what you need if you're going to detect the process dying, let alone reap it, which is a precondition for PID recycling to happen.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636560/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor636534"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2015 18:37 UTC (Thu)
+                               by <b>cortana</b> (subscriber, #24596)
+                              [<a href="/Articles/636534/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's... horrible! This is one place that Windows is better than Linux; CreateProcess returns a HANDLE that can be used to monitor/kill the process. Not just a transient identifier that will be reused when it wraps around...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636534/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor636591"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2015 2:10 UTC (Fri)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/636591/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, BSD has forkfd which gives you back a file descriptor to a pid you can toss into kqueue and friends. Why Linux hasn't gotten around to forkfd is something I'd like to know :) .<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636591/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor636310"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 11, 2015 19:33 UTC (Wed)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/636310/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Alternatively you can ditch fork()/exec() and go to a spawn-like model, like Windows does, eliminating the need to allocate that extra memory by constraining what you can do between the conceptual fork() and exec(). But that leads to a horrifyingly complex interface which is always too limited, since it's trying to reimplement "everything you might ever want to do in the child before executing" using something simple enough that allocation is constrained.</font><br>
+<p>
+One option here—though extremely disruptive—would be to take all the system calls that modify a process's state and make them take an additional handle/FD identifying the target process. Then you could just spawn a blank, suspended process, obtaining a handle, and use normal system calls to get the process into the right state before making it runnable. With this approach you wouldn't need to implement anything twice; the downside is that it implies a new security domain, permission to perform system calls on behalf of another process. That permission could automatically terminate once the process is made runnable, ending the initialization phase.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636310/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor636318"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 11, 2015 19:53 UTC (Wed)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/636318/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What about a fork() taking flags and/or a memfd for writeable memory which indicate things like "replacement" (daemonization), "read only until exec", and other common cases?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636318/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor636385"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory management when failure is not an option</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2015 1:54 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/636385/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That would be the terrifying posix_spawn*() family of APIs. Their sheer number suggests just how unscalable this approach is.<br>
+<p>
+(The 'have everything take a PID' approach suggested by nybble41 is a good one -- as a side benefit it would give us something better than ptrace(). But it's very hard to get there from here.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/636385/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

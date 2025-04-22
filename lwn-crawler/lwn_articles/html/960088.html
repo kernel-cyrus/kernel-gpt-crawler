@@ -1,0 +1,1302 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The hard life of a virtual-filesystem developer [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/960088/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/960457/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/960088/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The hard life of a virtual-filesystem developer</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 1, 2024</br>
+           </div>
+Filesystem development is not an easy task; the performance demands are
+typically high, and the consequences for mistakes usually involve lost data
+and irate users.  The implementation of a virtual (or "pseudo") filesystem
+— a filesystem implemented within the kernel and lacking a normal backing
+store — can also be challenging, but for different reasons.  A series of
+conversations around the eventfs virtual filesystem has turned a spotlight
+on the difficulty of creating a virtual filesystem for Linux.
+<p>
+The longstanding "tracefs" virtual filesystem provides access to the <a
+href="https://docs.kernel.org/trace/ftrace.html">ftrace</a> tracing system;
+among other things, it implements a directory with a set of control files for
+every tracepoint known to the system.  A quick look on a 6.6 kernel shows
+over 2,800 directories containing over 16,000 files.  Until the 6.6
+release, the kernel had to maintain directory entry ("dentry") and inode
+structures for each of those directories and files; all of those structures
+consumed quite a bit of memory.
+<p>
+For added fun, multiple instances of the tracepoint hierarchy can be
+mounted, with each one causing the kernel to duplicate all of that memory
+overhead.  Even with a single tracepoint hierarchy, the chances are that
+almost none of the files contained within it will be accessed over the life
+of the system, so the memory is simply wasted.
+<p>
+Eventfs was merged in 6.6 as a way of eliminating this waste.  It is a
+reimplementation of the portion of tracefs that represents the actual
+tracepoints, but optimized so that dentries and inodes are only allocated
+when a file is actually accessed.  Vast amounts of memory were returned to
+the system for better use, and there was widespread rejoicing.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+That rejoicing would have been more enthusiastic, though, had not a series
+of bugs, some with security implications, turned up in eventfs.  This
+filesystem has required a long series of fixes — a process that is ongoing
+as of this writing.  As all this has unfolded, there has been an extensive
+series of long threads between tracing maintainer Steve Rostedt, Linus
+Torvalds, and others.  Among other things, there have been discussions on
+<a href="/ml/linux-kernel/20240126131837.36dbecc8@gandalf.local.home/">the
+size reported</a> for virtual files, whether those files <a
+href="/ml/linux-kernel/20240126150209.367ff402@gandalf.local.home/">should
+have unique inode numbers</a>, and many conversations on the details of
+interfacing with the kernel's virtual filesystem (VFS) layer.  In the end,
+Torvalds ended up creating <a
+href="/ml/linux-kernel/20240130190355.11486-1-torvalds@linux-foundation.org/">a
+patch series</a> addressing a number of problems in eventfs.
+<p>
+For those wanting rather more sensational coverage than is LWN's habit, now
+might be a good time to search out the articles published elsewhere.  The
+focus here will be on two points that came out in the discussions.
+<p>
+One of those is that documentation for would-be filesystem developers is
+lacking.  Some, including VFS maintainer Christian Brauner, would <a
+href="/ml/linux-mm/20240129-umrechnen-kaiman-cb591bc22fc5@brauner/">disagree</a>
+with that claim.  There is, indeed, <a
+href="https://docs.kernel.org/filesystems/">a fair amount of VFS
+documentation</a>, including detailed descriptions of the VFS locking
+rules, which are
+some of the most complex in the kernel.  But the number of things that
+Rostedt, who is not an inexperienced kernel developer, stumbled over during
+the course of this work makes it clear that many things remain
+undocumented.  That is perhaps especially true for a developer wanting to
+implement a virtual filesystem, which tends to be a one-time project
+entered into by a developer whose focus is on another part of the kernel.
+<p>
+Consider, for example, the subsystem known as "kernfs".  It is a framework
+designed to ease the implementation of virtual filesystems; it is currently
+used to implement control groups and the <a
+href="https://docs.kernel.org/arch/x86/resctrl.html">resctrl</a>
+filesystem.  It seems like exactly what a developer of a virtual filesystem
+would need, except for one little problem: it is meticulously undocumented.
+No attempt has been made to describe its use; as a result, when Rostedt
+considered it, he <a
+href="/ml/linux-mm/20240125214007.67d45fcf@rorschach.local.home/">concluded</a>:
+"<q>kernfs doesn't look trivial and I can't find any documentation on how
+to use it</q>" and passed it by.
+<p>
+Perhaps, had kernfs been more accessible when eventfs was developed, it
+would have been found suitable to the task and would have helped to prevent
+the long series of mistakes that plagued eventfs.  Perhaps, if the missing
+documentation were to be provided, the next virtual filesystem project
+could have an easier time of it.
+<p>
+There is another problem, though, that was nicely <a
+href="/ml/linux-mm/CAHk-=whXg6zAHWZ7f+CdOg5GOMffR3RSDVyvORTZhipxp5iAFQ@mail.gmail.com/">spelled
+out</a> by Torvalds: the VFS layer is oriented toward the needs of "real"
+filesystems, those that are charged with the task of persistently storing
+data in a hierarchical directory structure.  As a result, it has a lot of
+performance-driven quirks that are not only unhelpful for virtual
+filesystems, they also complicate the task of implementing those
+filesystems.  To take it even further, though, the whole filesystem concept
+is a bit of an awkward fit for virtual filesystems:
+<p>
+<blockquote class="bq">
+	And realize that [they] aren't really designed to be filesystems per
+	se - they are literally designed to be something entirely
+	different, and the filesystem interface is then only a secondary
+	thing - it's a window into a strange non-filesystem world where
+	normal filesystem operations don't even exist, even if sometimes
+	there can be some kind of convoluted transformation for them.
+</blockquote>
+<p>
+That results in pathologies like even simple filesystem operations (<a
+href="https://man7.org/linux/man-pages/man2/lstat.2.html"><tt>stat()</tt></a>
+on a <tt>/proc</tt> file, for example) not working properly in
+virtual filesystems.  In a
+normal filesystem, the lifetime of the files themselves is directly tied to
+filesystem operations.  The objects represented in a virtual filesystem,
+instead, have unrelated lifetimes of their own.  The combination of two
+separate worlds, Torvalds said, is "<q>why virtual filesystems are
+generally a complete mess</q>".
+<p>
+So how does one improve on this situation?  One approach would be to
+abandon the idea of a virtual filesystem entirely, saying that the
+filesystem abstraction is simply not suitable for this kind of kernel ABI.
+Arguably, that is what the networking subsystem (along with some others)
+has done by adopting <a
+href="https://docs.kernel.org/userspace-api/netlink/intro.html">netlink</a>
+for complex interfaces.  Netlink works well for many things, but it is not
+a universally popular interface.  An older variant of this approach, of
+course, is to simply provide a set of <a
+href="https://man7.org/linux/man-pages/man2/ioctl.2.html"><tt>ioctl()</tt></a>
+calls.  Use of <tt>ioctl()</tt> is somewhat discouraged, though; it tends
+to produce widely varying interfaces that see little review before being
+merged into the kernel.  Yet another approach is the addition of new system
+calls, as was done by the VFS layer itself with the <a
+href="/Articles/950569/"><tt>listmount()</tt> and <tt>statmount()</tt>
+system calls</a> that were merged for the 6.8 release.
+<p>
+In the end, though, there is value to a filesystem-oriented interface.  It
+is familiar to users, scriptable, and relatively well defined.  If
+everything is a file, then utilities written to work with files can be
+brought to bear.  That is why virtual filesystems have proliferated over
+the years; it suggests that there would be value in making it easier for
+developers to correctly implement virtual filesystems.  That, in turn,
+indicates that putting some effort into APIs like kernfs and, crucially,
+documenting them could do a lot to make life less difficult for the next
+developer who takes on a virtual filesystem project.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Virtual_filesystem_layer">Filesystems/Virtual filesystem layer</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/960088/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor960501"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2024 19:24 UTC (Thu)
+                               by <b>tux3</b> (subscriber, #101245)
+                              [<a href="/Articles/960501/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Virtual filesystems aren't the only kind special file. Almost all userland tools know to deal with character and block devices in an approximately sane way, even though every chardev is different.<br>
+But almost no tools try to handle the varied kind of weirdness that might comes up in a virtual filesystem, even for those that have been here forever. Each and every virtual filesystem has sharp edges in different places that break even those old standard tools that are used to handling weird situations.<br>
+<p>
+Could we pick a consistent set of defaults for virtual filesystem files, where there's otherwise no clear answer?<br>
+<p>
+- How does a tool know that it's looking at a special booby-trapped virtual filesystem file?<br>
+- Which operations can userspace reliably expect to work, once it knows it's dealing with one of those?<br>
+- What's the size of a file that doesn't know it's size, is it the page size? Is it zero?<br>
+- We tell userspace about inode numbers, should userspace be able to rely on this for anything at all?<br>
+<p>
+There's a lot of value in shoving everything into the square hole. The square hole is very familiar.<br>
+But interfaces where everything can be unsupported in a slightly different way each time make userland a cold and hard place to make tools in.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960501/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960554"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 12:05 UTC (Fri)
+                               by <b>adobriyan</b> (subscriber, #30858)
+                              [<a href="/Articles/960554/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; - How does a tool know that it's looking at a special booby-trapped virtual filesystem file?</span><br>
+<p>
+By looking at fstatfs(2), f_type.<br>
+<p>
+But what if someone bind mounted regular file over some /sys file...<br>
+<p>
+<span class="QuotedText">&gt; - What's the size of a file that doesn't know it's size, is it the page size? Is it zero?</span><br>
+<p>
+Well, it can't be zero. For most /proc files it is PAGE_SIZE at minimum, I think for sysfs too.<br>
+Internally, there is a buffer where "virtual" data are put before copying to userspace.<br>
+It doesn't make sense to read less than that.<br>
+<p>
+<span class="QuotedText">&gt; - We tell userspace about inode numbers, should userspace be able to rely on this for anything at all?</span><br>
+<p>
+I'd rather not. Virtual filesystems (proc, sys, ...) are all about paths and input/output data formats, everything else being irrelevant implementation detail.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960554/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor960516"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2024 21:55 UTC (Thu)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/960516/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Netlink is how the net subsystem avoids the issue. Wouldn't it possible to export data more like that, and then use FUSE to emulate the filesystem from user-space. Or would the performance just suck too much?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960516/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960545"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 8:52 UTC (Fri)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/960545/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I suspect the problem there would be that many of the existing filesystems are used in situations like early boot or inside minimal containers where there is no fuse userspace available for that purpose.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960545/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor960551"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 11:23 UTC (Fri)
+                               by <b>jlayton</b> (subscriber, #31672)
+                              [<a href="/Articles/960551/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Linux' nfs server has for a long time had its own virtual filesystem (nfsdfs) that is used to control startup and shutdown, number of nfsd threads, listener sockets, etc. Just this year, we've started converting these interfaces over to use netlink. The long term goal is to get rid of nfsdfs and move wholesale to netlink:<br>
+<p>
+<a href="https://lore.kernel.org/linux-nfs/cover.1705771400.git.lorenzo@kernel.org/T/#m14f08de24facc10f03c8f9126cdff3e2d0a6e7d8">https://lore.kernel.org/linux-nfs/cover.1705771400.git.lo...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960551/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor960528"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Busybox is the tracing interface</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 0:11 UTC (Fri)
+                               by <b>nevets</b> (subscriber, #11875)
+                              [<a href="/Articles/960528/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Coming from the embedded world, the main reason I created tracefs (what eventfs is in, and it originally lived in debugfs), was because I wanted to make it easy for the embedded word to interface with it. In my embedded life, the only userspace I had available was busybox. Thus making tracing have a file system interface, an embedded developer only needed busybox to interact with it.
+<pre>
+# mount -t tracefs tracefs /sys/kernel/tracing
+# cd /sys/kernel/tracing
+# echo 1 &gt; events/sched/sched_switch
+# cat trace
+</pre>
+
+I've had several embedded developers thank me for having such a simple interface.
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960528/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960548"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Busybox is the tracing interface</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 9:35 UTC (Fri)
+                               by <b>dullfire</b> (guest, #111432)
+                              [<a href="/Articles/960548/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have (almost) never had call to use tracing. But I DO work in the embedded world a lot. So thanks for an interface I can use from busybox. Interfaces that can be accessed/controlled via little more than a POSIX sh have immeasurable value. The embedded world just makes this easier to see.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960548/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor960556"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Busybox is the tracing interface</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 12:19 UTC (Fri)
+                               by <b>adobriyan</b> (subscriber, #30858)
+                              [<a href="/Articles/960556/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; In my embedded life, the only userspace I had available was busybox.</span><br>
+<p>
+In a perfect world busybox would add bb-trace executable to the kitchen sink which could list all available tracepoints and interact with them<br>
+via (ta-da!) few system calls. Such executable will be always available like cat, be part of coreutils, reimplemented by busybox and so on.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960556/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960557"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Busybox is the tracing interface</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 12:37 UTC (Fri)
+                               by <b>dullfire</b> (guest, #111432)
+                              [<a href="/Articles/960557/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IIRC busybox can fairly easily embed shell scrips as "apps" in it.<br>
+<p>
+I THINK that means with the fs interface, you could effect the same change to busybox without anything more than a custom config and dropping  shell script in the right place.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960557/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor960681"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Busybox is the tracing interface</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 18:06 UTC (Fri)
+                               by <b>nevets</b> (subscriber, #11875)
+                              [<a href="/Articles/960681/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Just in case anyone copies my commands, I should fix them. I didn't copy and paste them, I just wrote it directly in the comments here. That echo 1 should have been:
+
+<pre>
+ # echo 1 &gt; events/sched/sched_switch/enable
+</pre>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960681/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor960539"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Basic file ops yes, “filesystem” no</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 7:26 UTC (Fri)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/960539/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It’s handy to have kernel features available as files with name and content, as a key-value store. It can sometimes make sense to write to the files, writing “1” to turn on some kernel feature. But a Unix filesystem has a bunch of other semantics that don’t make sense here. Inode numbers for one (nobody cares about the inode of a virtual file and nobody is going to make hard links or even try to rename a virtual file). When you open a file for writing you can choose to append or overwrite, or seek to a certain position: again pointless for files where you only write “0” or “1”. <br>
+<p>
+It would make more sense to define a basic subset of the classic Unix file operations and officially support only those on virtual filesystems.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960539/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960552"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Basic file ops yes, “filesystem” no</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 11:24 UTC (Fri)
+                               by <b>gray_-_wolf</b> (subscriber, #131074)
+                              [<a href="/Articles/960552/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; nobody cares about the inode of a virtual file</span><br>
+<p>
+Aren't inodes useful for detecting cycles when walking a FS?  I can imagine that being of use even on virtual filesystem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960552/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960637"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Basic file ops yes, “filesystem” no</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 15:28 UTC (Fri)
+                               by <b>geert</b> (subscriber, #98403)
+                              [<a href="/Articles/960637/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Exactly, "find /sys" said: "find: File system loop detected;"<br>
+<p>
+<a href="https://lore.kernel.org/all/CAMuHMdXKiorg-jiuKoZpfZyDJ3Ynrfb8=X+c7x0Eewxn-YRdCA@mail.gmail.com">https://lore.kernel.org/all/CAMuHMdXKiorg-jiuKoZpfZyDJ3Yn...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960637/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor960565"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Basic file ops yes, “filesystem” no</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 14:16 UTC (Fri)
+                               by <b>jthill</b> (subscriber, #56558)
+                              [<a href="/Articles/960565/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Why are they not reported as char device nodes rather than files? Nobody thinks anything beyond read/write is guaranteed for a char device, right?
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960565/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960727"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Basic file ops yes, “filesystem” no</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2024 8:14 UTC (Sat)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/960727/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Why are they not reported as char device nodes rather than files?</span><br>
+<p>
+Hmm. Yes, the semantics as seen from userspace might match more closely. One major problem might be, that you can't burn a device number for each virtual file. And you'd still need to handle directories.<br>
+<p>
+For me as a user, access to low level kernel features via a virtual filesystem is very handy, so much better that an ABI like netlink or *ctl() calls. Virtual filesystems can be used from any dumb scripting language (e.g. bash, python, perl) without a need for a specialized library module or to use an external helper. There are drawbacks, for example, you don't get a consistent view when you need to read multiple files.<br>
+<p>
+<p>
+<p>
+<p>
+<p>
+<p>
+<p>
+<p>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960727/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960781"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Basic file ops yes, “filesystem” no</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2024 17:23 UTC (Sat)
+                               by <b>jthill</b> (subscriber, #56558)
+                              [<a href="/Articles/960781/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      It's just a question of what's a better fit,right? Have a single kernel-function-socket char major like /dev/tty, I'm not in the code, I don't know, I could easily be wrong, but from the outside it seems pretty clear to me the internal routing has to be at least able to key off names already. Or hey, advertise them as sockets and have `open` on them also do a SOCK_STREAM connect, maybe add an SCM_METADATA ancillary-message type.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960781/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960791"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Basic file ops yes, “filesystem” no</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2024 18:00 UTC (Sat)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/960791/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; ...SOCK_STREAM connect, maybe add an SCM_METADATA ancillary-message...</span><br>
+<p>
+Welcome to netlink.  Not easily accessible from bash without helpers, though ;-)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960791/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor960540"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 7:56 UTC (Fri)
+                               by <b>rvolgers</b> (guest, #63218)
+                              [<a href="/Articles/960540/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Besides "virtual" and "traditional" filesystem types, is it also work mentioning network filesystem (NFS, SMB, 9P)? Mostly "real" filesystems, but with some of the potential quirks of virtual filesystems (object lifetimes not being strictly under control of the client's kernel).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960540/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960563"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 13:51 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/960563/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+if you bother to read the thread, i talked about block, network and synthetic filesystems <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960563/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor960541"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 8:04 UTC (Fri)
+                               by <b>vasvir</b> (subscriber, #92389)
+                              [<a href="/Articles/960541/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well there is VFS layer which is a actually an abstract base (helper) interface where actual filesystems depend on it and there are virtual filesystems which are ahem... virtual in the sense that expose information that is not otherwise backed up in a storage media.<br>
+<p>
+But apparently VFS is not well suited to support vfs.<br>
+<p>
+Looks like there is huge potential for misunderstandings and an opportunity for some humorous stabs.<br>
+<p>
+Have we actually run out of words required to explain the difference between the two concepts.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960541/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960562"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 13:50 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/960562/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+this was why I used the term "synthetic"<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960562/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor960605"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 14:13 UTC (Fri)
+                               by <b>karim</b> (subscriber, #114)
+                              [<a href="/Articles/960605/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"For those wanting rather more sensational coverage than is LWN's habit, now might be a good time to search out the articles published elsewhere." ... a.k.a. why I've been a happy LWN subscriber since forever.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960605/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor960635"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 15:19 UTC (Fri)
+                               by <b>rgb</b> (subscriber, #57129)
+                              [<a href="/Articles/960635/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; If somebody goes "I want to tar this thiing up", you should laugh in</span><br>
+<span class="QuotedText">&gt; their face and call them names, not say "sure, let me whip up a</span><br>
+<span class="QuotedText">&gt; 50-line patch to make this fragile thing even more complex".</span><br>
+Linus is a comedic genius.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960635/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960638"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 15:34 UTC (Fri)
+                               by <b>rgb</b> (subscriber, #57129)
+                              [<a href="/Articles/960638/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Another things that is really funny is that kernfs apparently has it's own wikipedia page, but is too obscure/undocumented for a core kernel developer to feel comfortable using it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960638/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960645"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 15:48 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/960645/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Have you actually READ the wikipedia page?<br>
+<p>
+A couple of lines of fluff, and no real information whatsoever.<br>
+<p>
+I'm assuming you're not a pilot - would you feel happy flying a 737 Max based on just reading Boeing's marketing brochure?<br>
+<p>
+That is one of the "joys" of the modern world - even if anything worthwhile exists, pretty much all searches end up directing to you puff pieces that not only contain no information themselves, they are devoid of any links to any information.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960645/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960650"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 16:11 UTC (Fri)
+                               by <b>rgb</b> (subscriber, #57129)
+                              [<a href="/Articles/960650/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You're right, but I did not put the blame on anyone. Maybe the wikipedia page should not exist in the first place.<br>
+BTW, I would not feel happy flying a 737 Max as a passenger.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960650/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor960695"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 20:35 UTC (Fri)
+                               by <b>dezgeg</b> (subscriber, #92243)
+                              [<a href="/Articles/960695/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ironically enough, using tar on a synthetic filesystem is useful in the case of gcov code coverage. For an embedded system you can tar up the /sys/kernel/debug/gcov/ directory tree and based on that create code coverage reports on the host PC.<br>
+<p>
+I don't remember if it was tar which works for that, but some tool definitely does. Perhaps it was `adb pull`.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960695/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960732"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2024 8:54 UTC (Sat)
+                               by <b>adobriyan</b> (subscriber, #30858)
+                              [<a href="/Articles/960732/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Ironically enough, using tar on a synthetic filesystem is useful in the case of gcov code coverage.</span><br>
+<p>
+Distros RCA scripts have been doing this too: dump all sysctls, dump process trees etc. Hopefully less now that kdump exists.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960732/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor960646"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 16:06 UTC (Fri)
+                               by <b>rbranco</b> (subscriber, #129813)
+                              [<a href="/Articles/960646/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Everything is a file" was a bad idea.  Reading a file in /proc requires at least 3 system calls.<br>
+<p>
+But it's too late to deprecate the whole thing like FreeBSD did and use sysctl's.  We don't break userspace.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960646/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960661"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 16:57 UTC (Fri)
+                               by <b>jthill</b> (subscriber, #56558)
+                              [<a href="/Articles/960661/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Not too late to add one-shot read-whole-file / rewrite-whole-file syscalls, right? rwf(path,buf,bufsize) returns bytes read or -1+errno.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960661/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960664"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 17:06 UTC (Fri)
+                               by <b>rbranco</b> (subscriber, #129813)
+                              [<a href="/Articles/960664/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It would have to be an rwfat() syscall to avoid races in case of reading /proc/&lt;pid&gt;<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960664/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor960666"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 17:13 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/960666/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Like <a href="/Articles/813827/"><tt>readfile()</tt></a> maybe?  That idea never got far, though.,
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960666/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960674"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2024 17:55 UTC (Fri)
+                               by <b>jthill</b> (subscriber, #56558)
+                              [<a href="/Articles/960674/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Oh, right, I guess readfile got made redundant is all - I see io_uring_prep has openat and close variants too so at the limit you could amortize it down well below even one syscall each, prep all the opens, do them, prep all the reads, do them, prep all the closes, do them.  rlimit's about a thousand these days, three syscalls per thousand should be plenty efficient. There's my favorite word, "should".
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960674/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor960709"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2024 1:53 UTC (Sat)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/960709/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Linux had sysctls.<br>
+The proc interface was added <br>
+People stopped using the sysctl syscall.<br>
+The implementation bit rotted.<br>
+I slowly removed the syscall.<br>
+<p>
+In practice the simplicity of the filesystem interface beat the speed of a dedicated syscall.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960709/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor960711"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kernfs &amp;sysfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2024 2:03 UTC (Sat)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/960711/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just a quick note that kernfs started life as sysfs.<br>
+Then kernfs infrastructure was factored out of sysfs but was still used to implement sysfs.<br>
+<p>
+One thing that makes virtual filesystems tricky is that semantically they are all distributed filestems like nfs.  That is the state they export can change behind the filesystems back and the filesystem has to cope.  That is not a problem on local filesystems.<br>
+<p>
+Another challenge is that virtual filesystems frequently have very small files, and the filesystem API was built on the assumption that 512 bytes was a small file, and disk sectors are a good unit of allocation.<br>
+<p>
+<p>
+<p>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960711/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor960900"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 5, 2024 13:54 UTC (Mon)
+                               by <b>bgoglin</b> (subscriber, #7800)
+                              [<a href="/Articles/960900/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+typo s/hey/they in "And realize that hey aren't really"<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960900/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor960911"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The hard life of a virtual-filesystem developer</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 5, 2024 14:13 UTC (Mon)
+                               by <b>jake</b> (editor, #205)
+                              [<a href="/Articles/960911/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; typo s/hey/they in "And realize that hey aren't really"</span><br>
+<p>
+indeed ... inside a quote, but still ... fixed now, thanks ...<br>
+<p>
+but, in the future, kindly send typo reports to lwn@lwn.net ...<br>
+<p>
+jake<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/960911/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

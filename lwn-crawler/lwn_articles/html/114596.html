@@ -1,0 +1,266 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Improving page fault scalability [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/114596/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/113740/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/114596/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Improving page fault scalability</h1>
+<div class="Byline">[Posted December 7, 2004 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+Beyond doubt, many LWN readers have been concerned with how page fault
+performance might be improved on their 512-processor desktop systems.
+Christoph Lameter has been working on the answer for some months now; <a
+href="/Articles/113870/">his
+page fault scalability patches</a> are reaching a point where they will likely
+be considered for inclusion after 2.6.10 comes out.  This patch is an
+interesting example of the kind of changes which must be made to support
+large numbers of processors.
+<p>
+
+One of the virtual memory subsystem's core data structures is <tt>struct
+mm_struct</tt>.  This structure tracks the virtual address space used by
+one or more processes.  It contains pointers to the page tables, to the
+virtual memory area (VMA) structures, and more.  Processes typically have
+their own <tt>struct mm_struct</tt>, but threads which share memory also
+share the same <tt>mm_struct</tt>.
+<p>
+
+Access to this structure is serialized by two mechanisms.  A semaphore
+(<tt>mmap_sem</tt>) controls access to the <tt>mm_struct</tt> structure
+itself, and a spinlock (<tt>page_table_lock</tt>) guards the page tables.
+When the status of a page must be changed in the page tables, the kernel
+must first take the <tt>page_table_lock</tt> to avoid creating confusion
+with the other processors on the system.  When he looked at the scalability
+of the kernel's page fault handling code, Christoph identified this lock as
+a problem.  When many processors are trying to simultaneously make changes
+to a single set of page tables, they end up spending a lot of time
+busy-waiting for the page table lock.  Improving the performance of this
+code thus requires reducing the use of that lock.
+<p>
+
+The first step in this process is <a
+href="http://lwn.net/Articles/113871/">a patch</a> which causes the VM
+subsystem to hold <tt>page_table_lock</tt> for shorter periods of time.
+The lock is dropped for portions of the code which have no need of it, and
+later reacquired if needed.  It is a fairly straightforward exercise in
+lock breaking which helps scalability, but does not solve the whole
+problem. 
+<p>
+
+The core of the patch is <a href="/Articles/113875/">a set of atomic page
+table entry functions</a> which can modify individual PTEs with no locking
+required.  Rather than acquiring <tt>page_table_lock</tt>, making a PTE
+change, then dropping the lock, the kernel can simply make a call to:
+<p>
+<pre>
+    int ptep_cmpxchg(struct vm_area_struct *vma, unsigned long address, 
+                     pte_t *ptep, pte_t oldval, pte_t newval);
+</pre>
+<p>
+
+This function uses the <tt>cmpxchg</tt> instruction (or whatever variant or
+emulation may be available, depending on the architecture) to compare the
+page table entry pointed to by <tt>ptep</tt> with <tt>oldval</tt>; if the
+two match, the entry is set to <tt>newval</tt> and <tt>oldval</tt> is
+returned.  If the two do not match, the current thread lost a race with
+another processor which changed the PTE first; in that case, the PTE is
+not modified further and the function returns zero.  Kernel code which uses
+<tt>cmpxchg</tt> typically will retry a modification when this sort of race
+occurs; Christoph's code, instead, is able to assume that the competing
+thread did the same thing as the one it raced against: marked the page as
+being present in memory.  So no retries are needed.
+
+<p>
+With that change, pages can be brought into the working set and made
+available without having to take the <tt>page_table_lock</tt> - except for
+one last place.  The <tt>mm_struct</tt> structure contains two fields
+(<tt>rss</tt> and <tt>anon_rss</tt>) which track the total number of
+in-memory pages referenced
+by this address space (the "resident set size").  When a page is brought in
+(or forced out), these fields must be incremented or decremented
+accordingly.  Access to <tt>rss</tt> and <tt>anon_rss</tt> is controlled by
+<tt>page_table_lock</tt>.  Getting rid of that last use of the lock has
+required a surprising amount of work on Christoph's part.
+<p>
+
+The first implementation turned the RSS fields into <tt>atomic_t</tt>
+variables, so that they could be operated on without locking.  This solution
+worked, but it had some shortcomings: (1)&nbsp;they could only be 
+32-bit variables, since not all architectures support 64-bit atomic types,
+(2)&nbsp;the atomic operations are still relatively expensive, 
+and (3)&nbsp;having all processors on the system updating a single pair of
+variables caused a great deal of cache line bouncing, which hurt
+performance.   
+<p>
+
+The next attempt was called "sloppy_rss."  Essentially, the sloppy approach
+retains the old <tt>unsigned long</tt> type for <tt>rss</tt> and
+<tt>anon_rss</tt>, and simply 
+updates them without the lock.  The result is incorrect RSS
+values, but Christoph noted that the errors tended not to exceed 1%.  This
+approach is faster than using atomic operations.  The incorrect values
+bugged some developers, however, and the cache bouncing problem remained. 
+<p>
+
+Another approach which was to do away with the RSS counters entirely, on the
+theory that these values were not actually needed very often.  When an attempt
+to query the resident set size was made (generally by reading files in
+<tt>/proc</tt> from user space), the kernel would scan through the
+process's page tables and count the number of resident pages.  This idea
+did not get very far, however; the cost of querying RSS values was simply
+too high.
+<p>
+
+The current approach was <a href="/Articles/114612/">suggested by Linus</a>
+last month.  A new set of counters is added to the task structure;
+when a thread brings a page into memory, that thread's counters are
+incremented accordingly.  When a real RSS value is needed, the per-thread
+values are summed to yield the answer.  So querying the RSS still requires
+a loop, but iterating through a list of tasks is much faster than walking
+an entire set of page tables.  This algorithm avoids locking issues (since
+each thread takes care of its own page fault accounting and does not
+contend with others); it also minimizes
+the cache line problems.  The "split RSS" approach still requires 
+<tt>rss</tt> and <tt>anon_rss</tt> counters in the <tt>mm_struct</tt>
+itself; they are used to track 
+pages brought in by threads which have since exited, and they are decremented
+when pages are forced out.  This change also requires that RCU be used when
+freeing the <tt>mm_struct</tt> structure to ensure that no other processor
+is still trying to calculate an RSS value.
+<p>
+
+The current version of the patch has <a href="/Articles/114614/">convinced
+Linus</a>, so expect it to go in at some point.  The biggest roadblock, at
+this point, may be that the four-level page table patch is at the front of
+the queue for 2.6.11.  That patch currently conflicts with Christoph's
+work, and, in general, has made it hard for other VM work to get done.
+Once the four-level patch goes into the mainline, however, things should
+stabilize somewhat - at least, from the point of view of hackers working on
+other VM-related patches.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Scalability">Memory management/Scalability</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/114596/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor115059"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving page fault scalability</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 9, 2004 18:51 UTC (Thu)
+                               by <b>clameter</b> (subscriber, #17005)
+                              [<a href="/Articles/115059/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Thanks for the article on my work. One small correction: The freeing of<br>
+the mm_struct via RCU is necessitated by the use of an RCU style list to link<br>
+all the tasks using an mm and not by tasks still wanting to increment RSS.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/115059/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2004, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

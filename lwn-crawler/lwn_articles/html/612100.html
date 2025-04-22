@@ -1,0 +1,366 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Relativistic hash tables, part 2: Implementation [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/612100/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/611628/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/612100/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Relativistic hash tables, part 2: Implementation</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 17, 2014</br>
+           </div>
+The kernel's "relativistic" (or "resizable") hash table implementation came
+into the mainline during the 3.17 merge window.  These tables can be
+resized while still allowing concurrent access by readers and (to an
+extent) updaters.  See <a href="/Articles/612021/">the first article in
+this series</a> for a
+description of the algorithms used to implement this functionality.  This
+article, instead, will describe the in-kernel API for these "rhashtables"
+as seen in 3.17, with an eye toward changes that are likely to arrive in
+the near future.
+<p>
+Rhashtables were initially created for use in the networking subsystem, but
+their implementer, Thomas Graf, understood that they could be more widely
+used within the kernel.  As a result, the API is fairly well generalized.
+One implication of this design is that a certain amount of setup work is
+needed to put an rhashtable into use.  Once that setup is done, though,
+operations on the table are relatively straightforward.
+<p>
+The first step is to define the object that will be stored in the hash
+table.  Such objects will typically look something like this:
+<p>
+<pre>
+    #include &lt;linux/rhashtable.h&gt;
+
+    struct hashed_object {
+	int key;
+	struct rhash_head node;
+	/* Stuff of actual interest */
+    }
+</pre>
+<p>
+
+Here, an integer key is used for identifying objects in the table; the
+implementation can handle just about any key type, though, as will be seen
+below.
+<p>
+The next step is to fill in a structure describing how the hash table will
+work.  This structure is defined as:
+<p>
+<pre>
+    typedef u32 (*rht_hashfn_t)(const void *data, u32 len, u32 seed);
+    typedef u32 (*rht_obj_hashfn_t)(const void *data, u32 seed);
+
+    struct rhashtable_params {
+	size_t		  nelem_hint;
+	size_t		  key_len;
+	size_t		  key_offset;
+	size_t		  head_offset;
+	u32		  hash_rnd;
+	size_t		  max_shift;
+	rht_hashfn_t	  hashfn;
+	rht_obj_hashfn_t  obj_hashfn;
+	bool		  (*grow_decision)(const struct rhashtable *ht,
+					   size_t new_size);
+	bool		  (*shrink_decision)(const struct rhashtable *ht,
+					     size_t new_size);
+	int		  (*mutex_is_held)(void);
+    };
+</pre>
+
+<p>
+Here, <tt>nelem_hint</tt> is a guess at how many elements will be stored in
+the table (it is used to calculate the initial size).  <tt>key_len</tt> and
+<tt>key_offset</tt> describe the key — its size in bytes and its offset
+into the structure (which should be obtained with <tt>offsetof()</tt>).
+Similarly, <tt>head_offset</tt> is the offset of the <tt>rhash_head</tt>
+structure within the hashed object.  <tt>hash_rnd</tt> is a random seed to
+be used in the hash function; if it is zero, the rhashtable code will
+generate a random seed.  The maximum size of the table can be optionally
+set with <tt>max_shift</tt>; its value is the base-two logarithm of that
+size.  <tt>hashfn</tt> is the function that performs the hashing; normally
+it can be set to <tt>arch_fast_hash()</tt>, defined in
+<tt>&lt;linux/hash.h&gt;</tt>.  <tt>obj_hashfn()</tt>, instead, is a
+function to hash the entire object.  If <tt>key_len</tt> and
+<tt>key_offset</tt> have been provided, there is no need for
+<tt>obj_hashfn()</tt>.  If calculating the hash requires something more
+complicated than looking at a few contiguous bytes in the object, this
+function can be provided to do the work (and <tt>key_len</tt> should be set
+to zero).
+<p>
+Control over automatic resizing is provided by the <tt>grow_decision()</tt> and
+<tt>shrink_decision()</tt> functions.  Despite being called
+<tt>new_size</tt>, that parameter actually holds the current number of
+buckets in the table; the number of elements can be found in
+<tt>ht-&gt;elems</tt>.  If these functions return a true value, the size of
+the table will be doubled or halved as appropriate.  The rhashtable
+implementation offers two functions that can be used in this role:
+<tt>rht_grow_above_75()</tt> and 
+<tt>rht_shrink_below_30()</tt>.  These functions seek to keep between 30%
+and 75% of the table buckets full.
+<p>
+Finally, <tt>mutex_is_held()</tt> must be provided; it returns true if the
+lock serializing changes to the table is currently held.  It is used purely
+for debugging purposes, ensuring that the lock is held when functions that
+modify the table are called.
+<p>
+Once that structure is set up, it's just a matter of allocating a
+<tt>struct rhashtable</tt> instance and  initializing it with:
+<p>
+<pre>
+    int rhashtable_init(struct rhashtable *ht, 
+			struct rhashtable_params *params);
+</pre>
+<p>
+There is also an <tt>rhashtable_destroy()</tt> to free a hash table's
+resources.
+<p>
+Insertion and removal are handled with:
+<p>
+<pre>
+    void rhashtable_insert(struct rhashtable *ht, struct rhash_head *node, 
+			   gfp_t gfp_flags);
+    bool rhashtable_remove(struct rhashtable *ht, struct rhash_head *node, 
+			   gfp_t gfp_flags);
+    void rhashtable_remove_pprev(struct rhashtable *ht, struct rhash_head *obj,
+			         struct rhash_head __rcu **pprev, 
+				 gfp_t gfp_flags);
+</pre>
+<p>
+The table lock must be held when any of the above functions are called.
+In all of these calls, <tt>ht</tt> refers to the hash table, <tt>node</tt>
+points to the <tt>rhash_head</tt> structure within the relevant object, and
+<tt>gfp_flags</tt> is used for memory allocation should the table need to
+be resized.  If the caller happens to have a pointer to the object
+immediately prior to the one that is to be removed, it can speed up the
+removal process by calling <tt>rhashtable_remove_pprev()</tt>.
+<p>
+Note that these functions are likely to change in the near future.  A <a
+href="/Articles/611951/">patch set</a> currently in review moves resizing
+operations into a separate thread, so there is no longer a need to allocate
+memory in the above functions.  Accordingly, the <tt>gfp_flags</tt>
+argument is removed.  This change makes it easier to perform hash table
+operations while running in atomic context.
+<p>
+Should there be a reason to explicitly change the size of an rhashtable,
+that can be done with:
+<p>
+<pre>
+    int rhashtable_expand(struct rhashtable *ht, gfp_t gfp_flags);
+    int rhashtable_shrink(struct rhashtable *ht, gfp_t gfp_flags);
+</pre>
+<p>
+The table lock must be acquired before calling these functions.  A call to
+<tt>rhashtable_expand()</tt> will double the size of the table, while
+<tt>rhashtable_shrink()</tt> will halve its size.
+Again, the <tt>gfp_flags</tt> argument is likely to be removed in 3.18 or
+shortly thereafter.
+<p>
+Lookups are performed with either of:
+<p>
+<pre>
+    void *rhashtable_lookup(const struct rhashtable *ht, const void *key);
+    void *rhashtable_lookup_compare(const struct rhashtable *ht, u32 hash,
+				    bool (*compare)(void *, void *), 
+				    void *arg);
+</pre>
+<p>
+The first will simply return the object in the table matching <tt>key</tt>,
+or <tt>NULL</tt> if no such object exists.  In the second form, an explicit
+comparison function may be passed to determine whether a given object
+matches or not.  In this case, <tt>hash</tt> is a precomputed hash for the
+desired object, usually obtained from <tt>rhashtable_hashfn()</tt>.  The
+comparison function is <tt>compare()</tt>; its arguments are the object to
+be tested and <tt>arg</tt>.
+<p>
+The latter function is clearly meant for code which delves more deeply into
+the structure of the hash tables themselves.  For cases where that is
+necessary, the interface provides a whole set of functions for traversing
+the hash chains; see <tt>&lt;linux/rhashtable.h&gt;</tt> for the full list,
+and at <tt>net/netlink/af_netlink.c</tt> for an example of their use.
+<p>
+Future changes call for changing the hash chain into a "nulls list," where
+the <tt>NULL</tt> pointer at the end of the list contains the hash of the
+first item in the bucket.  Such lists are used heavily in the networking
+subsystem where things can change on the fly and an object may move between
+lists while it is being traversed.  This change won't affect relatively
+casual users of rhashtables, but code that follows the hash chains itself
+will need to adapt.
+<p>
+For those wanting more details on how this code works, it can be found in
+<tt>lib/rhashtable.c</tt>.  The code is relatively clear, well documented,
+and easy to follow, especially in its 3.17 incarnation; the changes to come
+will necessarily add complexity.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Hash_table">Hash table</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Read-copy-update">Read-copy-update</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/612100/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor612615"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Relativistic hash tables, part 2: Implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 19, 2014 21:40 UTC (Fri)
+                               by <b>gerdesj</b> (subscriber, #5446)
+                              [<a href="/Articles/612615/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Nice pair of write ups. Thanks Jon.  I often glaze over many of these types of articles - I'm a simple sysadmin - but the pretty piccies made me take notice and before I realized what was happening, I was grepping source and all sorts.<br>
+<p>
+There's no way on earth I could possibly make a useful contribution to a discussion on such a rarefied topic but to have continuing demonstrable proof that the software that I use routinely continues to push the envelope in so many ways is very gratifying and a testament to all the devs on whom I and so many others depend on.<br>
+<p>
+Cheers<br>
+Jon<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/612615/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor616863"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Relativistic hash tables, part 2: Implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 18, 2014 10:28 UTC (Sat)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/616863/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+FWIW, it seems like these changes indirectly caused a quite significant slowdown for DNS lookups in 3.17:<br>
+<p>
+<a href="http://marc.info/?l=linux-kernel&amp;m=141350628101526&amp;w=2">http://marc.info/?l=linux-kernel&amp;m=141350628101526&amp;...</a><br>
+<p>
+The basic concept is still reasonable, of course, but the implementation was seemingly unfortunate.<br>
+<p>
+/* Steinar */<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/616863/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

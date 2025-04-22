@@ -1,0 +1,526 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Filesystems: chunkfs and reiser4 [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/231585/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/231007/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/231585/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Filesystems: chunkfs and reiser4</h1>
+<div class="Byline">[Posted April 24, 2007 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+One of the fundamental problems facing filesystem developers is that, while
+disks are getting both larger and faster, the rate at which they are
+growing exceeds the rate at which they are speeding up.  As a result, the
+time required to read an entire disk is growing.  There is little joy in
+waiting for a filesystem checker to do its thing during a system reboot, so
+the prospect of ever-longer fsck delays is understandably lacking in
+appeal. Unfortunately, that is the direction in which things are going.
+Journaling filesystems can help avoid fsck, but only in situations 
+where the filesystem has not suffered any sort of corruption.
+<p>
+Given that filesystem checks are something we have to deal with, it's worth
+thinking about how we might make them faster in the era of terabyte disks.
+One longstanding idea for improving the situation was recently posted in
+the form of <a href="http://lwn.net/Articles/231482/">chunkfs</a>, "fs
+fission for faster fsck."  The core idea is to take a filesystem and split
+it into several independent filesystems, each of which maintains its own
+clean/dirty state.  Should things go wrong, only those sub-filesystems which
+were active at the time of failure need to be checked.
+<p>
+
+Like many experimental filesystem developments, chunkfs is built upon ext2.
+Internally, it is a series of separate ext2 
+filesystems which look like a single system to the higher layers of the
+filesystem.  Each chunk can be maintained independently by the filesystem
+code, but the individual chunks are not visible outside of the filesystem.
+The idea is relatively simple, though, as always, there are a few pesky
+details to work out.
+<p>
+
+One is that inode numbers in the larger chunkfs filesystem must be unique.
+Each chunk, however, maintains its own list of inodes starting with
+number one, so inode numbers will be reused from one chunk to the next.
+Chunkfs makes these numbers unique by putting the chunk number 
+in the upper eight bits of every inode number.  As a result, there is a
+maximum of 256 chunks in any chunkfs filesystem.
+<p>
+
+A trickier problem comes about when a file grows.  The filesystem will try
+to allocate additional file blocks in the chunk where the file was
+originally created.  Should that chunk fill up, however, something else needs
+to happen; it would not be good for the filesystem to return "no space"
+errors when free space does exist in other chunks.  The answer
+here is the creation of a "continuation inode."  These inodes track the
+allocation of blocks in a different chunk; they look much like files in
+their own right, but they are part of a larger array of block allocations.
+The "real" inode for a given file can have pointers to up to four
+continuation inodes in different chunks; if more are needed, each
+continuation inode can, itself, point to another four continuations.  Thus,
+continuation inodes can be chained to create files of arbitrary length.
+<p>
+
+This code is in a relatively early state; the text with the patch notes
+that "<q>this is a preliminary implementation and lots of changes are
+expected before this code is even sanely usable.</q>"  There is a set of
+tools which can be used by people who would like to test out chunkfs
+filesystems with well backed-up data.  With some care and some testing,
+chunkfs may grow to the point that it's stable and shortening fsck times
+worldwide.
+
+<p>
+Meanwhile, one of the longest stories in Linux filesystem development has
+to be the reiser4 filesystem.  By the time Hans Reiser <a
+href="http://lwn.net/Articles/41653/">first asked for the merging of
+reiser4</a> in July, 2003, the filesystem had been under development for
+some years.  Almost four years have passed since then, and reiser4 remains
+outside of the mainline kernel.  Hans Reiser is now out of the picture, his
+company (Namesys) is in trouble, and, to a casual observer, reiser4 appears
+not to be going anywhere.
+<p>
+
+There has been a recent increase in interest in this filesystem, though.
+It <a href="/Articles/231702/">turns out</a> that two Namesys employees are
+still working on the filesystem "mostly on enthusiasm."  They have been
+feeding patches through to the -mm tree, and they are getting toward the
+end of their list of things to fix.  So we might see a new push for
+inclusion of reiser4, perhaps as soon as 2.6.23.  But, <a
+href="/Articles/231703/">says Andrew Morton</a>, some things would have to
+happen; in particular, there needs to be a new review of the reiser4 code.
+<p>
+<div class="BigQuote">
+	To get it unstuck we'd need a general push, get people looking at
+	and testing the code, get the vendors to have a serious think about
+	it, etc.  We could do that - it'd require that the namesys people
+	(and I) start making threatening noises about merging it, I guess.
+	<p>
+	Or we could move all the reiser4 code into kernel/sched.c - that
+	seems to get people fired up.
+</div>
+<p>
+Your editor will go out on a limb and suggest that a mass move of the
+reiser4 code is unlikely.  But a new round of talk on actually merging this
+filesystem is starting to look reasonably likely.  There's enough work -
+and enough interesting ideas - in this code that people are unwilling to
+let it just fade away.  Perhaps, soon, it will be heading for its
+long-sought spot in the mainline.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Chunkfs">Filesystems/Chunkfs</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Reiser4">Filesystems/Reiser4</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/231585/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor232030"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">chunkfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2007 22:03 UTC (Thu)
+                               by <b>pimlott</b> (guest, #1535)
+                              [<a href="/Articles/232030/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote type=cite>
+The core idea is to take a filesystem and split it into several independent filesystems, each of which maintains its own clean/dirty state. Should things go wrong, only those sub-filesystems which were active at the time of failure need to be checked.
+</blockquote>
+
+I'm not a filesystems hacker, but I think this article misses the real point of chunkfs.  After all, the central problem is that you don't know when "things go wrong".  Corruption occurs unpredictably, for any number of reasons, so you need to assume that it can happen anywhere, anytime.  The exciting use of the dirty bit, as I understand, is the ability to on-line fsck the chunks that are presently not dirty.  Granted, you can also fsck the dirty chunks after a system crash, but for modern filesystems this just requires journal replay, which is fast anyway.  Though I suppose if a chunk is so active that it never gets fscked on-line, you want to full-fsck it whenever the filesystem is off-line.
+<p>
+The next step is writing data with checksums or even error-correcting codes.  But the real solution, for those who are serious about data integrity, is end-to-end checksums or ECC; ie, assure the integrity of the data from the moment is created to the moment it is consumed.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/232030/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor232090"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">chunkfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 27, 2007 4:39 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/232090/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I agree that the paragraph you mention misses the point of chunkfs. it's not that you avoid dong the fsck on some chunks, it's that you don't have to try and track the state of the entire filesystem at once so the check is faster. if some chunks haven't been modified since they were last chaned (and can therefor be clean) that just speeds up the searh<br>
+<p>
+yes, failing drives can corrupt the filesystem independantly of this, but even with checksums you won't find this sort of corruption until you go looking for it (by trying to access the data).<br>
+<p>
+chunkfs isn't trying to address this sort of low-level problem, it's working at a higher level. there's no reason that chunkfs couldn't be integrated into any filesystem and provide approximatly the same benifits for all of them. the initial proof of concept implementation is being done on ext2, not becouse it's the best low-level filesystem, but becouse it's the easiest to implement.<br>
+<p>
+if things work out as hoped with the ext2 implementation I'm willing to bet that something very similar will start appearing as an option for other filesystems.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/232090/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor232093"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">chunkfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 27, 2007 5:31 UTC (Fri)
+                               by <b>pimlott</b> (guest, #1535)
+                              [<a href="/Articles/232093/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I'm not sure if I followed exactly what you meant in some places, so let me try and ask you to correct me.
+
+<blockquote type=cite>
+it's not that you avoid dong the fsck on some chunks, it's that you don't have to try and track the state of the entire filesystem at once so the check is faster.
+</blockquote>
+
+Are you saying here that the total fsck time of all N chunks is less than the fsck time of a normal filesystem?  That's probably true, but it doesn't solve the fundamental scaling problem of full partition fsck (does it?).
+
+<blockquote type=cite>
+if some chunks haven't been modified since they were last chaned (and can therefor be clean) that just speeds up the searh
+</blockquote>
+
+Is "chaned" meant to be "changed"?  "haven't been modified since they were last changed" doesn't make sense, however.  Do you mean that if a chunk has not even been touched since the last fsck, it doesn't need to be fscked again?  Well ok, but I doubt that's going to be a common case.  If you mean that chunks that are not dirty after a crash don't need to be fscked, that only applies to a non-journaling filesystem (does anyone still use those?).
+<p>
+The premise, I thought, was that the whole filesystem needs to be fscked from time to time, because stuff happens.  No matter how clever you are, stopping stopping the world to check the whole partition will not scale.  So on-line fsck of chunks looks like the real win to me.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/232093/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor232099"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">chunkfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 27, 2007 8:05 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/232099/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      sorry for the sloppy typing, I was in too much of a hurry to finish the post<br>
+<p>
+yes, the time to fsck 100x10Gb filesystems is expected to be significantly less then to fsck 1x1TB filesystem<br>
+<p>
+in part this is also a memory limited operation, when doing the fsck you need to remember all the files that you have seen to see if any of the others overlap it. besides reducing n during the O(n^2) portion by 100x (even though you have to do it 100 times) you also drasticly reduce the amount of ram needed, avoiding swap or other low-memory conditions<br>
+<p>
+yes, you do need to do a fsch from time to time, but under a crash condition you may be able to skip doing one for the chunks that have not been changed and so are still marked clean. and yes, people do still use non-journaling filesystems. when you journal you end up doing lots of writes twice (and a lot of seeking between the journal write and the final write). if you have lots of extra disk bandwidth you may be able to afford to do this, but if you don't have the extra disk bandwidth your entire system will slow down while the journal is flushed. for some applications (data capture for example) this isn't acceptable<br>
+<p>
+in addition, you can do a check of a few chunks every boot rather then doing a check of everything every 30 boots (spreading the maintinance pain over time rather then having it hit in one massive chunk)<br>
+<p>
+did I do a better job of explaining it this time?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/232099/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor232171"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Death, taxes, and fsck?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 28, 2007 1:41 UTC (Sat)
+                               by <b>qu1j0t3</b> (guest, #25786)
+                              [<a href="/Articles/232171/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <i>Given that filesystem checks are something we have to deal with</i>
+
+<p>...Until something is learned from Reiser{3,4} and ZFS, sure.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/232171/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor232177"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Death, taxes, and fsck?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 28, 2007 2:36 UTC (Sat)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/232177/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      even with journaling filesystems like reiserfs and zfs you still need to do fsck<br>
+<p>
+reiserfs pretended that you didn't have to, as did XFS, both of them eventually came out with a fsck (or equivalent).<br>
+<p>
+in fact reiserfs3 is especially bad when you do a fsck, it can't tell which superblocks are part of which filesystem and can turn a minor issue into total data loss (triggered if you have an image of a reiserfs stored on a reiserfs when you fsck)<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/232177/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor232931"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Death, taxes, and fsck?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2007 12:28 UTC (Thu)
+                               by <b>pli</b> (guest, #45060)
+                              [<a href="/Articles/232931/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      ZFS doesn't have/need a fsck, according to <a rel="nofollow" href="http://zfs-on-fuse.blogspot.com/2007/04/zfs-in-linux-kernel.html">http://zfs-on-fuse.blogspot.com/2007/04/zfs-in-linux-kern...</a><br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/232931/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor232940"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Death, taxes, and fsck?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2007 12:51 UTC (Thu)
+                               by <b>boniek</b> (guest, #45061)
+                              [<a href="/Articles/232940/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Thats right. Chunkfs seems more like workaround to the problem rather than a real solution. ZFS is NOT a journaling filesystem - it checksums all data and can detect and fix corruption on online filesystem - no fsck will be ever needed.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/232940/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor232947"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Death, taxes, and fsck?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2007 13:25 UTC (Thu)
+                               by <b>qu1j0t3</b> (guest, #25786)
+                              [<a href="/Articles/232947/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Checksumming + redundancy aren't enough to remove the need for fsck, however. One also needs COW &amp; transactional updates. <br>
+<p>
+Until kernel devs actually admit Reiser and/or Sun have actually got it right, Linux will be stuck with fsck for a good while yet.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/232947/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor233036"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Death, taxes, and fsck?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2007 20:21 UTC (Thu)
+                               by <b>amitgud</b> (guest, #20655)
+                              [<a href="/Articles/233036/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Fsck is unavoidable given the imperfect hardware and bugs in the OS and file system alike. Fsck is needed and will be needed from time to time. I/O error trends and the under-estimation of hard drive errors by the manufacturers suggest that as the data get compact on the disk, errors (assuming they do not increase per square inch on the drive as the drives become more complex), will now affect more data on the disk. Disk drives have to be fsck'ed someday, its just the matter of when. And when it is, the time taken will directly affect the availability of the data, and backups do not always help.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/233036/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor233073"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Death, taxes, and fsck?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 4, 2007 9:25 UTC (Fri)
+                               by <b>pli</b> (guest, #45060)
+                              [<a href="/Articles/233073/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Sure, we will always have disks breaking and we will always need tools to fix corrupted filesystems. But isn't this just a matter of how things are implemented. I.e. it seems that ZFS has just chosen to integrate "fsck" into the actual filesystem and improve the way it operates, i.e. on-line/on-the-fly instead of having to unmount the filesystem and run fsck the traditional way.<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/233073/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor233074"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Death, taxes, and fsck?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 4, 2007 11:10 UTC (Fri)
+                               by <b>qu1j0t3</b> (guest, #25786)
+                              [<a href="/Articles/233074/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      There is no "on the fly" fsck in ZFS.
+
+<p>There is self-healing for data (and some metadata), but as I say above, this does not in itself obviate fsck.
+
+<p>The point here is not that ZFS won't ever need a scavenging tool: That debate is ongoing. What is radically new about ZFS is that it's designed to be <i>always correct on disk</i> (which other filesystems don't attempt - possibly excepting XFS, which I haven't studied). It's worth remembering here that ZFS is specifically designed and tested to keep this promise in the face of unexpected system failures (more <a href="http://blogs.sun.com/bill/category/ZFS">details from Bill Moore</a>).
+
+<p>The concept of fsck has therefore been designed out of the system - rather than regarded as a routine part of filesystem use, as is the case with ext?fs, for example - and if such a tool is ever created, its operation would have little in common with traditional fsck anyway.
+
+<p>Please read <a href="http://blogs.sun.com/bonwick/category/ZFS">what Jeff Bonwick has written</a> about the design of ZFS. The other benefit of such study is that you can find out why it's a generation ahead of anything else out there.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/233074/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2007, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,732 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>User-space page fault handling [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/550555/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/549842/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/550555/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>User-space page fault handling</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 14, 2013</br>
+           </div>
+Page fault handling is normally the kernel's responsibility.  When a
+process attempts to access an address that is not currently mapped to a
+location in RAM, the kernel responds by mapping a page to that location
+and, if needed, filling that page with data from secondary storage.  But
+what if that data is not in a location that is easily reachable by the
+kernel?  Then, perhaps, it's time to outsource the responsibility for
+handling the fault to user space.
+<p>
+One situation where user-space page fault handling can be useful is for the
+live migration of virtual machines from one physical host to another.
+Migration can be done by stopping the machine, copying its full address
+space to the new host, and restarting the machine there.  But address
+spaces may be large and sparsely used; copying a full address space can
+result in a lot of unnecessary work and a noticeable pause
+before the migrated system restarts.  If, instead, the virtual machine's
+address space could be demand-paged from the old host to the new, it could
+restart more quickly and the copying of unused data could be avoided.
+<p>
+Live migration with KVM is currently managed with <a
+href="http://lists.gnu.org/archive/html/qemu-devel/2012-10/msg05274.html">an
+out-of-tree char device</a>.  This scheme works, but, once the device takes
+over a range of memory, that memory is removed from the memory management
+subsystem.  So it cannot be swapped out, transparent huge pages don't work,
+and so on.  Clearly it would be better to come up with a solution that,
+while allowing user-space handling of demand paging, does not remove the
+affected memory from the kernel's management altogether.  A <a
+href="/Articles/549503/">patch set</a> recently posted by Andrea Arcangeli
+aims to resolve those issues with a couple of new system call options.
+<p>
+The first of those is to extend the <tt>madvise()</tt> system call, adding
+a new command called <tt>MADV_USERFAULT</tt>.  Processes can use this
+operation to tell the kernel that user space will handle page faults on a
+range of memory.  After this call, any access to an unmapped address in the
+given range will result in a <tt>SIGBUS</tt> signal; the process is then
+expected to respond by mapping a real page into the unmapped space as 
+described below.  The <tt>madvise(MADV_USERFAULT)</tt> call should be made
+immediately after the memory range is created; user-space fault handling
+will not work if the kernel handles any page faults before it is told that
+user space will be doing the job.
+<p>
+The <tt>SIGBUS</tt> signal handler's job is to handle the page fault by
+mapping a real page to the faulting address.  That can be done in current
+kernels with the <tt>mremap()</tt> system call.  The problem with
+<tt>mremap()</tt> is that it works by splitting the virtual memory area
+(VMA) structure used to describe the memory range within the kernel.
+Frequent <tt>mremap()</tt> calls will result in the kernel having to manage
+a large number of VMAs, which is an expensive proposition.  <tt>mremap()</tt> will
+also happily overwrite existing memory mappings, making it harder to detect
+errors (or race conditions) in user-space handlers.  For these reasons,
+<tt>mremap()</tt> is not an ideal solution to the problem.
+<p>
+Andrea's answer to this problem is a new system call:
+<p>
+<pre>
+    int remap_anon_pages(void *dest, void *source, unsigned long len);
+</pre>
+<p>
+This call will cause the <tt>len</tt> bytes of memory starting at
+<tt>source</tt> to be mapped into the process's address space starting at
+<tt>dest</tt>.  At the same time, the <tt>source</tt> memory range will be
+unmapped — the pages previously found there will be atomically moved to the
+<tt>dest</tt> range.
+<p>
+Andrea has posted <a href="/Articles/550622/">a small test program</a> that
+demonstrates how these APIs are meant to be used.
+<p>
+As one might expect, some restrictions apply:
+<tt>source</tt> and <tt>dest</tt> must be page-aligned, <tt>len</tt> should
+be a multiple of the page size, the <tt>dest</tt> range must be completely
+unmapped, and the <tt>source</tt> range must be fully mapped.  The mapping
+requirements exist to catch bugs in user-space fault handlers; remapping
+pages on top of existing memory has a high risk of causing memory
+corruption.
+<p>
+One nice feature of the patch set is that, on systems where <a
+href="/Articles/423584/">transparent huge pages</a> are enabled, huge pages
+can be remapped with <tt>remap_anon_pages()</tt> without the need to split
+them apart.  For that to work, of course, the length and alignment of the
+range to move must be compatible with huge pages.
+<p>
+There are a number of limitations in the current patch set.  The
+<tt>MADV_USERFAULT</tt> option can only be used on anonymous (swap-backed)
+memory areas.  A more complete implementation could conceivably support
+this feature for file-backed pages as well.  The mechanism offers support
+for demand paging of data into RAM, but there is no user-controllable
+mechanism for pushing data back out; instead, those pages are swapped with
+all other anonymous pages.  So it is not a complete user-space paging
+mechanism; it's more of a hook for loading the initial contents of
+anonymous pages from an outside source.
+<p>
+But, even with those limitations, the feature is useful for the intended
+virtualization use case.  Andrea suggests it could possibly have other uses
+as well; remote RAM applications come to mind.  First, though, it needs to
+get into the mainline, and that, in turn, suggests that the proposed ABI
+needs to be reviewed carefully.  Thus far, this patch set has not gotten a
+lot of review attention; that will need to change before it can be
+considered for mainline merging.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Virtualization">Memory management/Virtualization</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#remap_anon_pages">remap_anon_pages()</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/550555/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor550816"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2013 1:23 UTC (Thu)
+                               by <b>nelhage</b> (subscriber, #59579)
+                              [<a href="/Articles/550816/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Perhaps I'm misunderstanding something here, but I don't understand how `MADV_USERFAULT` is different/superior from doing an `mprotect(PROT_NONE)` and then handling the `SIGSEGV`. Can someone help me out?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/550816/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor550863"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2013 10:49 UTC (Thu)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/550863/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Perhaps I'm misunderstanding something here, but I don't understand how `MADV_USERFAULT` is different/superior from doing an `mprotect(PROT_NONE)` and then handling the `SIGSEGV`. Can someone help me out?</font><br>
+<p>
+For one there is the uglyness of properly handling SIGSEGVs which requires sigaltstack et al. which is far from easy.<br>
+<p>
+For another, if you would go that way you would need to call mmap() for every single page fault which would probably end up being horrendously expensive since you would end up with thousands of different mmap()s setup which is rather expensive. With the patchset, as far as I understand it, there's just one memory region setup in the kernel and just when it cannot find backing memory it falls back to the userspace page fault handler.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/550863/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor550866"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2013 11:23 UTC (Thu)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/550866/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+First, MADV_USERFAULT will tell userspace if a fault happens, but it has no effect if the page is already present.  (Yes, this is unexpected).<br>
+<p>
+Second, mprotect(PROT_NONE) creates a VMA, so you'll end up with a ton of VMAs.  MADV_USERFAULT doesn't.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/550866/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor551186"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 20, 2013 15:18 UTC (Mon)
+                               by <b>lacos</b> (guest, #70616)
+                              [<a href="/Articles/551186/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is freaking awesome.<br>
+<p>
+<font class="QuotedText">&gt; First, MADV_USERFAULT will tell userspace if a fault happens, but it has</font><br>
+<font class="QuotedText">&gt; no effect if the page is already present. (Yes, this is unexpected).</font><br>
+<p>
+Anthony's response in this article helps make sense of this (and also interpret the test program linked from the patch series). The address range (VMA) whose faults we care about (which is the guest's RAM on the target host) is actually allocated, just not yet set up in the page tables / populated by data. Once such a page has been populated during live migration, we really don't care about accesses to it any longer.<br>
+<p>
+So basically we don't want to re-map such a page (and split the containing VMA), we just want to catch the first access (the first page-in) of any page in such a VMA and fill it with real data. During this procedure we're not manipulating the process's address space at all, just its page tables.<br>
+<p>
+(mremap() seems like the opposite approach: make the same backing store available at a potentially different virtual address, for a potentially different size. In this case however we want to cause a different piece of backing store to appear at the same virtual address.)<br>
+<p>
+(BTW I wonder what happens if such an anon page is paged out to swap *after* we filled it with data. When we access it for the second time, will the userspace sighandler be invoked again, or (what seems more correct) will it silently come back form swap?)<br>
+<p>
+... I'm sure I'm about 95% inexact (or wildly raving even :)) in the above, but I'm still in awe of what I believe to understand from the idea.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/551186/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor550817"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2013 1:24 UTC (Thu)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/550817/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm confused about something basic here -- how is this different from, like, accessing an unmapped page (or a page in an anonymous PROT_NONE range), catching the SIGSEGV that is already today delivered to you, filling in the data, and returning?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/550817/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor550819"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2013 1:48 UTC (Thu)
+                               by <b>aliguori</b> (subscriber, #30636)
+                              [<a href="/Articles/550819/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is not quite right with respect to live migration.<br>
+<p>
+Live migration works perfectly fine today without any out-of-tree drivers.  But the algorithm we use is convergent.  First we enable dirty tracking of the guests memory, then we transfer all memory, then we check which pages have been dirtied and for the next round, we transfer only the dirty pages.<br>
+<p>
+We keep doing this until there is a sufficiently small number of dirty pages and then we stop the VM and transfer those pages.  This algorithm can run into trouble if the guest dirties pages faster than we can transfer them though.<br>
+<p>
+Andrea's patches enabled a new form of migration called "post-copy" which immediately starts the guest on the destination machine and then transfers pages from the source VM to the destination as the destination guest access them.<br>
+<p>
+This is why userspace page fault tracking is needed (to fetch those pages).  The advantage of this approach is that migration is deterministic--you don't have to rely on convergence.<br>
+<p>
+That said, there's very little concrete data saying that post-copy migration results in less guest down time compared to various techniques to force convergence with pre-copy migration.  I'm not convinced that we should support it at all.  So the jury is still out on whether this feature is actually needed for virt.<br>
+<p>
+Nonetheless, it's an interesting kernel interface and the remaining write-up is spot-on.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/550819/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor551950"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 27, 2013 21:51 UTC (Mon)
+                               by <b>ccurtis</b> (guest, #49713)
+                              [<a href="/Articles/551950/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+This algorithm can run into trouble if the guest dirties pages faster than we can transfer them though.
+</blockquote>
+
+<p>
+It sounds like you might want an algorithm that enforces some level of determinism, like:
+
+<pre>
+shrink()
+{
+    if( throttle_cpu )
+        cpu_speed *= 0.9;
+    if( dirty_pages )
+        throttle_cpu = 1;
+
+    &lt;migrate_pages&gt; &amp;&amp; break;
+
+    dirty_pages = 1;
+}
+</pre>
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/551950/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor550827"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2013 3:31 UTC (Thu)
+                               by <b>jmorris42</b> (guest, #2203)
+                              [<a href="/Articles/550827/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm sure there is a reason I'm not seeing offhand, but why are we still segregating memory into 'anonymous' pages and file backed?<br>
+<p>
+The main executables and the libs are already mapped to files.  Mandate a directory on a real drive that will contain a sparse file for each running process's memory map for it's read/write data.  No more out of memory errors or swap partitions/files.  As long as you have disk space you can malloc.  Depending on how you use it you might bring the system down in  swap death so you still need something like the out of memory killer but things should generally get simpler.  Would need to adjust the actual writeback of these files to be a very very low priority unless there was memory pressure but that wouldn't change the mental model or the api.<br>
+<p>
+This new feature under discussion would become a way to detect when a sparse file was trying to read a hole.<br>
+<p>
+Hibernation would get easier.  Stop all processes, write the kernel's memory to disk, sync dirty blocks, put devices to sleep, sync the drive's buffer and kill power.  For all intents and purposes ram would be treated as just be another layer of cache between the on die cache and the hard disk/ssd.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/550827/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor550865"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2013 11:20 UTC (Thu)
+                               by <b>Funcan</b> (subscriber, #44209)
+                              [<a href="/Articles/550865/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Many programs allocate larger memory ranges than they need... way, way larger. They then sparsely fill them. The amount of drive space necessary to support some scientific codes would be uneconomical if not impossible... Petabyte sparse matrices are far from unknown.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/550865/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor550936"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2013 15:42 UTC (Thu)
+                               by <b>dgm</b> (subscriber, #49227)
+                              [<a href="/Articles/550936/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yet this is a problem that would be better solved in user space. There are plenty of data structures for storing sparse matrices.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/550936/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor550946"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2013 17:34 UTC (Thu)
+                               by <b>ejr</b> (subscriber, #51652)
+                              [<a href="/Articles/550946/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sparse matrices themselves, yes.  For sparse direct factorization, however, having a region of memory with a large hole in the middle can save 5x-10x in time over the "optimal" representation that requires careful repacking.  But these examples are relying on over-committing memory and not the difference between anonymous disk residency on swap v. named disk residency with page-out.<br>
+<p>
+IMHO, the two cases differ in traditional policy more than anything.  Swap is written only when absolutely necessary (in theory).  Disk images often are written far more frequently to keep the disk version sanely representative of some consistent state (in theory).  Non-volatile memory, if it really becomes the norm, could remove the difference.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/550946/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor551024"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 17, 2013 13:49 UTC (Fri)
+                               by <b>Tuna-Fish</b> (guest, #61751)
+                              [<a href="/Articles/551024/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is true. However, the software already exists, and Linux just can't break large classes of software like that.<br>
+<p>
+There is a certain elegance to file-backing everything, but it frankly can't be done because of backwards compatibility.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/551024/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor550970"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2013 23:06 UTC (Thu)
+                               by <b>jmorris42</b> (guest, #2203)
+                              [<a href="/Articles/550970/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Which is why the files would be sparse.  If actual physical ram wouldn't be allocated now, actual disk space wouldn't be committed either.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/550970/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor551144"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">not distinguishing anonymous and file-backed memory</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 19, 2013 17:06 UTC (Sun)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/551144/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+Which is why the files would be sparse. If actual physical ram wouldn't be allocated now, actual disk space wouldn't be committed either.
+</blockquote>
+<p>
+And that's why I don't get the claim "no more out of memory errors."
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/551144/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor550941"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2013 16:32 UTC (Thu)
+                               by <b>alkbyby</b> (subscriber, #61687)
+                              [<a href="/Articles/550941/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It appears to be a nice way to fix performance issue of mremap/mprotect. But it looks like it is unable to handle a case where just writes need to be trapped. Which underlying hardware does support. And which is very handy e.g. for generational GC.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/550941/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor551124"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 18, 2013 13:24 UTC (Sat)
+                               by <b>civodul</b> (guest, #58311)
+                              [<a href="/Articles/551124/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This reminds of what Mach and co. have supported since their inception decades ago...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/551124/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor551159"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 20, 2013 1:03 UTC (Mon)
+                               by <b>nteon</b> (subscriber, #53899)
+                              [<a href="/Articles/551159/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+MADV_USERFAULT sounds like it could be useful for compacting GCs too<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/551159/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor551160"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">User-space page fault handling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 20, 2013 2:04 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/551160/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One page is a little bit granular for that. There were attempts to make a high-throughput concurrent compacting GC with the help of memory protection. They work, somewhat, but it's not really worth it. Most collectors simply use memory protection to stop mutators from accessing a heap that is being compacted and that doesn't require user-level page fault handling.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/551160/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

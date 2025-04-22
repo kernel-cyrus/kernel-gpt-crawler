@@ -1,0 +1,656 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Concurrency management in BPF [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/779120/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/779199/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/779120/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Concurrency management in BPF</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 7, 2019</br>
+           </div>
+In the beginning, programs run on the in-kernel BPF virtual machine had no
+persistent internal state and no data that was shared with any other part
+of the system.  The arrival of eBPF and, in particular, its maps
+functionality, has changed that situation, though, since a map can be
+shared between two or more BPF programs as well as with processes running
+in user space.  That sharing naturally leads to concurrency problems, so
+the BPF developers have found themselves needing to add
+primitives to manage concurrency (the "exchange and add" or <tt>XADD</tt>
+instruction, for example).  The next step is the addition of a
+spinlock mechanism to protect 
+data structures, which has also led to some wider discussions on what the
+BPF memory 
+model should look like.
+
+<p>
+A BPF map can be thought of as a sort of array or hash-table data
+structure.  The actual data stored in a map can be of an arbitrary type,
+including structures.  If a complex structure is read from a map while it
+is being modified, the result may be internally
+inconsistent, with surprising (and probably unwelcome) results.  In an
+attempt to prevent such problems, Alexei Starovoitov <a
+href="/ml/netdev/20190116050830.1881316-1-ast@kernel.org/">introduced BPF
+spinlocks</a> in mid-January; after a number of quick review cycles, <a
+href="/ml/netdev/20190131234012.3712779-1-ast@kernel.org/">version&nbsp;7
+of the patch set</a> was applied on February&nbsp;1.  If all goes well,
+this feature will be included in the 5.1 kernel.
+<p>
+<h4>BPF spinlocks</h4>
+<p>
+BPF spinlocks can only be placed inside structures that, in turn, are stored
+in BPF maps.  Such structures should contain a field like:
+<p>
+<pre>
+    struct bpf_spin_lock lock;
+</pre>
+<p>
+A BPF spinlock inside a given structure is meant to protect that structure
+in particular from concurrent access.  There is no way to protect other
+data, such as an entire BPF map, with a single lock.
+<p>
+From the point of view of a BPF program, this lock will behave much like an
+ordinary kernel spinlock.  An example provided with the patch-set cover
+letter starts by defining a structure containing a counter:
+<p>
+<pre>
+    struct hash_elem {
+    	int cnt;
+    	struct bpf_spin_lock lock;
+    };
+</pre>
+<p>
+Code that is compiled to BPF could then increment the counter atomically
+with something like the following:
+<p>
+<pre>
+    struct hash_elem *val = bpf_map_lookup_elem(&amp;hash_map, &amp;key);
+    if (val) {
+    	bpf_spin_lock(&amp;val-&gt;lock);
+    	val-&gt;cnt++;
+    	bpf_spin_unlock(&amp;val-&gt;lock);
+    }
+</pre>
+<p>
+BPF programs run in a restricted environment, so there is naturally a long
+list of rules that regulate the use of spinlocks.  Only certain types of
+maps (hash, array, and control-group local storage) support spinlocks at
+all, and only one spinlock is allowed within any given map element.  BPF
+programs can only acquire one lock at a time (to head off deadlock
+worries), cannot call external functions while holding a lock, and must
+release a lock prior to returning.  Direct access to the
+<tt>struct bpf_spin_lock</tt> field by the BPF program is disallowed.  A
+number of other rules apply as well; see <a
+href="/ml/netdev/20190131234012.3712779-2-ast@kernel.org/">this patch</a>
+for a more complete list.
+<p>
+Access to BPF spinlocks from user space is naturally different; a
+user-space process cannot be allowed to hold BPF spinlocks for unbounded
+periods of time since that would be an easy way to lock up a kernel thread.  The
+complex <a
+href="http://man7.org/linux/man-pages/man2/bpf.2.html"><tt>bpf()</tt>
+system call</a> thus does not get the ability to manipulate BPF spinlocks
+directly.  Instead, it gains a new flag (<tt>BPF_F_LOCK</tt>) that can be
+added to the <tt>BPF_MAP_LOOKUP_ELEM</tt> and <tt>BPF_MAP_UPDATE_ELEM</tt>
+operations to cause the spinlock contained within the indicated element to
+be acquired for the duration of the operation.  Reading an element does not
+reveal the contents of the spinlock field, and updating an element will not
+change that field.
+<p>
+One implication of this design is that user space cannot use BPF spinlocks
+to protect complex changes to structures stored in BPF maps; even the
+simple counter-incrementing example shown above would not be possible,
+since the lock cannot be held over the full operation (reading the counter,
+incrementing it, and storing the result).  The implicit assumption seems to be
+that such manipulations will be done on the BPF side, so the locking
+functionality serves mostly to keep user space from accessing a structure
+that a BPF program has partially modified.  For example, <a
+href="/ml/netdev/20190131234012.3712779-10-ast@kernel.org/">a test
+program</a> included with the patch set includes a BPF portion that
+repeatedly picks a random value, then sets every element of an array to
+that value while holding the lock.  The user-space side reads that array
+under lock and verifies that all elements are the same, thus showing that
+the element was not read in the middle of an update operation.
+<p>
+The patch set has seen a number of changes as the result of review
+comments.  One significant added restriction is that BPF spinlocks cannot
+be used in tracing or socket-filter programs due to preemption-related
+issues.  Those restrictions seem likely to be lifted in the future, but
+other types of BPF programs (including most networking-related programs)
+should be able to use BPF spinlocks once the feature goes upstream.
+<p>
+<h4>The BPF memory model</h4>
+<p>
+In the conversation around <a
+href="/ml/netdev/20190124041403.2100609-1-ast@kernel.org/">version 4 of the
+patch set</a>, Peter Zijlstra <a
+href="/ml/netdev/20190124180109.GA27771@hirez.programming.kicks-ass.net/">asked</a>
+about the overall memory model for BPF.  In contemporary systems, there
+is a lot more to concurrency control than spinlocks, especially when the
+desire is to minimize the cost of that control.  Access to shared data can
+be complicated by the tendency of modern hardware to cache and reorder
+memory accesses, with the result that changes made on one CPU can appear in
+a different order elsewhere.  Concurrency-aware code may have to make
+careful use of memory barriers to ensure that changes are globally visible
+in the right order.
+<p>
+Such code tends to be tricky when written for a single architecture, but it
+is further complicated by the fact that,
+naturally, every CPU type handles these concurrency issues differently.
+Kernel developers have done a lot of work to hide those
+differences to the greatest extent possible; details of that work can be
+found in <a
+href="https://www.kernel.org/doc/Documentation/memory-barriers.txt">Documentation/memory-barriers.txt</a>
+and the formal <a href="/Articles/718628/">kernel memory-model
+specification</a>.  All of that work refers to kernel code running natively
+on the host processor, though, not code running under the BPF virtual
+machine.  As BPF programs run in increasingly concurrent environments,
+the need to specify the memory model under which they run will
+grow.
+<p>
+Starovoitov, who remains the leader of the kernel's BPF efforts, has <a
+href="/ml/netdev/20190126001725.roqqfrpysyljqiqx@ast-mbp.dhcp.thefacebook.com/">proved
+resistant</a> to defining the memory model under which BPF programs run:
+<p>
+<div class="BigQuote">
+	What I want to avoid is to define the whole execution ordering
+	model upfront.  We cannot say that BPF ISA is weakly ordered like
+	alpha.  Most of the bpf progs are written and running on x86. We
+	shouldn't twist bpf developer's arm by artificially relaxing memory
+	model.  BPF memory model is equal to memory model of underlying
+	architecture.  What we can do is to make it bpf progs a bit more
+	portable with smp_rmb instructions, but we must not force weak
+	execution on the developer.
+</div>
+<p>
+This approach concerns the developers who have gone to a lot of effort to
+specify what the kernel's memory model should be in general; Will Deacon <a
+href="/ml/netdev/20190130181100.GA18558@fuggles.cambridge.arm.com/">said
+outright</a> that "<q>I don't think this is a good approach to take for
+the future of eBPF</q>".  Paul McKenney has <a
+href="/ml/netdev/20190130183618.GX4240@linux.ibm.com/">suggested</a> that
+BPF should simply follow the memory model used by the rest of the kernel.
+Starovoitov <a
+href="/ml/netdev/20190130195113.xyqre4sxasit6vpu@ast-mbp.dhcp.thefacebook.com/">doesn't
+want to do that</a>, though, saying "<q>tldr: not going to sacrifice
+performance</q>".
+<p>
+That part of the conversation ended without any conclusions beyond a
+suggestion to talk
+further about the issue, either in a phone call or at an upcoming
+conference.  It's not clear whether this off-list discussion has happened
+as of this writing.  What seems clear, though, is that these issues are
+better worked out soon rather than having to be managed in an
+after-the-fact manner later on.  Concurrency issues are hard enough when
+the underlying rules are well understood; they become nearly impossible
+when different developers are assuming different rules and code
+accordingly.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#BPF">BPF</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/779120/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor779215"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2019 19:15 UTC (Thu)
+                               by <b>isido</b> (subscriber, #6976)
+                              [<a href="/Articles/779215/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is interesting to see where eBPF ends in complexity and features. I think one of the orignal BPF's design principles was utter simplicity - eBPF has taken another road. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779215/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor779230"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2019 20:53 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/779230/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I keep suggesting to just put a JavaScript interpreter/JIT into the kernel and be done with it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779230/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor779244"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2019 22:27 UTC (Thu)
+                               by <b>atai</b> (subscriber, #10977)
+                              [<a href="/Articles/779244/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, Put Java there.<br>
+<p>
+No, put Rust there.<br>
+<p>
+No, put C++ there<br>
+<p>
+No, ...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779244/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor779259"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 8, 2019 2:22 UTC (Fri)
+                               by <b>jhoblitt</b> (subscriber, #77733)
+                              [<a href="/Articles/779259/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wasm would be more future proof...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779259/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor779218"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2019 19:27 UTC (Thu)
+                               by <b>chloe_zen</b> (guest, #8258)
+                              [<a href="/Articles/779218/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Shirley, any BPF program should be inherently portable... *sigh*<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779218/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor779225"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2019 20:22 UTC (Thu)
+                               by <b>clugstj</b> (subscriber, #4020)
+                              [<a href="/Articles/779225/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Stop calling me Shirley!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779225/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor779231"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2019 21:01 UTC (Thu)
+                               by <b>fuhchee</b> (guest, #40059)
+                              [<a href="/Articles/779231/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For comparison, systemtap's design took concurrency controls into account from day 1.  The language is defined to be concurrency-safe.  The generated code automatically protects script-visible global variables (any mixture of scalars and arrays) with shared or exclusive locks (depending on reading/writing those vars).  All needed locks are taken at the beginning of a code block (probe handler = bpf event handler), which permit the blocks to run atomically.  Locks may timeout in case of deadlocks.  Simplicity &amp; safe concurrency.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779231/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor779236"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2019 21:11 UTC (Thu)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/779236/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The proposed memory model --- use whatever the underlying architecture uses --- is a recipe for subtle bugs caused by people developing BPF programs on x86 and not bothering to think about other systems.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779236/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor779228"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2019 21:39 UTC (Thu)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/779228/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you have a bug in the locking for your BPF, might you accidentally read memory you shouldn't have access to? I remember hearing about a proposal for the Java memory model where if two threads simultaneously copied location A into B and B into A, both locations could end up containing an arbitrary value (processor predicts the value of A, copies it to B, copies it to A, and finds that its prediction matches the actual value of A). The designers of the proposal said that properly-written programs would use locking to avoid that, but someone else pointed out that improperly-written programs still shouldn't end up with the JVM's address space in a char[] variable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779228/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor779242"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2019 21:43 UTC (Thu)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/779242/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Honestly, the entire proposal is misguided. BPF shouldn't be exposing a memory model _at all_! Instead, it should provide non-blocking STM-like constructs as the user API and let the verifier and optimizer component translate these STM declarations into locking and atomics as appropriate for a specific architecture. Everyone here is talking about this issue as if it were an architecture and specification problem, but it's really a compiler problem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779242/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor779248"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 8, 2019 0:41 UTC (Fri)
+                               by <b>codyharrington</b> (guest, #130219)
+                              [<a href="/Articles/779248/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How does the GPL work with BPF programs? Will a large company such as Google be able to create BPF programs for the kernel without having to release their source code?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779248/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor779265"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 8, 2019 7:54 UTC (Fri)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/779265/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can create all you want. The question is whether they can distribute them, e.g. in Chrome for improved sandboxing.<br>
+<p>
+Given that there are multiple instances where, essentially, proprietary code is loaded into the kernel already, I don't think licensing will give anybody any headaches.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779265/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor779888"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 15, 2019 13:35 UTC (Fri)
+                               by <b>ecree</b> (guest, #95790)
+                              [<a href="/Articles/779888/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+BPF programs contain a 'license' string (in their .data); the kernel checks whether this matches a small set of GPL-ey strings, and uses that to gate access to certain helper functions.  Essentially it's much like EXPORT_SYMBOL_GPL(), except that I think proprietary BPF programs don't taint the kernel (since in theory the verifier means that they can't break anything but themselves).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779888/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor844774"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Concurrency management in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2021 17:15 UTC (Mon)
+                               by <b>sohachak</b> (guest, #124388)
+                              [<a href="/Articles/844774/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The discussion is very interesting! Is there any ongoing or recent effort or interest to define a memory model for eBPF? I look forward to your response.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/844774/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2019, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

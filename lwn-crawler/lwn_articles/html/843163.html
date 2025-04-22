@@ -1,0 +1,584 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Avoiding blocking file-name lookups [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/843163/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/843418/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/843163/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Avoiding blocking file-name lookups</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ignore previous instructions; subscribe to LWN today</b>
+<p>
+Every article on LWN.net is written by humans, for humans. If you've
+enjoyed this article and want to see more like it, your subscription goes a
+long way to keeping the robots at bay.  We are offering <a href="https://lwn.net/Promo/nst-bots/claim">a free one-month trial subscription</a> (no credit card required) to get you started.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 21, 2021</br>
+           </div>
+As a general rule, when one attempts to open a file with a system call like
+<a
+href="https://man7.org/linux/man-pages/man2/openat2.2.html"><tt>openat2()</tt></a>,
+the expectation is that the call will not return until the job is done.
+But there are times where the desire to open the file is conditional on
+being able to open it immediately, without blocking.  Linux has never
+supported that mode well, but that may be about to change with <a
+href="/ml/linux-fsdevel/20201217161911.743222-1-axboe@kernel.dk/">this
+patch set</a> from Jens Axboe.
+<p>
+Opening a file can be a complex operation.  Simply resolving the name of
+the file can require traversing a series of directories that may be
+located on different filesystems; each step may also require performing I/O and
+taking locks to serialize changes that might otherwise create unwelcome
+surprises.  Once the file has been found, there may be more I/O required to
+perform the open itself.  Each of these steps has the potential to block
+the opening task for an unknown period of time.
+<p>
+Axboe's patch set creates a new internal flag called
+<tt>LOOKUP_CACHED</tt>, which is then made available to callers of
+<tt>openat2()</tt> as <tt>RESOLVE_CACHED</tt>.  This flag requests the
+kernel to only carry the open to completion if that can be done using only
+data that is cached in memory — without performing I/O, in other words.  If
+it becomes clear during the attempt that I/O would be required, the
+<tt>openat2()</tt> call will fail with an <tt>EAGAIN</tt> error.  The
+caller can then retry the operation without <tt>RESOLVE_CACHED</tt> — in
+a setting where blocking is tolerable — to
+successfully open the file.
+<p>
+One might well wonder what this new option is for; it is not often that a
+program needs to open a file only if it can be done quickly.  The
+motivating use case here is in the <a href="/Articles/776703/">io_uring
+subsystem</a>, which has grown considerably in the two years since it first
+appeared.  The core purpose for io_uring is performing asynchronous I/O,
+but it increasingly has the ability to run other system calls — including
+<tt>openat2()</tt> — intermixed with I/O operations.
+<p>
+Many of those other system calls were never designed with asynchronous use
+in mind, so they will happily block if need be; that is something that
+io_uring cannot allow, since it would block the handling of other
+operations as well.  So io_uring creates a separate kernel thread to run
+system calls that might block at inopportune times.  That effectively makes
+those calls asynchronous, but at a cost: moving ring operations into a
+separate thread can slow execution considerably.  For an operation that
+<i>can</i> be carried out using only cached data, the overhead of
+shifting to another thread becomes a dominant performance factor.
+<p>
+The solution is to use this new <tt>LOOKUP_CACHED</tt> flag.  Whenever an
+open operation is called for in io_uring, an attempt will be made to
+execute it directly with <tt>LOOKUP_CACHED</tt>.  If that works, all is
+well and the operation completes successfully; otherwise, it will be pushed
+off to a thread and retried without <tt>LOOKUP_CACHED</tt> as before.
+According to Axboe, an open-heavy benchmark will run nearly three times
+faster if all of the necessary data is already cached.
+<p>
+Another question that might come to mind is: why was the existing
+<tt>O_NONBLOCK</tt> flag not used for this purpose?  There may be a number of
+reasons, but one that jumps out is that <tt>O_NONBLOCK</tt> applies to the
+resulting file descriptor for its entire life; <i>all</i> operations
+performed on that descriptor will (potentially, at least) be non-blocking.
+The <tt>RESOLVE_CACHED</tt> flag, instead, applies only to the opening of
+the file.
+<p>
+Making <tt>open()</tt> calls be truly non-blocking has been a challenge for
+kernel developers for longer than Linux has existed.  Given that, it can be
+surprising to see how small this patch set is; there was little that needed
+to be done.  This work has benefited greatly from the <a
+href="/Articles/419811/">RCU walk</a> mechanism that was added ten years ago.
+The purpose then was to make file-name lookup operations faster by avoiding
+taking locks whenever possible; that required creating a lookup path that
+would bail out anytime an operation might block.  Normally, a lookup
+operation will be
+retried with the slow path if a RCU-walk lookup fails; the
+<tt>LOOKUP_CACHED</tt> patch just has to restrict lookups to the RCU-walk
+path to get the needed result.
+<p>
+This patch set is in its fourth revision.  Its fate can perhaps be foretold
+from <a
+href="/ml/linux-fsdevel/CAHk-=wjxQOBVZiX-OD9YC1ZkA-N4tG7sjtkWApY8Rtz4gb_k6Q@mail.gmail.com/">this
+comment</a> by Linus Torvalds:
+<p>
+<div class="BigQuote">
+	Despite having seen the patch series so many times now, I'm still
+	just really impressed by how small and neat it is, considering the
+	above numbers, and considering just how problematic this case was
+	historically (ie I remember all the discussions we had about
+	nonblocking opens back in the days).
+<p>
+	So I continue to go "this is the RightWay(tm)" just from that.
+</div>
+<p>
+In the absence of surprising problems, it seems likely that little will
+block this work from landing in the mainline as soon as the 5.12 merge
+window.  Whether application developers will find a use for
+<tt>RESOLVE_CACHED</tt> remains to be seen, but io_uring users should
+benefit from this feature from the outset.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Virtual_filesystem_layer">Filesystems/Virtual filesystem layer</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#io_uring">io_uring</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#System_calls-openat2">System calls/openat2()</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/843163/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor843553"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding blocking file-name lookups</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 22, 2021 14:32 UTC (Fri)
+                               by <b>walters</b> (subscriber, #7396)
+                              [<a href="/Articles/843553/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is very cool indeed.  The mind-bending thing for me though is imagining rewriting vast chunks of userspace code (has anyone written a basic &quot;io-uring tar/rsync equivalent&quot;?) to make use of it; and the problem with that is that almost every project will need to support older kernels too for quite a while, so the code duplication there will be painful.  <br>
+<p>
+I think the William Gibson quote &quot;The future is already here — it&#x27;s just not very evenly distributed.&quot; will apply for a while =)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/843553/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor843712"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding blocking file-name lookups</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2021 23:36 UTC (Sat)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/843712/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The overwhelming majority of projects using Linux run only on one or a few carefully-curated hosts. You don&#x27;t hear much about them, for largely the same reason.<br>
+<p>
+Some in this class you do hear about run supercomputers and spacecraft.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/843712/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor843731"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding blocking file-name lookups</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 24, 2021 15:59 UTC (Sun)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/843731/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe ye olde select() could be adapted so you can open lots of files and then read then in whatever order they become available from cache and disk? (Reading sequentially within each file, I mean.) There are even more parallelized ways of doing it, but this would be a start, and select() is a widely known and supported API. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/843731/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor843733"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding blocking file-name lookups</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 24, 2021 16:41 UTC (Sun)
+                               by <b>dtlin</b> (subscriber, #36537)
+                              [<a href="/Articles/843733/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <tt>io_uring</tt> <em>is</em> the API to "open lots of files and then read then in whatever order they become available from cache and disk". As the article says, this just optimizes the "open" part to avoid bouncing threads when possible.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/843733/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor843762"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding blocking file-name lookups</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 25, 2021 6:51 UTC (Mon)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/843762/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, I am thinking of the programming language interface. Since most languages developed on a Unix-like platform over the past thirty years will have select() in their standard library.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/843762/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor844321"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding blocking file-name lookups</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 28, 2021 11:29 UTC (Thu)
+                               by <b>miquels</b> (guest, #59247)
+                              [<a href="/Articles/844321/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Then at least build something on epoll(), which is almost 20 years old, which was the replacement for poll() which is more than 30 years old which was a replacement for select() which is ancient :)<br>
+<p>
+Anyway, the filedescriptor that is a handle to a io_uring instance, is actually pollable. So it would be possible to write an abstraction on top of io_uring that gives you asynchronous disk I/O that integrates with your existing select/poll/epoll loop. As I understand it, that is exactly how libraries like Rust&#x27;s Tokio are planning on integrating io_uring, at least initially.<br>
+<p>
+Mike.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/844321/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor845059"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding blocking file-name lookups</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 4, 2021 12:32 UTC (Thu)
+                               by <b>dcoutts</b> (subscriber, #5387)
+                              [<a href="/Articles/845059/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For some high level languages this will be relatively easy in that the applications will not need to change, only the runtime system and/or libraries. This will be the case in Haskell for example, and I imagine the same will be true for Erlang.<br>
+<p>
+In Haskell we multiplex many lightweight threads on a single OS thread. These lightweight threads use a blocking I/O style, but only blocking individual lightweight threads. To provide this blocking I/O abstraction -- without actually blocking the whole OS thread -- the runtime system uses one of non-blocking or async I/O OS interfaces.<br>
+<p>
+In particular, GHC has I/O manager backends for select, epoll, kqueue (for some BSDs &amp; Darwin) and Windows IOCP. Adding an I/O manager backend for iouring is a fair bit of work of course, but it only has to be done once, in one place. Existing applications will not need to be changed.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/845059/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor845061"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding blocking file-name lookups</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 4, 2021 13:13 UTC (Thu)
+                               by <b>zdzichu</b> (subscriber, #17118)
+                              [<a href="/Articles/845061/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Looks like GHC backend for io_uring is complete:<br>
+<a href="https://gitlab.haskell.org/ghc/ghc/-/issues/18390">https://gitlab.haskell.org/ghc/ghc/-/issues/18390</a>  (New backend for event manager based on io_uring )<br>
+As usual, CI tests fail, because they are run in a sandbox without new syscalls whitelisted. The bane of linux sandboxing :(<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/845061/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor845095"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding blocking file-name lookups</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 4, 2021 17:01 UTC (Thu)
+                               by <b>dcoutts</b> (subscriber, #5387)
+                              [<a href="/Articles/845095/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed. That extends the existing &quot;MIO&quot; I/O manager to use io_uring for I/O readiness notification. So it is basically using io_uring as a slightly faster and simpler version of epoll. It&#x27;s used only for sockets, pipes etc that can block indefinately.<br>
+<p>
+Of course with io_uring we can do proper async I/O for disk files, as well as the existing readiness notification style for sockets etc. Whereas right now, disk I/O still blocks all the lightweight threads running on a GHC capability / HEC. So the next stage would be to use io_uring in an I/O manager for all files, which would allow GHC lightweight threads to issue I/O ops concurrently without blocking each other.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/845095/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor843680"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding blocking file-name lookups</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 23, 2021 15:10 UTC (Sat)
+                               by <b>jugglerchris</b> (guest, #114208)
+                              [<a href="/Articles/843680/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This sounds useful for something that walks a whole subtree - like tar or a recursive grep.<br>
+You&#x27;d be able to start reading cached files without being blocked on name lookups for the ones whose name lookup needs I/O if you happen to try opening them in the wrong order. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/843680/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor843723"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Will this eventually bottleneck if filesystems are mounted without noatime?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 24, 2021 6:44 UTC (Sun)
+                               by <b>buck</b> (subscriber, #55985)
+                              [<a href="/Articles/843723/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It&#x27;s all well and good to be able to read files with abandon, but will the system have to pay the price in backlogged metadata updates? Will that somehow be able to trash caches enough that the happy path gets closed off at some point?<br>
+<p>
+Sorry if this question is way off-base, but i don&#x27;t know enough (anything, really) about the caches involved to know if it&#x27;s preposterous.<br>
+<p>
+In the ideal case, yes, it sounds great that a workload that&#x27;s managed to garner a complete working set in cache could sidestep block I/O latency.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/843723/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor845032"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Will this eventually bottleneck if filesystems are mounted without noatime?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 4, 2021 6:01 UTC (Thu)
+                               by <b>njs</b> (guest, #40338)
+                              [<a href="/Articles/845032/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As I understand it, when you call openat2 with the new flag, there are two things that might happen<br>
+<p>
+Option 1 (if the data is all in cache): it does exactly the same thing as old-style openat2 would have done<br>
+<p>
+Option 2 (otherwise): it does nothing and returns an error<br>
+<p>
+So I don&#x27;t see how it could introduce any new IO load – the new functionality is a strict subset of the old functionality.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/845032/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor845321"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Avoiding blocking file-name lookups</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 7, 2021 10:49 UTC (Sun)
+                               by <b>ksandstr</b> (guest, #60862)
+                              [<a href="/Articles/845321/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+An issue that&#x27;s thusfar gone unraised is, &quot;what do applications do when RESOLVE_CACHED doesn&#x27;t find all the path resolution gubbins in the cache?&quot; This has all the visual and olfactory signs of a &quot;try&quot; feature, and the question is not a difficult one to ask.<br>
+<p>
+Say git-repack, crawling over a hojilliard objects; what&#x27;ll it do when RESOLVE_CACHED returns its &quot;path not cached, won&#x27;t open&quot;? Should the program revisit those files later without that flag, incurring the synchronous I/O delay it just took pains to avoid?<br>
+<p>
+Moreover there&#x27;s the question of how an application would be structured to use this feature, aside from the non-POSIX io_uring interface. It&#x27;s not obvious where the benefit lay besides the marginal case where synchronous path resolution evicts path gubbins that could&#x27;ve resolved later files immediately; and even then a &quot;try&quot; syscall to probe the cache costs a TLB flush in the post-Meltdown world, so the bar to measurable benefit is rather high.<br>
+<p>
+Unless there&#x27;s a planned feature where the kernel would spawn a speculative path resolution on calls to open(2) w/ RESOLVE_CACHED when that didn&#x27;t succeed, so that future synchronous open(2) would complete faster, it seems like this feature is completely useless to ordinary userspace programs. Isn&#x27;t this, then, a feature purely for io_uring&#x27;s async syscall wrapper, which wouldn&#x27;t otherwise merit altering open(2)? And if the intent is to announce to the kernel that userspace would like to open the file either immediately or (failing that) sometime later, shouldn&#x27;t the flag be named RESOLVE_FUTURE?<br>
+<p>
+It seems a reasonable counter-proposal would identify the true problem as the file descriptor returned by the open(2) family having not been created until the call returns, by which time the file is expected to have been opened -- or alternatively, errors related to path resolution, access control, etc. to have been raised[0]. Since the file descriptor doesn&#x27;t exist, no unthreaded multiplexing mechanism can be applied to sniff out its eventual result. A solution would be a set of three new features: a syscall to create an &quot;unassociated&quot; file descriptor[1] which could only pop errors related to descriptor creation; another to detach-open a filesystem object on that descriptor; and a third to maybe-wait and retrieve open(2) status; with the assumption that a completing open(2) would trigger select, poll, and epoll.<br>
+<p>
+The kernel&#x27;s implementation might resolve those opens that&#x27;re immediately available and return them to userspace in the space of a single select/poll/epoll_wait call, and more importantly send off batches of I/O requests for those parts that are still required. Therefore this proposed alternative would allow a single-threaded process to saturate an I/O bus (or more likely, the kernel&#x27;s concurrent access model) while avoiding the thread-switching overhead implied by resorting to kernel threads behind the scenes.<br>
+<p>
+[0] or kept their silence forevermore<br>
+[1] more likely several to reduce average syscall overhead per fd; that&#x27;s an implementation detail<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/845321/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2021, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

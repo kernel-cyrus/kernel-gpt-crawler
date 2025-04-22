@@ -1,0 +1,1388 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The long road to lazy preemption [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/994322/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/994576/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/994322/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The long road to lazy preemption</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 18, 2024</br>
+           </div>
+The kernel's CPU scheduler currently offers several preemption modes that
+implement a range of tradeoffs between system throughput and response time.
+Back in September 2023, a <a href="/Articles/944686/">discussion
+on scheduling</a> led to the concept of "lazy preemption", which could
+simplify scheduling in the kernel while providing better results.  Things
+went quiet for a while, but lazy preemption has returned in the form of <a
+href="/ml/all/20241007074609.447006177@infradead.org">this patch series</a>
+from Peter Zijlstra.  While the concept appears to work well, there is
+still a fair amount of work to be done.
+<p>
+<h4>Some review</h4>
+<p>
+Current kernels have four different modes that regulate when one task can
+be preempted in favor of another.  <tt>PREEMPT_NONE</tt>, the simplest
+mode, only allows preemption to happen when the running task has exhausted
+its time slice.  <tt>PREEMPT_VOLUNTARY</tt> adds a large number of points
+within the kernel where preemption can happen if needed.
+<tt>PREEMPT_FULL</tt> allows preemption at almost any point except places
+in the kernel that prevent it, such as when a spinlock is held.  Finally,
+<tt>PREEMPT_RT</tt> prioritizes preemption over most other things, even
+making most spinlock-holding code preemptible.
+<p>
+A higher level of preemption enables the system to respond more quickly to
+events; whether an event is the movement of a mouse or an "imminent
+meltdown" signal from a nuclear reactor, faster response tends to be more
+gratifying.  But a higher level of preemption can hurt the overall
+throughput of the system; workloads with a lot of long-running,
+CPU-intensive tasks tend to benefit from being disturbed as little as
+possible.  More frequent preemption can also lead to higher lock
+contention.  That is why the different modes exist; the optimal preemption
+mode will vary for different workloads.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+Most distributions ship kernels built with the <tt>PREEMPT_DYNAMIC</tt>
+pseudo-mode, which allows any of the first three modes to be selected at
+boot time, with <tt>PREEMPT_VOLUNTARY</tt> being the default.  On systems
+with debugfs mounted, the current mode can be read from
+<tt>/sys/kernel/debug/sched/preempt</tt>.
+<p>
+<tt>PREEMPT_NONE</tt> and <tt>PREEMPT_VOLUNTARY</tt> do not allow the
+arbitrary preemption of code running in the kernel; there are times when
+that can lead to excessive latency even in systems where minimal latency is
+not prioritized.  This problem is the result of places in the kernel where
+a large amount of work can be done; if that work is allowed to run
+unchecked, it can disrupt the scheduling of the system as a whole.  To get
+around this problem, long-running loops have been sprinkled with calls to
+<tt>cond_resched()</tt>, each of which is an additional voluntary
+preemption point that is active even in the <tt>PREEMPT_NONE</tt> mode.
+There are hundreds of these calls in the kernel.
+<p>
+There are some problems with this approach.  <tt>cond_resched()</tt> is a
+form of heuristic that only works in the places where a developer has
+thought to put it.  Some calls are surely unnecessary, while there will be
+other places in the kernel that could benefit from <tt>cond_resched()</tt>
+calls, but do not have them.  The use of <tt>cond_resched()</tt>, at its
+core, takes a decision that should be confined to the scheduling code and
+spreads it throughout the kernel.  It is, in short, a bit of a hack that
+mostly works, but which could be done better.
+<p>
+<h4>Doing better</h4>
+<p>
+The tracking of whether a given task can be preempted at any moment is a
+complicated affair that must take into account several variables; see <a
+href="/Articles/945422/">this article</a> and <a
+href="/Articles/831678/">this article</a> for details.  One of those
+variables is a simple flag, <tt>TIF_NEED_RESCHED</tt>, that indicates the
+presence of a higher-priority task that is waiting for access to the CPU.
+Events such as waking a high-priority task can cause that flag to be set in
+whatever task is currently running.  In the absence of this flag, there is
+no need for the kernel to consider preempting the current task.
+<p>
+There are various points where the kernel can notice that flag and cause
+the currently running task to be preempted.  The scheduler's timer tick is
+one example; any time a task returns to user space from a system call is
+another.  The completion of an interrupt handler is yet another, but that
+check, which can cause preemption to happen any time that interrupts are
+enabled, is only enabled in <tt>PREEMPT_FULL</tt> kernels.  A call to
+<tt>cond_resched()</tt> will also check that flag and, if it is set, call
+into the scheduler to yield the CPU to the other task.
+<p>
+The lazy-preemption patches are simple at their core; they add another
+flag, <tt>TIF_NEED_RESCHED_LAZY</tt>, that indicates a need for
+rescheduling at some point, but not necessarily right away.  In the lazy
+preemption mode (<tt>PREEMPT_LAZY</tt>), most events will set the new flag
+rather than <tt>TIF_NEED_RESCHED</tt>.  At points like the return to user
+space from the kernel, either flag will lead to a call into the scheduler.
+At the voluntary preemption points and in the return-from interrupt path,
+though, only <tt>TIF_NEED_RESCHED</tt> is checked.
+<p>
+The result of this change is that, in lazy-preemption mode, most events in
+the kernel will not cause the current task to be preempted.  That task
+<i>should</i> be preempted eventually, though.  To make that happen, the
+kernel's timer-tick handler will check whether
+<tt>TIF_NEED_RESCHED_LAZY</tt> is set; if so, <tt>TIF_NEED_RESCHED</tt>
+will also be set, possibly causing the running task to be preempted.  Tasks
+will generally end up running for something close to their full time slice
+unless they give up the CPU voluntarily, which should lead to good
+throughput. 
+<p>
+With these changes, the lazy-preemption mode can, like
+<tt>PREEMPT_FULL</tt>, run with kernel preemption enabled at (almost) all
+times.  Preemption <i>can</i> happen any time that the preemption counter
+says that it should.  That allows long-running kernel code to be preempted
+whenever other conditions do not prevent it.  It also allows preemption to
+happen quickly in those cases where it is truly needed.  For example, 
+should a realtime task become runnable, as the result of
+handling an interrupt, for example, the <tt>TIF_NEED_RESCHED</tt> flag will
+be set, leading to an almost immediate preemption.  There will be no need
+to wait for the timer tick in such cases.
+<p>
+Preemption will <i>not</i> happen, though, if only
+<tt>TIF_NEED_RESCHED_LAZY</tt> is set, which will be the case much of the
+time. So a <tt>PREEMPT_LAZY</tt> kernel will be far less likely to preempt
+a running task than a <tt>PREEMPT_FULL</tt> kernel.
+<p>
+<h4>Removing <tt>cond_resched()</tt> — eventually</h4>
+<p>
+The end goal of this work is to have a scheduler with only two non-realtime
+modes: <tt>PREEMPT_LAZY</tt> and <tt>PREEMPT_FULL</tt>.  The lazy mode will
+occupy a place between <tt>PREEMPT_NONE</tt> and
+<tt>PREEMPT_VOLUNTARY</tt>, replacing both of them.  It will, however, not
+need the voluntary preemption points that were added for the two modes it
+replaces.  Since preemption can now happen almost anywhere, there is no
+longer a need to enable it in specific spots.
+<p>
+For now, though, the <tt>cond_resched()</tt> calls remain; if nothing else,
+they are required for as long as the <tt>PREEMPT_NONE</tt> and
+<tt>PREEMPT_VOLUNTARY</tt> modes exist.  Those calls also help to ensure
+that problems are not introduced while lazy preemption is being stabilized.
+<p>
+In the current patch set, <tt>cond_resched()</tt> only checks
+<tt>TIF_NEED_RESCHED</tt>, meaning that preemption will be deferred in many
+situations where it will happen immediately from <tt>cond_resched()</tt> in
+<tt>PREEMPT_VOLUNTARY</tt> or <tt>PREEMPT_NONE</tt> mode.
+Steve Rostedt <a
+href="/ml/all/20241009100133.2569e2a7@gandalf.local.home">questioned</a>
+this change, asking whether <tt>cond_resched()</tt> should retain its older
+meaning, at least for the <tt>PREEMPT_VOLUNTARY</tt> case.  Even though
+<tt>PREEMPT_VOLUNTARY</tt> is slated for eventual removal, he thought,
+keeping the older behavior could help to ease the transition.
+<p>
+Thomas Gleixner
+<a href="/ml/all/87h69lqbk0.ffs@tglx">answered</a> that only checking
+<tt>TIF_NEED_RESCHED</tt> is the correct choice, since it will help in the
+process of removing the <tt>cond_resched()</tt> calls entirely:
+<p>
+<blockquote class="bq">
+	That forces us to look at all of them and figure out whether they
+	need to be extended to include the lazy bit or not. Those which do
+	not need it can be eliminated when LAZY is in effect because that
+	will preempt on the next possible preemption point once the
+	non-lazy bit is set in the tick.
+</blockquote>
+<p>
+He added that he expects "<q>less than 5%</q>" of the
+<tt>cond_resched()</tt> calls need to check <tt>TIF_NEED_RESCHED_LAZY</tt>
+and, thus, will need to remain even after the transition to
+<tt>PREEMPT_LAZY</tt> is complete.
+<p>
+Before then, though, there are hundreds of <tt>cond_resched()</tt> calls
+that need to be checked and, for most of them at least, removed.  Many
+other details have to be dealt with as well; <a
+href="/ml/all/20241009165411.3426937-1-ankur.a.arora@oracle.com">this patch
+set</a> from Ankur Arora addresses a few of them.  There is
+also, of course, the need for extensive performance testing; Mike Galbraith
+has made <a
+href="/ml/all/579b7ea34ef6e2f7c955abdfc0929fe1af36faef.camel@gmx.de">an
+early start</a> on that work, showing that throughput with lazy preemption
+falls just short of that with <tt>PREEMPT_VOLUNTARY</tt>.
+<p>
+It all adds up to a lot to be done still, but the end result
+of the lazy-preemption work should be a kernel that is a bit smaller and
+simpler while delivering predictable latencies without the need to
+sprinkle scheduler-related calls throughout the code.  That seems like a
+better solution, but getting there is going to take some time.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Preemption">Preemption</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Scheduler">Scheduler</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/994322/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor994792"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 19, 2024 19:48 UTC (Sat)
+                               by <b>milesrout</b> (subscriber, #126894)
+                              [<a href="/Articles/994792/">Link</a>] (36 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is fascinating. <br>
+<p>
+It is surely a good sign for Linux that it has been kept flexible enough that core changes like this (and many of the others we've read about over the years) can still be made.  It isn't hard to imagine a 33-year-old monolithic kernel with an arguably &gt;50-year-old design would have ossified and get stuck with old designs forever.<br>
+<p>
+The question I have is this: is this because of "good design"? Or is it because the people that work on the kernel are just better? Are changes like folios, sched_ext, this, etc. able to be done because of good design/modularity in the kernel? Or is it just a willingness to make pervasive changes across a huge kernel codebase that lets this happen - by sheer force of will, the developers will not allow the kernel to ossify?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994792/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor994795"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 19, 2024 20:21 UTC (Sat)
+                               by <b>atnot</b> (subscriber, #124910)
+                              [<a href="/Articles/994795/">Link</a>] (30 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the answer is more that, and I mean this as a neutral statement of fact, Linux effectively killed all other OS research and development. If you want a higher level OS that can do something (and you're not friends with Bryan Cantrill or Theo de Raadt) you only have one choice and that's to make linux do that thing. That is probably partially an achievement in not annoying anyone enough to start making their own kernel for 30 years, by saying yes to most important use cases. But a lot of it is also just being so entrenched that not making it do what you want almost guarantees failure.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994795/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor994798"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 19, 2024 22:38 UTC (Sat)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/994798/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I think the answer is more that, and I mean this as a neutral statement of fact, Linux effectively killed all other OS research and development. If</span><br>
+<p>
+And this is probably down to just one person - Linus.<br>
+<p>
+I'm not saying it wouldn't have happened with another person, and another OS - Bill Gates and Windows had a damn good try ...<br>
+<p>
+But Linus is a damn good people manager, wasn't greedy and didn't make enemies, and importantly is trusted by everyone to be neutral (inasmuch as being "Mr Linux" can be neutral).<br>
+<p>
+Any threat to Linux will have to be lead by someone of Linus' abilities, and who will earn stature like Linus'.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994798/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor994802"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 20, 2024 5:09 UTC (Sun)
+                               by <b>j16sdiz</b> (guest, #57302)
+                              [<a href="/Articles/994802/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; and didn't make enemies.</span><br>
+<p>
+<p>
+<p>
+He made lots of enemies. Lots of people hate him. He acts like dick all the time. -- but, he is able to support his technical decision with reasons. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994802/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor994805"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 20, 2024 9:02 UTC (Sun)
+                               by <b>milesrout</b> (subscriber, #126894)
+                              [<a href="/Articles/994805/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't think I've ever heard of anyone hating him. A few quite ignorant people on places like reddit - the internet peanut gallery if ever there was one - like to bring up isolated instances of him being a little rude every time his name comes up. I don't think they hate him, though.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994805/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1005078"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 14, 2025 17:36 UTC (Tue)
+                               by <b>tbird20d</b> (subscriber, #1901)
+                              [<a href="/Articles/1005078/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I realize that this is hyperbole on your part, but Linus does not act like a jerk all the time, or even most of the time, or even frequently. In order to assert any of that, you have to ignore most of the mundane messages that Linus sends out, as well as the mundane and even friendly interactions he has with people online and in person.  Since he is famous, any negative message from him makes news.  Being the top maintainer, he often has to gatekeep and be the bearer of bad news for someone's pet feature or idea, and as the arbiter of last resort he sometimes has to settle contentious debates.  But how many situations has he handled in the last year in a jerky fashion, versus the total amount of interactions he's had in that time frame?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1005078/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor994800"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 20, 2024 0:55 UTC (Sun)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/994800/">Link</a>] (25 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="https://doc.cat-v.org/bell_labs/utah2000/utah2000.html">https://doc.cat-v.org/bell_labs/utah2000/utah2000.html</a><br>
+<p>
+You're not necessarily wrong, but I certainly didn't start from "I want a kernel that manages memory in large chunks, which one shall I work on?" Other projects may have. I started from "Here are some problems I see in Linux. How could we solve them?"<br>
+<p>
+I did consciously ask "Which filesystem shall I start with?" and chose XFS for a number of reasons (mostly working with the people and perceiving iomap as being the future of the VFS).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994800/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor994818"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 20, 2024 22:39 UTC (Sun)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/994818/">Link</a>] (24 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+About Rob Pike's essay, which I've seen before.<br>
+<p>
+Frankly, this view is a little harsh, but Pike has always seemed to me bitter that he came along a little too late and too uninterested in the idea that a problem could be, well, fairly well solved by existing systems.  I think Plan 9 wound up irrelevant not because industry is stupid or hidebound, but because it didn't represent enough of an improvement (where it was an improvement at all).<br>
+<p>
+Some problems do, at a certain point, end up, for some sense of the word solved, mostly solved.  And the kind of innovation that previously defined a system/product/whatever trails off and moves elsewhere.<br>
+<p>
+At a certain point, we stopped changing the basic design of how cars work with their driver and the road.  A car from much after 1950 (or, really, even the 1930s for many designs) has, to a first approximation, the same human interface and basic functionality as one from 2024, leaving aside any partial self driving features (which are brand new in any case).  There has been a lot of innovation, but not in the controls or basic shape.  This was a problem that was solved well enough that new solutions couldn't generate space.  And yeah, they might be superior, but probably not all that superior.  It's a lot more than just "cost of switching" and "everyone gave up".  There was, in fact, little need to make larger changes.  I know that's depressing if you're a researcher, and, yes, some promising innovations end up moribund...  But they always did.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994818/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor994844"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 20, 2024 23:11 UTC (Sun)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/994844/">Link</a>] (20 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, I'm not sure Pike is 100% right. Plan9 was a great piece of research. Had it been done earlier, it might have displaced Unix. But I do think that we're past the point where we can just throw away Unix compatibility. Linux shows the road forward; we can add new interfaces to make things more efficient, but we can't abandon Unix.<br>
+<p>
+The car-human interface isn't as fixed as one might think. Is the gear shift in the centre console or on a stalk? Automatic or manual? Is there an ignition key or a "Start" button somewhere? How does one open the refuelling socket? Which @#$&amp; side of the car is it on? Where are the windscreen wipers? How do you dip the headlights? None of these are big burdens if you own a car, but if you rent, you have to figure all these things out at some point (preferably before leaving the lot).<br>
+<p>
+It's the same with showers. They mostly have controls for volume, temperature and which outlet(s) the water should come out of, but some hotels go out of their way to have super fancy ones that are utterly non-discoverable. I know how to work my shower at home, but if you stay at three different hotels in three nights, you're going to be confused and angry in the third shower.<br>
+<p>
+Anyway, back to my point. Innovation has moved up the stack. We have something good enough, and we're all building on it. Linux has become the substrate on which we innovate. I don't think that's sad, I think that's progress.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994844/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor994846"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Which @#$&amp; side of the car is it [Fuel Socket] on.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 21, 2024 0:30 UTC (Mon)
+                               by <b>gmatht</b> (subscriber, #58961)
+                              [<a href="/Articles/994846/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, there should be a little symbol on your dashboard, either  &lt;[FuelPump] or [FuelPump]&gt;. The fuel should be on the side the arrow is pointing to, so you shouldn't have to stop your car to get out and check on the way to the fuel station. Not sure having a little arrow pointing to either Plan9 or Unix would help much in our case though :P<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994846/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor994847"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Which @#$&amp; side of the car is it [Fuel Socket] on.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 21, 2024 1:14 UTC (Mon)
+                               by <b>dskoll</b> (subscriber, #1630)
+                              [<a href="/Articles/994847/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>LWN properly supports Unicode, so ◀⛽ or ⛽▶   🙂
+<p>I didn't know about the fuel socket indicator until about 5 years ago.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994847/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor994850"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Which @#$&amp; side of the car is it [Fuel Socket] on.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 21, 2024 2:35 UTC (Mon)
+                               by <b>sfeam</b> (subscriber, #2841)
+                              [<a href="/Articles/994850/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, great.  Now how about the problem of finding where they put the little latch-release thingy that you have to pull before opening the cover to the fuel input.  Under the seat? left or right? How far back?  Or maybe it's under the dash.  Or on the driver-side door.  Or maybe there isn't one but the cover is stuck and needs to be pried. Or maybe it's a button on the key fob.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994850/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor994867"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Which @#$&amp; side of the car is it [Fuel Socket] on.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 21, 2024 13:43 UTC (Mon)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/994867/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've opened the engine compartment instead of the fuel lid a certain number of times.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994867/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor994872"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Which @#$&amp; side of the car is it [Fuel Socket] on.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 21, 2024 14:03 UTC (Mon)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/994872/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+???<br>
+<p>
+Ime, the engine cover lever is always in the passenger footwell by the door. While the fuel cover switch in my car is in the driver's door. And while I have little experience of said switches, I've never known them on the passenger side ...<br>
+<p>
+My bug bear is "flash headlamps" and "wash windscreen". The number of times I've flashed people by mistake ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994872/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor994994"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Which @#$&amp; side of the car is it [Fuel Socket] on.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 21, 2024 20:24 UTC (Mon)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/994994/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The engine cover lever has always been on the driver's side IME (US). AFAIK, it has always been a physical by-cable latch; the fuel door meanwhile is now a button and electronic in newer cars. No idea what a Tesla does; probably electronic though given that everything else is.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994994/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995028"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Which @#$&amp; side of the car is it [Fuel Socket] on.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2024 8:13 UTC (Tue)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/995028/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+The engine-hood lever is usually on the left side of a car because most cars have the driver sitting on the left, and given how rarely that lever is used there is no point in moving it to the right for the others because all that will achieve is to make <em>building</em> the cars more complicated. So in the UK it is on the passenger side, and in places like the USA and Germany it is on the driver's side.
+</p>
+<p>
+We can probably count ourselves lucky, though, that in right-hand-side-driver cars the pedals aren't in reverse order.
+</p>
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995028/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor995032"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Which @#$&amp; side of the car is it [Fuel Socket] on.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2024 8:55 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/995032/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>IME, engine cover latch is on the left of the car in the footwell, and some cars have the fuel cover release on the frame next to the driver's seat. In UK versions, that puts the fuel cover release on the right of the car, but in the French market version of the same car, the engine cover release and the fuel cover release are on the same side of the car - engine cover by your left foot, fuel cover under your left shoulder when the door is open.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995032/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor994851"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Which @#$&amp; side of the car is it [Fuel Socket] on.</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 21, 2024 3:44 UTC (Mon)
+                               by <b>interalia</b> (subscriber, #26615)
+                              [<a href="/Articles/994851/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Plenty of older cars don't have such an arrow in my experience, it's definitely common to have one but plenty don't have it. It was a good innovation, the kind that's obvious in hindsight.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994851/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor994849"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 21, 2024 2:12 UTC (Mon)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/994849/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Anyway, back to my point. Innovation has moved up the stack. We have something good enough, and we're all building on it. Linux has become the substrate on which we innovate. I don't think that's sad, I think that's progress."<br>
+<p>
+You know, perhaps this is the biggest point of all: It is good enough, and very challenging to change.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994849/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor994853"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why should hardware be involved in security?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 21, 2024 4:38 UTC (Mon)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/994853/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The basic paradigm of premptive multitasking operating systems with protection provided by the hardware seem like a local maximum.<br>
+<p>
+The most questionable decision in all of that seems to be relying on hardware to define the isolation of untrusted software.<br>
+<p>
+Hardware is always buggy and so expensive to fix it might as well be unfixable.  We are effectively 7 years into the era of Spectre and I am not aware of any high performance cpus that successfully isolate untrusted software.<br>
+<p>
+So why do our operating system architectures by design rely on broken and unfixable hardware to get security right?<br>
+<p>
+Which is to say when operating systems are failing at part of their core mission because of how they are designed I think there is room and need for innovation at that level.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994853/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1001995"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why should hardware be involved in security?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 13, 2024 13:21 UTC (Fri)
+                               by <b>roblucid</b> (guest, #48964)
+                              [<a href="/Articles/1001995/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The logic was if the hardware is not functioning correctly, how can you rely on software running on the hardware to do so?<br>
+<p>
+A lot of security is about process isolation and correct virtual memory implementations, you simply cannot do something like logical-&gt;physical address translations efficiently in software, it needs to be initiated by L1 cache look up (hence the cache's tags to eliminate false positive hits) and available for L2/L3/DRAM fetches.<br>
+<p>
+Then again software being mutable is what hostiles rely on, you need the OS &amp; hardware support to harden a system against expoitation, a program that's reentrant, relocatable or dynamically linkable simply cannot know what logical addresses it uses.  Even so without hardware support where would the immutable correct address tables be stored, so errors cannot be exploited to patch the program?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1001995/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor994968"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 21, 2024 17:00 UTC (Mon)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/994968/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It probably doesn't have a bearing on the computer side of the discussion, but the major differences in car UI over the decades has been the simplification of controls. In particular, there were some systems that had the human in the control loop, which were eventually automated (by mechanical means first, later electronic). Or there were controls to systems which required a number of co-ordinated steps, which are no longer necessary thanks to mechanical refinements.<br>
+<p>
+E.g., if you got in a car from the 20s to early 30s, most people today would be unable to start it, for want of knowledge of 2 key engine controls (one of which was automated fairly early on - who here knows what the lever on the centre of the steering wheel [typically] did?; another was present until the 80s on many cars, a knob on the dash you had to pull in and out typically - I'll add a comment later with the answers ;) ). If they were able to start it, they might well damage the engine. They would also struggle to change gear without damaging the car.<br>
+<p>
+UI has gotten simpler, and details hidden. A driver from the 20s would probably find it easier to get comfortable driving a modern car, than a modern driver getting into a car from 100 years ago - bit more to learn. The amazing speed of modern vehicles might be the 1 control thing the 20s driver might need to adapt to, but that wouldn't stop them driving at a slower speed.<br>
+<p>
+Also, the maintenance of the car is now minimal compared to the earlier days.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994968/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995053"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2024 13:44 UTC (Tue)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/995053/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And the systems/steps I had in mind are:<br>
+<p>
+- Ignition advance: <br>
+<p>
+  This used to be something that had to be manually adjusted as you drove, to suit the engine speed, warmth and mixture.<br>
+<p>
+- Choke: <br>
+<p>
+  Manual adjustment of mixture (interacting with previous), particularly for engine start.<br>
+<p>
+- double-declutching for gear changes: <br>
+<p>
+  Changing gear required pausing the gear change in neutral, letting the clutch engage again, and matching the engine speed to the drive-shaft (either <br>
+  by letting the engine speed fall a little, if changing up; or blipping the throttle, if changing down - often while continuing to hold the brake pedal), <br>
+  before disengaging the clutch again and completing the gear change.<br>
+<p>
+  (Apparently truck drivers in the USA still have to do this on many models of tractor units).<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995053/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995145"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2024 16:17 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/995145/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>You missed a couple more important details; the modern 2 or 3 pedal layout was not yet the standard in the 1920s, and some cars even then had the throttle as a lever on the steering wheel, rather than a pedal. And the pedals might well be gear selection, with possibly a foot brake, possibly not. The clutch could be a pedal, but it might also be a hand-operated lever, and even if it's a pedal, it might need lifting with your foot instead of pressing.
+<p>It's not until the 1940s that the industry finally settles on the modern control scheme.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995145/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995147"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2024 16:21 UTC (Tue)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/995147/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That could well be. I don't know. It was my dad who was the old car nut - not me.<br>
+<p>
+The 1927 Austin 7 he once had, which I've driven, already had the familiar 3 pedal layout. The clutch was more like a button though. Very hard to get used to. So that layout already existed in the 20s.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995147/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995148"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2024 16:26 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/995148/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>The modern layout existed, but (e.g.) Fords from the 1920s had a mix of layouts - indeed, a Model T and a Model A had different control schemes, and some of the things I mentioned that now seem odd were used by different 1920s Ford models (foot pedals for gear selection, lifting the clutch not pressing it).
+<p>If you're used to that sort of array of different possibilities, where you need to read the fine manual before trying to drive because there's so many options, learning how to drive a modern car isn't that hard; just work out how the modern control map to what you expect, and complain because the car does timing advance, choking etc for you. But (as evidenced by people who can drive an automatic transmission, but can't drive a manual transmission) going the other way is harder - you have to do more things that a modern car does for you.
+<p>And I've not driven anything without a modern control layout - I've only seen them in museums with my grandfather, who wanted to show me the cars <em>he</em> dreamt about being able to own when he was a child.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995148/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995149"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2024 16:42 UTC (Tue)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/995149/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not familiar with old US cars. My dad has had a variety of old European cars. Mostly English, but he's had Citroen Traction-Avant too (which is one of the coolest looking cars ever IMO - and surprisingly modern in design and build). He had some kind of 1920s Rolls-Royce at one point, a Phantom I think - if only he'd kept that one, would be worth loads today (he loved swapping cars)! I don't remember the controls of that, I was little - though I don't remember it being weird per se. I could ask him. ;)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995149/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995150"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2024 16:50 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/995150/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>These were all models that my English grandfather had heard about as a child and really wanted at the time, but could never afford - he was a serious car nut.
+<p>But that does lead to a serious point; it isn't unusual for different countries to have kept different standards from the past, even though they "could" unify with the rest of the world. For example, on pedal cycles, some countries put the front brake on the left lever, while others put it on the right lever. Arguably, the only reason this didn't happen with the motor car is that we had a large crowd of ex-military drivers in the late 1940s who all knew the same standard no matter where in the world they were going back to, and so everyone settled on one standard.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995150/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995162"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2024 18:17 UTC (Tue)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/995162/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; it isn't unusual for different countries to have kept different standards from the past, even though they "could" unify with the rest of the world. </span><br>
+<p>
+Case in point, the International System of Units (SI) is adopted by almost the entire world, except Myanmar, Liberia, and some other country whose name escapes me at the moment.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995162/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor994855"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 21, 2024 7:46 UTC (Mon)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/994855/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A few things happened.<br>
+<p>
+Linux grabbed the "free-software OS for commodity PCs" ecosystem niche. Perhaps it could have been MINIX with a more community-oriented owner and a better license, but it was Linux. Reasonably well-run open-source projects in important niches accrue powerful network effects.<br>
+<p>
+Over the same time period, what people expect from the OS --- userspace APIs and hardware support --- grew massively, making it much harder to build a viable competitor.<br>
+<p>
+And yes, for a long time the Linux kernel design was good enough ... good enough that the cost of replacing it (including the cost of migrating higher-level software to a new design) has never been justified.<br>
+<p>
+But I think it would be wrong to conclude that the Linux kernel, or the general Unix-style kernel interface, is in any sense optimal. Linux has a lot of serious problems that are becoming more serious over time. The monolithic design has led us to a point where the kernel is too big to trust and developers are overwhelmed with CVEs. Relying on namespaces and seccomp for isolation makes sandboxing brittle and very complicated; I wish the system was much more capability-oriented. ptrace and signals are notoriously problematic.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994855/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995012"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2024 0:27 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/995012/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On the third hand, Linux _is_ evolving. We now have resource partitioning via cgroups, we're evolving a new process management API that lacks braindeadness of the classic POSIX process management API. And we have io_uring for the async stuff.<br>
+<p>
+I can see a world 15 years from now, where all the classic synchronous Linux system calls are reimplemented as user-space compat shims on top of a minimalistic native io_uring kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995012/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor995014"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Linux kernel and interface</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2024 2:40 UTC (Tue)
+                               by <b>interalia</b> (subscriber, #26615)
+                              [<a href="/Articles/995014/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+All good points re the network effects etc, though I'm not sure anyone was saying the Linux kernel or its interface is optimal. I think we're all imprisoned by the tyranny of existing software and the effort required to port it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995014/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor994799"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 20, 2024 0:28 UTC (Sun)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/994799/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think your third and fourth options are largely correct. Linux refactors code aggressively. So we have the "no stable internal API" rule to thank. In order to do that, we have "all" the drivers in the repository where people who want to do refactoring can fix everything.<br>
+<p>
+Linux is also an engineering project, not a research project. So a lot of work is put into making Linux understandable and modifiable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/994799/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995213"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2024 4:38 UTC (Wed)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/995213/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think this is right, Linux is maybe unique in how aggressively it's been refactored and re-imagined internally over the years, most projects avoid rework and try to achieve stability by not changing things, but not Linux.<br>
+<p>
+What I was thinking is (aside from the tty layer that no one wants to touch with 2m borrowed pole) how many distinct Linux kernel designs have existed over the last 30+ years?  What would define the eras, since change is happening all over, removal of BKL, switch from stable/dev branch in 2.6 to continuous integration, udev, some particular scheduler or memory allocator?  What would a kernel developer see as distinct coherent design eras?  How much code has been unchanged in the last 5y, 10y and again the 5y, 10y before that, how many Ships of Theseus have been built?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995213/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995296"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2024 13:36 UTC (Wed)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/995296/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just because I liked the analogy, the Linux kernel has started from a wooden longship and been refactored into a full sailing galeon and then further refactored into a modern container ship, changing scope and structure along the way.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995296/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor995331"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2024 15:16 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/995331/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think it started as a coracle, or dugout canoe ... probably coracle, that feels more finnish :-)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/995331/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor996466"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Core work still going on 33 years later</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 31, 2024 10:34 UTC (Thu)
+                               by <b>FluffyFox</b> (guest, #162692)
+                              [<a href="/Articles/996466/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This reminds me little history of the "very first version" of Linux which initially started as a program doing multitasking with 2 threads and today it become a versatile and flexible kernel<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/996466/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor997681"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A good tradeoff</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 11, 2024 7:02 UTC (Mon)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/997681/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think that a good tradeoff is for the tick timer to check if the task has this flag set, and if so, first mark it as interrupted and let it continue. If upon next timer interrupt the task is already marked as interrupted, it means it's eating a lot of time (more than its allocated slice) and then it makes sense to preempt it. This way you allow such tasks to run from 1.0 to 1.9999 of their time slice if needed (depending on where the timer hits), which possibly makes it relevant then to further increase the timer frequency so that such interruptible tasks can be checked more often without being forced to switch immediately, but only once caught running "too long".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/997681/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1001997"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A good tradeoff</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 13, 2024 14:01 UTC (Fri)
+                               by <b>roblucid</b> (guest, #48964)
+                              [<a href="/Articles/1001997/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How is that an improvement on the time slice marking it as a candidate for rescheduling by lazy pre-emption when the scheduler knows something is newly runnable?  Only non-interactive long running processes that won't block will need pre-emption on busy systems without idle cores.<br>
+As I understand it, you'll see a very small increase to throughput efficiency at the risk of massive increase to latency on a busy system.  That was why the full pre-emption and work on voluntary cond_resched was done on uniprocessors decades ago when it really mattered to interactive responsiveness and people became obsessed with the scheduluer eg) BFS (brain f**k scheduler) before CFS with process groups satisfied most people.<br>
+In the old days on UNIX the much longer ticks caused blocked processes to have increased priority while the running process lost priority, the  scheduler when looking at which thread to preempt can use a similar score to pick on the longest running first.<br>
+So what's wrong with having the more complicated logic in the scheduler rather than making the timer tick test an extra flag, rather than unconditionally set a single one on running tasks?  Effectively the first time the scheduler fires it can prefer preempting candidates that were previously considered and mark new ones after finding a better victim.<br>
+Often the scheduler will have idle cores and not even look at pre-emption, you "over book" a CPU with frequently blocking tasks that share cores and while runing at very low priority long running ones to soak up idle time which as batch jobs simply don't care about latency.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1001997/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,1153 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Lockless patterns: an introduction to compare-and-swap [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/847973/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/849075/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/847973/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Lockless patterns: an introduction to compare-and-swap</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Please consider subscribing to LWN</b>
+<p>
+Subscriptions are the lifeblood of LWN.net.  If you appreciate this
+content and would like to see more of it, your subscription will
+help to ensure that LWN continues to thrive.  Please visit
+<a href="/Promo/nst-nag1/subscribe">this page</a> to join up and keep LWN on
+the net.
+</blockquote>
+<div class="GAByline">
+           <p>March 12, 2021</p>
+           <p>This article was contributed by Paolo Bonzini</p>
+           <hr>
+<a href="/Articles/844224/">Lockless patterns</a>
+</div>
+<p>
+In the first part of this series, I showed you the theory behind
+concurrent memory models and how that theory can be applied to
+simple loads and stores.  However, loads and stores alone are not
+a practical tool for the building of higher-level synchronization primitives
+such as spinlocks, mutexes, and condition variables.
+Even though it is possible to synchronize two threads using the
+full memory-barrier pattern that was introduced last week (<a
+href="https://en.wikipedia.org/wiki/Dekker%27s_algorithm">Dekker's
+algorithm</a>), modern processors provide a way that is
+easier, more generic, and faster&mdash;yes, all three of them—the
+<em>compare-and-swap</em> operation.
+
+<p>
+From the point of view of a Linux kernel programmer, compare-and-swap has the
+following prototype:
+
+<pre>
+    T cmpxchg(T *ptr, T old, T new);
+</pre>
+
+<p>
+where <tt>T</tt> can be either an integer type that is at most as wide
+as a pointer, or a pointer type.  In order to support such polymorphism,
+<tt>cmpxchg()</tt> is defined as a macro rather than a function, but the macro
+is written carefully to avoid evaluating its arguments multiple times.
+Linux also has a <tt>cmpxchg64()</tt> macro that takes 64-bit integers as
+the arguments, but it may not be available on all 32-bit platforms.
+
+<p>
+<tt>cmpxchg()</tt> loads the value pointed to by <tt>*ptr</tt> and, if it is
+equal to <tt>old</tt>, it stores <tt>new</tt> in its place.  Otherwise,
+no store happens.  The value that was loaded is then returned, regardless
+of whether it matched <tt>old</tt> or not.  The compare and the store are
+atomic: if the store is performed, you are guaranteed that no thread could
+sneak in and write a value other than <tt>old</tt> to <tt>*ptr</tt>.
+Because a single operation provides the old version of the value and stores
+a new one, compare-and-swap is said to be an <em>atomic
+read-modify-write</em> operation.
+
+<p>
+In Linux, the <tt>cmpxchg()</tt> macro puts strong ordering requirements
+on the surrounding code.  A compare-and-swap operation comprises a load
+and a store; for the sake of this article, you can consider them to be,
+respectively, load-acquire and store-release operations.  This means that
+<tt>cmpxchg()</tt> can synchronize with both load-acquire or store-release
+operations performed on the same location by other threads.
+
+<h4>Lock-free stacks and queues</h4>
+
+<p>
+"<a href="/Articles/827180/">Lockless algorithms for mere mortals</a>"
+already mentioned the use of compare-and-swap for lock-free lists.  Here,
+we'll look at how a lockless, singly linked list could be implemented in&nbsp;C,
+and what it could be useful for.  First of all, however, let's recap how a
+single-threaded C program would add an item in front of a singly-linked
+list:
+
+<pre>
+    struct thing {
+        struct thing *next;
+        ...
+    };
+    struct thing *first;
+
+    node-&gt;next = first;
+    first = node;
+</pre>
+
+<p>
+Armed with the knowledge from the first part of the series, we know
+that we should turn the assignment to <tt>first</tt> into a store-release,
+so that <tt>node-&gt;next</tt> is visible to other threads doing a
+load-acquire.  This would be an instance of the pattern presented
+there.
+
+<p>
+However, that pattern only worked for a single producer and a single
+consumer; in the presence of multiple producers, the two instructions
+would have to be placed under a lock.  This is because the value of
+<tt>first</tt> can change between the two instructions, for example if
+another element is added at the same time by another thread.  If that
+happens, the outgoing pointer (<tt>node-&gt;next</tt>) in the new element
+will point to whatever <tt>first</tt> held before the assignment happened.
+This teaches us an important, if obvious, lesson: acquire and release
+semantics are just one part of designing and proving the correctness of
+lockless algorithms.  Logic mistakes and race conditions can and will
+still happen.
+
+<p>
+Instead of using a lock, <tt>cmpxchg()</tt> lets us catch the other
+thread in the act of modifying <tt>first</tt>.  Something like this would
+work for any number of producers:
+
+<pre>
+    if (cmpxchg(&amp;first, node-&gt;next, node) == node-&gt;next)
+        /* yay! */
+    else
+        /* now what? */
+</pre>
+
+<p>
+There are still a few things to sort out, as you can see.  First and foremost,
+what to do if the <tt>cmpxchg()</tt> notices that <tt>first</tt> has
+changed.  The answer in that case is simply to read the new value of
+<tt>first</tt> to <tt>node-&gt;next</tt> and try again.  This is
+possible, because <tt>node</tt> is still invisible to other threads.
+Nobody will notice our stroke of bad luck.
+
+<p>
+A second and more subtle question is: how do we load <tt>first</tt>?
+The load need not have either acquire or release semantics, because
+the code is not doing other memory accesses that depend on the
+value of <tt>first</tt>.  On the other hand, perhaps the <a
+href="/Articles/793253/">big bad optimizing compiler</a>
+might think that <tt>first</tt> cannot change across iterations of the
+loop?  Even though Linux's <tt>cmpxchg()</tt> does prevent this kind of
+compiler optimization, it is a good practice to mark relaxed loads and
+stores of shared memory using <tt>READ_ONCE()</tt> and <tt>WRITE_ONCE()</tt>.
+
+<p>
+Putting everything together, we get:
+
+<pre>
+    struct thing *old, *expected;
+    old = READ_ONCE(first);
+    do {
+        node-&gt;next = expected = old;
+        old = cmpxchg(&amp;first, expected, node);
+    } while (old != expected);
+</pre>
+
+<p>
+This is all nice, but it's only half of the story.  We still have not
+seen how the list can be read on the consumer side.  The answer is that it
+depends on the relationship between producers and consumers, the number of
+consumers, and whether the consumers are interested in accessing elements
+in LIFO (last-in-first-out) or FIFO (first-in-first-out) order.
+
+<p>
+First of all, it could be that all reads happen after the producers have
+finished running.  In this case, the synchronization between producers and
+consumers happens outside the code that manipulates the list, and
+the consumers can access the list through normal, non-atomic loads.
+The synchronization mechanism could be a thread-exit/thread-join pair
+such as the one we saw in the first article, for example.
+
+<p id="cmpxchg-reader-rwlock">
+If reads are rare or can be batched, a more tricky implementation could
+allow producers to proceed locklessly, while reads would be serialized.
+Such an implementation could use a reader-writer lock (rwlock); however,
+the producers would take the lock for <em>shared</em> access
+(with a <tt>read_lock()</tt> call) and the consumer(s) would take the lock for
+<em>exclusive</em> access (with <tt>write_lock()</tt>)!  This would also avoid
+reads executing concurrently with writes and, therefore, the consumer
+would be able to employ non-atomic loads.  Hopefully, this example
+will show that there's no such thing as too many comments or too much
+documentation, even if you're sticking to the most common lockless
+programming patterns.
+
+<p>
+If many consumers run concurrently with the producers, but they can
+consume the elements in any order, the consumers can obtain a whole
+batch of elements (removing them from the list) with a single instruction:
+
+<pre>
+    my_things = xchg_acquire(&amp;first, NULL);
+</pre>
+
+<p><tt>xchg()</tt>, like <tt>cmpxchg()</tt>, performs an atomic combination of
+a read and a write to a memory location.  In this case it returns the
+previous head of the list and writes <tt>NULL</tt> in its place, thus
+emptying the list.  Here I am using the <tt>xchg_acquire()</tt> variant,
+which has acquire semantics for its load of <tt>first</tt>, but
+(just like <tt>WRITE_ONCE()</tt>) does not apply release semantics when it
+stores <tt>NULL</tt>.  Acquire semantics suffice here, since this is
+still basically the same store-release/load-acquire pattern from part&nbsp;1.
+More precisely, it is a multi-producer, multi-consumer extension of that pattern.
+
+<p>
+Should we do the same on the writer side and replace <tt>cmpxchg()</tt>
+with <tt>cmpxchg_release()</tt>?  Indeed we could: in principle, all that
+the writer needs is to publish the store of <tt>node-&gt;next</tt>
+to the outside world.  However, <tt>cmpxchg()</tt>'s acquire semantics
+when loading the list head have a useful side effect: they synchronize
+each writer with the thread that wrote the previous element.  In the
+following picture, the load-acquire and store-release operations are
+all part of a successful series of <tt>cmpxchg()</tt> calls:
+
+<pre>
+    thread 1: load-acquire first (returns NULL)
+              store-release node1 into first
+                  \
+      thread 2: load-acquire first (returns node1)
+                store-release node2 into first
+                    \
+         thread 3: load-acquire first (returns node2)
+                   store-release node3 into first
+                       \
+            thread 4: xchg-acquire first (returns node3)
+</pre>
+
+<p>
+Thread&nbsp;3's <tt>cmpxchg()</tt> is the only one to <em>synchronize
+with</em> thread&nbsp;4's <tt>xchg_acquire()</tt>.  However, because of
+transitivity, <em>all</em> <tt>cmpxchg()</tt>s <em>happen before</em>
+the <tt>xchg_acquire()</tt>.  Therefore, if <tt>cmpxchg()</tt> is used in
+the writers, the readers can go through the list with regular loads.
+
+<p id="why-not-just-release">
+If, instead, the writers used <tt>cmpxchg_release()</tt>, the happens-before
+relation would look like this:
+
+<pre>
+    thread 1: load-acquire first (returns NULL)
+              store-release node1 into first
+
+      thread 2: load first (returns node1)
+                store-release node2 into first
+
+         thread 3: load first (returns node2)
+                   store-release node3 into first
+                       \
+            thread 4: xchg-acquire first (returns node3)
+</pre>
+
+<p>
+Thread&nbsp;4 would always read <tt>node2</tt> from <tt>node3-&gt;next</tt>,
+because it read the value that thread&nbsp;3 wrote to <tt>first</tt>.
+However, there would be no <em>happens before</em> edge from thread&nbsp;1
+and thread&nbsp;2 to thread&nbsp;4; therefore, thread&nbsp;4 would need a
+<tt>smp_load_acquire()</tt> in order to see <tt>node1</tt> in
+<tt>node2-&gt;next</tt>.
+
+<!--
+(Note: the first article already noted that on all processors except
+the Alpha it would actually be possible to use a regular load for
+<tt>node-&gt;next</tt>.  However the load would still have to have acquire
+semantics as far as the compiler is concerned, which is not necessary
+if writers use <tt>cmpxchg()</tt>). -->
+
+<p>
+The above data structure is already implemented in Linux's
+<a
+href="https://elixir.bootlin.com/linux/v5.11.2/source/include/linux/llist.h"><tt>linux/llist.h</tt>
+header</a>.  You're highly encouraged <em>not</em>
+to reinvent the wheel and use that version, of course.  That
+API, in fact, includes two more interesting
+functions: <tt>llist_del_first()</tt> and <tt>llist_reverse_order()</tt>.
+
+<p>
+<a
+href="https://elixir.bootlin.com/linux/v5.11.2/source/lib/llist.c#L39"><tt>llist_del_first()</tt></a>
+returns the first element of the <tt>llist</tt> 
+and advances the head pointer to the second element.
+Its documentation warns that it should only be used if there is a single
+reader.  If, instead, there were two consumers, an intricate sequence of adds and
+deletes could lead to the so-called <a
+href="https://en.wikipedia.org/wiki/ABA_problem">ABA problem</a>.  Since
+this article rests firmly on the principle of "if it hurts, don't do it", a
+detailed explanation is beyond its scope.  However, it's worth pointing out
+the similarity with the earlier <a href="#cmpxchg-reader-rwlock">rwlock
+example</a>.  Just as in that case, multiple consumers will have to use
+locking to
+serialize concurrent access to the data structures.  
+<tt>llist_del_first()</tt>, instead, lets writers call <tt>llist_add()</tt>
+without taking a lock at all; readers instead can use a spinlock or a mutex.
+
+<p>
+<tt>llist_del_first()</tt> provides LIFO
+semantics for the <tt>llist</tt>.  If your application requires FIFO
+order, however, there is a useful trick that you
+can apply, and that's where <a
+href="https://elixir.bootlin.com/linux/v5.11.2/source/lib/llist.c#L72"><tt>llist_reverse_order()</tt></a>
+comes into play.
+Removing a batch of items with <tt>xchg()</tt> (as is done with <a
+href="https://elixir.bootlin.com/linux/v5.11.2/source/include/linux/llist.h#L227"><tt>llist_del_all()</tt></a>)
+does provide the batches in FIFO order, only the items in each batch are
+ordered back to front.  The following algorithm then comes to mind:
+
+<pre>
+    struct thing *first, *current_batch;
+
+    if (current_batch == NULL) {
+        current_batch = xchg_acquire(&amp;first, NULL);
+        <em>... reverse the order of the nodes in current_batch ...</em>
+    }
+    node = current_batch;
+    current_batch = current_batch-&gt;next;
+</pre>
+
+<p>
+Every execution of the previous pseudocode will return an element of
+the linked list in FIFO order.  This is also a single-consumer data
+structure, as it assumes that only a single thread accesses
+<tt>current_batch</tt> at any given time.  It is left as an exercise
+for the reader to convert the pseudocode to the <tt>llist</tt> API.
+
+<p>
+That is all for this installment.  The next article in this
+series will continue exploring read-modify-write operations, how
+to build them from compare-and-swap, and how they can be put into use
+to speed up reference-counting operations.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#cmpxchg">cmpxchg()</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Lockless_algorithms">Lockless algorithms</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Bonzini_Paolo">Bonzini, Paolo</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/847973/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor849220"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2021 16:22 UTC (Fri)
+                               by <b>jcm</b> (subscriber, #18262)
+                              [<a href="/Articles/849220/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Worth noting that the compare-and-swap operation might provide both acquire and release semantics, but this doesn&#x27;t make it equivalent to a full memory barrier on every architecture. The examples in this article carefully accommodate that but don&#x27;t call it out.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849220/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849229"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2021 18:01 UTC (Fri)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/849229/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      &gt; [not] equivalent to a full memory barrier on every architecture
+<p> Please name the two most-prevalent architectures on which compare-and-swap is not equivalent to a full memory barrier.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849229/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849249"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2021 0:42 UTC (Sat)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/849249/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you mean compare-and-swap and not Linux cmpxchg, then ARM, PPC, and RISC-V all have opcodes (or can use LL/SC sequences) that provide relaxed compare and swap.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849249/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor849248"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2021 0:40 UTC (Sat)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/849248/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On Linux actually cmpxchg does imply a memory barrier. The article is only written in terms of acquire and release because I wanted to introduce the &quot;weaving&quot; of the happens-before relation through all the add-to-list operations; this will come in handy in part 5. C11&#x27;s atomic_compare_and_swap does *not* have the stricter reordering semantics of Linux&#x27;s cmpxchg though.<br>
+<p>
+There are a few other simplifications throughout the articles, they will all be &quot;corrected&quot; in due time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849248/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849782"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2021 21:22 UTC (Thu)
+                               by <b>Alan.Stern</b> (subscriber, #12437)
+                              [<a href="/Articles/849782/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There&#x27;s a technical point that&#x27;s relevant here.  In the section where you mention using cmpxchg_release instead of cmpxchg:<br>
+<p>
+&quot;Thread 4 would always read node2 from node3-&gt;next, because it read the value that thread 3 wrote to first. However, there would be no happens before edge from thread 1 and thread 2 to thread 4; therefore, thread 4 would need a smp_load_acquire() in order to see node1 in node2-&gt;next.&quot;<br>
+<p>
+In fact this isn&#x27;t so.  In the Linux kernel memory model, an edge from a store-release to a relaxed load _does_ establish a happens-before relation.  What it doesn&#x27;t do is guarantee that this store or prior ones will be visible to other loads following the first, because there will be nothing to force those loads to execute in order (i.e., there generally is no happens-before relation from a relaxed load to later loads in the same thread).  But in threads 2 and 3 there are no loads following the one inside the cmpxchg_release, so this lack doesn&#x27;t matter.  Only thread 4 needs to use a load-acquire -- which it already does: xchg_acquire.<br>
+<p>
+One other thing you might consider mentioning in the last article.  Full memory barriers, including those associated with value-returning atomic operations like xchg or cmpxchg, are even stronger than discussed so far.  They do more than order all earlier and later memory accesses, both loads and stores, against each other; they also act as global synchronizing operations.  That is, whenever two threads both carry out a full memory barrier, there is always a happens-before relation from the barrier that executes first to the one that executes second.  To put it another way, if each thread has a full memory barrier between each pair of memory accesses, the whole program will end up obeying the Sequential Consistency model.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849782/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor849239"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 12, 2021 23:15 UTC (Fri)
+                               by <b>dgc</b> (subscriber, #6611)
+                              [<a href="/Articles/849239/">Link</a>] (20 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A couple of important things about cmpxchg algorithms that the article implies but doesn&#x27;t explicitly mention. It says that cmpxchg is an &quot;atomic read-modify-write operation&quot; but then doesn&#x27;t explain the scalabilty limitations this imposes on &quot;lockless&quot; cmpxchg algorithms. <br>
+<p>
+1. cmpxchg is a hardware locked operation rather than a software locked operation. It still bounces cachelines around the machine via the hardware cache coherency protocol, so frequent cmpxchg operations will always reach an update saturation point where CPU usage goes non-linear and the update rate goes backwards. <br>
+<p>
+2. cmpxchg algorithms can be extremely unfair and effectively livelock when subject to high concurrent modification rates because they directly expose the unfairness in hardware cache coherency protocols (i.e. update patterns usually reflect core-to-core latency differences).<br>
+<p>
+Hence a number of important cmpxchg algorithms in the kernel drop out of the cmpxchg() loop after a set number of failures and fall back to spin locks to avoid the worst costs of these adverse behaviours. e.g. the lockref infrastructure (lockref_get/lockref_put) used by the dentry cache breaks out of cmpxchg loops after 100 consecutive failures.<br>
+<p>
+As an example of how much work can be done before cacheline contention (cache coherency protocol saturation) starts to be a problem, I&#x27;m seeing non-linearity in CPU usage in a hot cmpxchg loop being measurable at about 2.5-3 million updates/s to a single 64 bit variable on it&#x27;s own isolated cacheline on a CPU bound 32-way workload on a 2yr old 2-socket, 32p machine. It&#x27;s not quite completely saturated yet, but profiles have a single cmpxchg loop starting to consume significant single digit percentages of the entire CPU usage of a workload creating 650,000 files/s. <br>
+<p>
+In constrast, spinlocks that are seeing the same amount of traffic are consuming ~30% of the entire CPU usage of this workload. e.g. per-sb inode list lock is being trafficked 2.6m times/s resulting in it burning ~10% CPU (3 whole CPUs) spinning. That&#x27;s the same atomic cacheline update rate as the hot cmpxchg loop I&#x27;m also seeing CPU usage go non-linear....<br>
+<p>
+IOWs, cmpxchg() algorithms can scale better than locked algorithms, but they do not offer unbound scalability because they are not truly lockless operations. A couple of decades of writing concurrent algorithms has taught me that scalability is really defined by the frequency the concurrent algorithm accesses/updates shared data, not whether the software algorithm is considered &quot;lockless&quot; or not. A lock is simply a high frequency atomic access to shared data, hence it&#x27;s easy to see why they become a scalability limitation very quickly if you consider them from a CPU cacheline access perspective. It should also be obvious now that cmpxchg() or atomic variables don&#x27;t offer a huge improvement in fundamental scalability over locks - all they do is allow much finer grained and hence less frequent access to shared data. It is the reduction in access frequency to shared data that improves scalability, not the use of a &quot;lockless&quot; pattern.<br>
+<p>
+This is the art of concurrent programming - it&#x27;s not enough just to know what a lockless algorithm is, you need to understand the data access patterns those algorithms result in and when those access patterns are going to become a limitation to the software. Of course, knowing when not to use a lockless algorithm because there are better ways to reduce shared data access is also part of the art... :)<br>
+<p>
+-Dave.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849239/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849245"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2021 0:18 UTC (Sat)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/849245/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hi Dave, thanks very much for this write up. Some of the things you wrote are the main reason why I wasn&#x27;t sure whether to include linked lists at all. On one hand they are the poster child of lock-free data structures, on the other hand they are substantially less useful than any of the other things I am talking about, for all the reasons that you went into. They do have their place, but they&#x27;re easy to misuse. For example the few times that I used llist, I did so not because of the lock-free producer side (which seems so great but has fairness/livelock problems if taken to the extreme), but because I knew writes would be rare and I wanted the (single) read side to be as fast as possible. This is not obvious at all.<br>
+<p>
+In the end I included them because they provided me with good running examples, but more than any other patterns in this series they require answering the question of *when* to use lock free algorithms. <br>
+<p>
+I was going to put that into the conclusive article (though now I might have to rethink that :), but I will explain quickly my ideas here. What I wanted to &quot;teach&quot; with this series is that on one hand you should not fear lockless algorithms because they can be properly distilled into common patterns and abstracted, on the other hand they are nothing but a tool. What matters the most in almost all cases is maintainability, and then:<br>
+<p>
+* knowing a few well-known and/or well-abstracted patterns can actually make your code *more* maintainable and scalable despite using more advanced techniques. This is where lock-free linked lists fail the worst, because they&#x27;re far from being the silver bullet that an inexperienced programmer could imagine them to be.<br>
+<p>
+* you should split as much as possible your code between in a lock-free part, which will usually be one of these patterns or another abstraction provided by Linux such as lockref, and a lock-based slow path. This makes it easier to figure out the specific technique to use, as the lockless part remains small;<br>
+<p>
+* {single,multiple} {producer,consumer} is a huge part of choosing your lockless technique. Knowing that you have a single producer or a single consumer lets you pick the right pattern and lets you keep the complication of the techniques at bay.<br>
+<p>
+Understanding relative frequency of reads vs writes (or the relative frequency of slow vs fast path) is to some extent a prerequisite since otherwise you won&#x27;t even know where the scalability problems are. It is a tradeoff that is present everywhere Linux uses lockless patterns (the above personal anecdote with llist is one example but the most common and also extreme case is probably RCU), and it also touches the previous bullets because, for low-enough frequencies, you can just treat the less frequent case as a slow path, use a lock to go from multiple to single producer/consumer, and see what this simplification can do for you in terms of new patterns to use.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849245/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849250"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2021 1:45 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/849250/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Understanding the behaviour of one&#x27;s code is essential to choosing the locking pattern to use (lockfree being, of course, one locking pattern).<br>
+<p>
+I&#x27;ve seen several examples of code in the kernel that uses an rwlock_t for protection because one call path reads the data structure. The author didn&#x27;t stop to think &quot;Is there actual parallelism to be extracted here?&quot; or &quot;What&#x27;s the cost of an rwlock vs a spinlock?&quot;<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849250/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849266"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2021 10:00 UTC (Sat)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/849266/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Also another related topic is that of sharding. Splitting the data structure in multiple parts can reduce the number of writes and reads to a single shard, which is beneficial in itself, and it can again turn a multiple producer or multiple consumer scenario into one with a single producer and/or a single consumer&amp;mdash;without locks this time. That in turn completely changes the tools you can use. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849266/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849278"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2021 15:49 UTC (Sat)
+                               by <b>jcm</b> (subscriber, #18262)
+                              [<a href="/Articles/849278/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+...which of course is literally one of the reasons willy is working on Maple Trees, to remove the locking required in nodes for red-black tree rotation :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849278/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849283"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2021 16:18 UTC (Sat)
+                               by <b>jcm</b> (subscriber, #18262)
+                              [<a href="/Articles/849283/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On a total tangent, this makes me wonder how long you could force vmap_area_lock to be held by performing an extreme number of small VMA allocations and then freeing them.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849283/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor849292"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2021 22:02 UTC (Sat)
+                               by <b>dgc</b> (subscriber, #6611)
+                              [<a href="/Articles/849292/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sharding is another of those terms I dislike. It&#x27;s a catch-all phrase that covers a huge number of different techniques. e.g. a simple per-cpu counter is a &quot;sharded counter&quot;. A per-node list (e.g. list_lru.h) is a &quot;sharded list&quot;. splitting an index space up into multiple independent index trees is a &quot;sharded tree&quot;. It just doesn&#x27;t tell you anything about how the algorithm works to maintain global state or any of the downsides to doing global scope operations, just that the data structure has been split up in some way.<br>
+<p>
+Even stuff like optimistic lock coupled trees could come under the &quot;sharded&quot; title, because each node in the tree has it&#x27;s own individual locks or mechanism of lockless atomic updates. (Yes, I really did just say lockless lock coupled trees :) Again, calling such a structure as &quot;sharded&quot; does not provide any understanding of how data accesses have been isolated and reduced. Mention OLC and most people with knowledge of scalable tree structures immediately understand how it works, the constraints it works under, how they scale and when it is desirable to use such a construct.<br>
+<p>
+Oh, there I go again, talking about &quot;scalable&quot; instead of &quot;lockless&quot; or, in this case, &quot;sharding&quot;... :)<br>
+<p>
+-Dave.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849292/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor849290"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2021 21:43 UTC (Sat)
+                               by <b>dgc</b> (subscriber, #6611)
+                              [<a href="/Articles/849290/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hi Paolo, You make some good points about the inherent complexity of lockless algorithms that programmers and engineers need to understand about lockless patterns and when and how to use them. I&#x27;ve been reading your series closely because I might learn something I&#x27;ve missed from it, but I am probably looking at them from a different angle than most readers because I do &quot;scalability&quot; and not &quot;lockless&quot;....<br>
+<p>
+It was this article that I put my finger on what was missing from the other articles: an explanation of when you _wouldn&#x27;t_ want to use a particular pattern. Your articles explain the pattern and give examples of how to use them correctly and in a beneficial way, but the downsides of those patterns are not really enumerated. The context you&#x27;ve given here, I think, probably should have been in a leader article explaining what the series of articles is going to teach the reader. Paul is good at doing this. :)<br>
+<p>
+Other than this, I&#x27;m finding the articles easy to read and fairly good at explaining complex behaviour without being overwhelming. Keep &#x27;em coming! :)<br>
+<p>
+-Dave.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849290/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849310"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2021 9:56 UTC (Sun)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/849310/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Heh, I doubt you&#x27;d learn anything new! I do hope that more experienced people get some insights about how to present abstract concepts and their concrete embodiments at the same time, for example happens-before both as a math relation and as a property of APIs.<br>
+<p>
+There&#x27;s a chicken-and-egg problem between teaching the &quot;what&quot; and the &quot;when/why&quot;. My choice here was to first teach the &quot;what&quot; so that people would be able to read others&#x27; code, and leave the &quot;when/why&quot; for the end, but I&#x27;m sure it was possible to do it otherwise. I read somewhere that you can&#x27;t teach something well until the fifth time you teach it.<br>
+<p>
+<font class="QuotedText">&gt; I do &quot;scalability&quot; and not &quot;lockless&quot;....</font><br>
+<p>
+Well, everybody should be doing scalability and not lockless. I focused the series on &quot;lockless patterns&quot; because, again, my aim was to teach people how to deal with code written by others. (Fun fact: I had never seen before the TCP code I explained in part 3. I literally grepped for smp_mb and picked a random example. It&#x27;s too easy to omit details when explaining code you&#x27;re familiar with, and I wanted to be in the same shoes as the readers).<br>
+<p>
+But lockless (and sharding :)) are just tools that you use to achieve scalability. If you don&#x27;t need scalability just throw a big lock around everything and call it a day!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849310/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor849277"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2021 15:50 UTC (Sat)
+                               by <b>PaulMcKenney</b> (<b>&#x272D; supporter &#x272D;</b>, #9624)
+                              [<a href="/Articles/849277/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The other oft-cited benefit of lock-free algorithms is behavior at high CPU load in workloads suffering from frequent preemption.  Of course, as you say, livelock is no better than blocking, but carefully designed algorithms can in some cases avoid both.  Another alternative is to limit CPU utilization, thus greatly reducing the duration of the preemptions, in turn allowing simpler algorithms to perform well.<br>
+<p>
+But no matter what you do, there can be no question that having your software work reliably under extreme conditions does require extreme care in both development and validation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849277/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor849279"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2021 15:51 UTC (Sat)
+                               by <b>jcm</b> (subscriber, #18262)
+                              [<a href="/Articles/849279/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is why I&#x27;m a fan of load-link/store-conditional in classical RISC. On the other hand, it suffers from complexity too in that you need to build an exclusive monitor that tracks updates in the coherency protocol to any affected lines (and is possibly permitted to only track one line, for example). RISC-V seems to have taken a purist position here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849279/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849284"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2021 17:14 UTC (Sat)
+                               by <b>foom</b> (subscriber, #14868)
+                              [<a href="/Articles/849284/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+While it is nice in theory, LL/SC can often have _worse_ scalability. There&#x27;s a reason ARMv8.1 added the &quot;LSE&quot; instructions, consisting of cmpxchg and read-modify-write (add, sub, etc) atomic memory operations instructions. RISC-V has the latter set, as well.<br>
+<p>
+With these single instructions, the memory system is able to e.g. send an atomic-add-1-and-store operation over the memory bus, and have that operation run in the memory controller, rather than having to fetch the data to the cpu core, run the add on the cpu, then write it back out. This can greatly increase the ability to scale to higher levels of parallelism.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849284/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor849312"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2021 11:48 UTC (Sun)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/849312/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Isn&#x27;t that backwards? LL/SC must always be wrapped in a loop, so it cannot produce wait-free algorithms. Instead, processor-level RMW instructions can be wait-free.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849312/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor849323"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2021 22:10 UTC (Sun)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/849323/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hardly anyone cares, but LL/SC has the unfortunate property that in practice you sometimes have to retry even in the absence of contention (e.g. due to a hardware interrupt). That happens to break rr (https://rr-project.org) because it introduces nondeterminism that we can&#x27;t track.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849323/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849437"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 15, 2021 19:24 UTC (Mon)
+                               by <b>dancol</b> (guest, #142293)
+                              [<a href="/Articles/849437/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How does RR address the problem?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849437/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor849308"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2021 9:30 UTC (Sun)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/849308/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+When you talk about cache coherency slowing things down, is it possible that a hardware compare-and-swap operation never using the cache, but always going directly to main memory, could end up being more scalable?  (For the sake of argument suppose that the counter accessed for compare-and-swap is in a special area of memory that can&#x27;t be accessed by any other instruction.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849308/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849311"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2021 11:05 UTC (Sun)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/849311/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think that&#x27;s what GPUs usually do. There are multiple L1 caches and a single shared L2 cache, and no cache coherency. Atomic operations on global memory have to be sent to the L2 controller, which can typically handle one atomic operation per cycle to a single address (and perhaps multiple per cycle if spread over multiple addresses in a single cache line). Operations include cmpxchg, add/sub, min/max, and/or/xor, and sometimes even floating-point addition, performed by ALUs inside the L2 controller.<br>
+<p>
+The downside is that in the uncontended case where only a single thread is accessing the address, every atomic operation that returns a value (like cmpxchg) will have hundreds of cycles of latency. And if you have multiple logically-independent threads each accessing a different address in a different cache line, they can&#x27;t execute independently - they all have to go to the L2 controller and create contention there. But it scales well when you have hundreds of threads contending for the same address.<br>
+<p>
+(GPUs also have local memory (closer to the L1 level) and a separate implementation of atomics for that. If you&#x27;re doing a big reduction computation (e.g. finding the sum of a big array), you should do it hierarchically - each thread would reduce some input elements by simply looping and using registers, then a group of threads would merge their results using local memory atomics, then a group of groups would merge their results using global memory atomics. That way you can have a huge number of threads and still avoid L2 contention.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849311/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor849552"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2021 5:15 UTC (Wed)
+                               by <b>dgc</b> (subscriber, #6611)
+                              [<a href="/Articles/849552/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; When you talk about cache coherency slowing things down, is it possible that a</font><br>
+<font class="QuotedText">&gt; hardware compare-and-swap operation never using the cache, but always going</font><br>
+<font class="QuotedText">&gt; directly to main memory, could end up being more scalable?</font><br>
+<p>
+Even if you have no caches, you still need a hardware mechanism that guarantees atomic, exclusive access to that memory multiple CPUs all try to read/modify it at the same time. You can&#x27;t have two CPUs perform concurrent atomic cmpxchg operations on the same memory and have both succeed - one has to fail and retry when the other succeeds. So even if you have no caches, you still need hardware level memory access coordination protocols....<br>
+<p>
+-Dave.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849552/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849818"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 19, 2021 8:13 UTC (Fri)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/849818/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I suppose the logical next step is a special kind of RAM that implements compare-and-swap as an atomic operation in hardware. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849818/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849828"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 19, 2021 11:38 UTC (Fri)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/849828/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don&#x27;t think there&#x27;s any need to implement CAS in RAM directly, because there&#x27;s already a memory controller in front of the RAM that has to coordinate and serialise memory accesses from multiple CPUs, and you can put the atomic logic there instead. And that&#x27;s already supported by some CPUs: see e.g. AXI (<a href="https://developer.arm.com/documentation/ihi0022/latest">https://developer.arm.com/documentation/ihi0022/latest</a>) and CHI (<a href="https://developer.arm.com/documentation/ihi0050/latest">https://developer.arm.com/documentation/ihi0050/latest</a>), which are ARM&#x27;s bus protocols for connecting the various components on a SoC (CPU clusters, GPU, memory controllers, etc). They define &quot;atomic transactions&quot; including AtomicCompare (CAS of up to 16 bytes). A CPU can send an AtomicCompare packet to the memory controller, which will execute it atomically on DRAM and send the result back, avoiding all the costs of cache coherency. If two CPUs do a simultaneous AtomicCompare, the memory controller will just buffer one transaction for a few cycles until the other has finished.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849828/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor849830"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Lockless patterns: an introduction to compare-and-swap</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 19, 2021 12:36 UTC (Fri)
+                               by <b>foom</b> (subscriber, #14868)
+                              [<a href="/Articles/849830/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+While this certainly helps scalability significantly, the second cmpxchg operation to execute will still necessarily fail and require a retry, because its &quot;compare&quot; value is out of date.<br>
+<p>
+(Where the performance really shines is the operations that can be fully implemented in the memory controller, such as atomic fetch-and-add/sub/or/and/etc, because these cannot fail.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/849830/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2021, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

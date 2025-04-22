@@ -1,0 +1,941 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Sidestepping kernel memory management with DMEMFS [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/839216/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/838888/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/839216/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Sidestepping kernel memory management with DMEMFS</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>December 7, 2020</br>
+           </div>
+One of the kernel's primary jobs is to manage the memory installed in the
+system.  Over the years, though, there have been various reasons for
+removing a portion of the system's memory from the kernel's view.  One of
+the latest can be seen in a mechanism called <a
+href="/ml/linux-kernel/cover.1607332046.git.yuleixzhang@tencent.com/">DMEMFS</a>,
+which is being proposed as a way to get around some inefficiency in how the
+kernel keeps track of RAM.
+<p>
+In the early years, the motivation for hiding memory from the kernel was to
+avoid the problems caused by fragmentation.  Allocating large contiguous
+areas tended to be nearly impossible after a system had been running for
+some time, creating problems for hardware that absolutely could not
+function without such areas.  Once upon a time, an out-of-tree patch called
+"bigphysarea" was often used to reserve a range of memory for such
+allocations; since the kernel did not get its hands on this memory
+directly, it could not fragment it.  LWN first <a
+href="/1999/1230/a/bigphysarea.html">captured a bigphysarea
+announcement</a> in 1999, but the patch had been around for some time by
+then.
+<p>
+In the relatively recent past (2010), the <a
+href="/Articles/396702/">contiguous memory allocator (CMA) patches</a> provided a
+similar functionality using the same technique.  Since then, though, the
+problem of allocating large contiguous areas has gotten much smaller.  The
+kernel's own defragmentation mechanisms have improved considerably, and
+simply having more memory around also helps.  CMA <a
+href="/Articles/486301/">now relies on compaction</a> 
+and no longer uses a carved-out memory region.
+<p>
+DMEMFS has a different motivation.  The kernel tracks memory via a data
+structure called the "memory map", which is essentially an array of <a
+href="/Articles/565097/"><tt>page</tt> structures</a>.  A great deal of
+information is packed into this structure to tell the kernel how each page
+is used, track its position on various lists, connect it to its backing
+store, and more.  Much effort has been expended over the years to keep
+<tt>struct page</tt> as small as possible, but it still occupies
+64&nbsp;bytes on 64-bit systems.
+<p>
+That may not seem like a lot of memory but, with the usual page size of
+4KB, there are a lot of these structures in a contemporary system.  A
+laptop with 16GB installed has 4,194,304 pages, meaning that 256MB of
+memory is used just to keep track of memory.  Losing that much memory on a
+laptop is perhaps tolerable, but there are other settings where it hurts
+more.  In the patch posting, author Yulei Zhang points out that a hosting
+provider running servers with 320GB of installed memory is losing 5GB of
+that memory to <tt>page</tt> structures.  If that memory could be
+reclaimed, the provider could cram more guests into the machine, increasing
+the revenue that each server brings in — a metric that hosting providers
+pay a lot of attention to.
+<p>
+As described above, DMEMFS works by carving out a portion of system memory
+at boot time; the exact amount is controlled with the <tt>dmem=</tt>
+command-line parameter.  The specified amount is reserved on <i>each</i>
+NUMA node in the system; if that amount starts with "!", it tells
+DMEMFS how much memory to give the kernel while grabbing the rest.  Once
+the system has booted, this carved-out memory can be allocated by mounting
+the <tt>dmemfs</tt> filesystem and creating one or more files of the
+desired size.  A call to <a
+href="https://man7.org/linux/man-pages/man2/mmap.2.html"><tt>mmap()</tt></a>
+will map that memory into a process's address space.  A DMEMFS file can also be
+handed to QEMU as the backing store for a guest machine.  This memory
+supports NUMA policies and can provide huge pages, just like ordinary
+memory.
+<p>
+Perhaps DMEMFS is the best solution for use cases where making the most use
+of memory is paramount and there is no need for the kernel to actually
+manage that memory.  But this is a 37-part patch set adding over 3,400
+lines of code dedicated to cutting the kernel out of the management of an
+important system resource; whenever something like that comes along, it's
+worth looking at the source of the problem and whether other solutions
+might exist.
+<p>
+Back in 1991, when the first Linux kernel was posted, machines had less
+memory than they do now.  <a
+href="https://books.google.com/books?id=WVAEAAAAMBAJ&amp;lpg=PA1&amp;dq=infoworld&amp;pg=PT73&amp;hl=en#v=onepage&amp;q&amp;f=false">This
+archived PC ad</a> is instructive; a high-end system featured 4MB of RAM
+and cost a mere 3,700 1991 dollars.  That system used 4KB pages, so there
+were a total of 1,024 pages for the kernel to manage.  Most
+personal-computer systems at that time had less memory than that.
+<p>
+Contemporary computers are rather larger, but the page size remains 4KB, so
+the number of pages managed by the kernel has increased by three orders of
+magnitude or so.   The number of <tt>page</tt> structures has increased
+accordingly.  Those structures have also gotten larger; the transition to
+64-bit processors, in particular, led to a significant increase in the size
+of <tt>struct page</tt>.  The increased size hurts, obviously, but the
+sheer number of <tt>page</tt> structures also increases overhead in many
+places in the kernel.
+<p>
+One possible solution is to increase the size of the pages managed by the
+kernel, clustering multiple physical pages into larger groups if need be.
+Some architectures support use of larger page sizes now; the arm64 kernel
+can use a 64KB page size, for example.  Over the years, numerous developers
+have attempted to implement some sort of generalized page clustering in the
+kernel, but none of those efforts have made it into the mainline.  The
+complexity of the task has been one impediment to getting this work merged,
+but it's not the only one.
+<p>
+The other concern with using larger page sizes is internal fragmentation —
+wasting memory in situations where full pages must be allocated but only a
+small amount of memory is needed.  A classic example is representing a
+small file in the page cache.  A one-line shell script may fit into less
+than 100&nbsp;bytes, but it still needs a full page in the page cache.
+Anything beyond those 100&nbsp;bytes is wasted; larger pages will clearly
+waste more.  Decades-old folk wisdom says that most files on Unix systems
+are small; that may be less true that it once was, though.
+<p>
+Your editor is unaware of any studies that have made a serious effort to
+measure the memory lost to internal fragmentation on real-world systems
+with a larger page size, but this concern has made it hard to get patches
+merged anyway.  At the moment, the work that is closest is probably the <a
+href="/ml/linux-kernel/20200529025824.32296-1-willy@infradead.org/">large
+pages in the page cache</a> effort by Matthew Wilcox — which applies at a
+higher level and will not reduce the number of <tt>page</tt> structures in
+the system.
+<p>
+As a result, the DMEMFS patches may need to be merged for the simple reason
+that they exist now and work.  But it may well be that the real solution to
+this problem lies elsewhere; rather than hide pages from the kernel, reduce
+the overhead within the kernel by dealing with memory in larger chunks.  It
+seems inevitable that increasing memory sizes will eventually force that
+change; said change has, however, proved entirely evitable for many years
+of memory-size growth.  Until the kernel can be changed to deal with memory
+more efficiently, there may be no choice other than merging workarounds
+that simply take the kernel out of the picture.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-struct_page">Memory management/struct page</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/839216/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor839222"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 0:46 UTC (Tue)
+                               by <b>hansendc</b> (subscriber, #7363)
+                              [<a href="/Articles/839222/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess it matters how much you value the features that the kernel brings along with that ~1.5% of RAM &quot;tax&quot;.  If you or your customers dislike swap and KSM in the first place, you probably look at that 1.5% as being a total waste.  In the long run, I suspect that 1.5% of your RAM is pretty cheap price to pay for all the features the kernel brings.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839222/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor839223"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 1:31 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/839223/">Link</a>] (12 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; A one-line shell script may fit into less than 100 bytes, but it still needs a full page in the page cache.</font><br>
+Has anybody looked at not storing files in page cache unless they are larger than 4kb? Plenty of code uses read/write calls that can work fine with files that are not backed by real pages.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839223/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839224"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 1:56 UTC (Tue)
+                               by <b>gus3</b> (guest, #61103)
+                              [<a href="/Articles/839224/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Plenty of code uses read/write calls that can work fine with files that are not backed by real pages.</font><br>
+<p>
+Isn&#x27;t that the buffer cache?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839224/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839254"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 14:49 UTC (Tue)
+                               by <b>mageta</b> (subscriber, #89696)
+                              [<a href="/Articles/839254/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The page cache is the buffer cache. There is no separate buffer cache anymore.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839254/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor839232"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 6:49 UTC (Tue)
+                               by <b>glqhw</b> (guest, #131853)
+                              [<a href="/Articles/839232/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Has anybody looked at not storing files in page cache unless they are larger than 4kb?</font><br>
+Here are some difficulties:<br>
+1. This means that reading such files will ALWAYS lead to I/Os. Most of the time, I/O means more latency compared with accessing memory.<br>
+2. An executable file such as a shell script needs to be mmapped before running. Memory mapping requires page caching.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839232/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839233"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 7:11 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/839233/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  1. This means that reading such files will ALWAYS lead to I/Os. Most of the time, I/O means more latency compared with accessing memory.</font><br>
+I&#x27;m not proposing removing the cache entirely, just using some kind of a high-granularity malloc-ish allocator for small files instead of page-based granularity.<br>
+<p>
+<font class="QuotedText">&gt;  2. An executable file such as a shell script needs to be mmapped before running. Memory mapping requires page caching.</font><br>
+Sure. There should be a mechanism to transform this kind of cache into full page-based cache (and probably back).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839233/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839240"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 8:58 UTC (Tue)
+                               by <b>matthias</b> (subscriber, #94967)
+                              [<a href="/Articles/839240/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;&gt; 2. An executable file such as a shell script needs to be mmapped before running. Memory mapping requires page caching.</font><br>
+<font class="QuotedText">&gt; Sure. There should be a mechanism to transform this kind of cache into full page-based cache (and probably back).</font><br>
+<p>
+Am I understanding you correctly, that you propose to store many small files in one page and whenever someone wants to mmap, copy the file to a fresh page and remove this page again once the file is no longer needed? <br>
+<p>
+Indeed this sounds like a good compromise: More compact cache with the downside to copy a few hundred bytes before a file can be accessed. And if there is a process accessing many small files, you can even copy all of them to the same page. It may be tempting to avoid the copy altogether, but then the kernel would have to check first, that in the page backing a file that is about to be mmaped, there is no information (especially no file) that the process should not have access to. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839240/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839241"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 9:29 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/839241/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  Am I understanding you correctly, that you propose to store many small files in one page and whenever someone wants to mmap, copy the file to a fresh page and remove this page again once the file is no longer needed? </font><br>
+Essentially. I was thinking about just using something like SLAB for it.<br>
+<p>
+If we go to 64kb pages (or even 16kb like apparently on the Apple Silicon), the overhead of unused pages would be kinda significant.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839241/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839370"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 21:09 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/839370/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The THP patchset attempts to provide this benefit without this overhead.<br>
+<p>
+As Jon notes, the struct pages still exist, but they essentially go unused.  Memory is managed in larger chunks.  Exactly how much larger depends on how the application uses the file.  Small files would still use a 4kB page, but if you open() a file and read 32kB from it, the page cache will allocate an order-3 page and manage that 32kB as a single entity.<br>
+<p>
+YMMV, do feel free to try out the current patchset (if you use XFS)<br>
+<a href="https://git.infradead.org/users/willy/pagecache.git/">https://git.infradead.org/users/willy/pagecache.git/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839370/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor839711"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 10, 2020 16:25 UTC (Thu)
+                               by <b>Karellen</b> (subscriber, #67644)
+                              [<a href="/Articles/839711/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Given the existence of huge pages, clearly not all pages on a system have to be the same size. Why not define &quot;tiny pages&quot; of e.g. 256 bytes that can be used to back small files, with 4/16/64KB &quot;normal&quot; pages, and 1/2/4MB huge pages (and larger?) - which are chosen per-allocation to minimise wastage?<br>
+<p>
+Yes, PAGESIZE might need to be the lowest multiple of all of these (i.e. 256 bytes) but is there any reason that that would cause any insoluble problems?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839711/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839746"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 10, 2020 19:29 UTC (Thu)
+                               by <b>geert</b> (subscriber, #98403)
+                              [<a href="/Articles/839746/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because the possible page sizes depend on what the actual MMU hardware supports?<br>
+<p>
+You can find a list of supported sizes for contemporary architectures at <a href="https://en.wikipedia.org/wiki/Page_">https://en.wikipedia.org/wiki/Page_</a>(computer_memory).<br>
+The smallest page size in the list is 4 KiB, which is something most architectures settled on more than 20 years ago.<br>
+Older systems did support smaller page sizes. IIRC the MC68451 and MC68851 supported pages as small as 1 KiB. Still larger than 256 bytes, though.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839746/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839814"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 11, 2020 9:14 UTC (Fri)
+                               by <b>geert</b> (subscriber, #98403)
+                              [<a href="/Articles/839814/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Correction after discovering more information on the &#x27;net: the MC68851 supported page sizes from 256 bytes to 32 KiB.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839814/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor839317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 16:54 UTC (Tue)
+                               by <b>tlamp</b> (subscriber, #108540)
+                              [<a href="/Articles/839317/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Couldn&#x27;t the page cache merge such small files into a single page transparently? Seems a bit weird to me that caching 40 ~100 byte files would need 40 pages (160 KiB) not only one - I mean there&#x27;s probably some overhead of an access structure, but should be still much better.<br>
+<p>
+I could imagine that there may be some security issues (some side channel?) or complexity issues making this non trivial, but that&#x27;s just speculation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839369"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 21:05 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/839369/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The mmap() interface requires that each file starts at offset 0 in the page.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839369/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor839234"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 7:49 UTC (Tue)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/839234/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Decades-old folk wisdom says that most files on Unix systems are small; that may be less true that it once was, though. </font><br>
+<p>
+Using a javascript based software brings you thousands of js files that are around 100 bytes each.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839234/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839583"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 10, 2020 3:19 UTC (Thu)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/839583/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sounds like .js files should be stored in a .jar file. Or a git-style .pack file. Or ... something. No filesystem (nor OS) handles millions of hundred-byte files nearly as well as it handles hundreds of million-byte files.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839583/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839708"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 10, 2020 15:51 UTC (Thu)
+                               by <b>imMute</b> (guest, #96323)
+                              [<a href="/Articles/839708/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The &quot;thousands of small files&quot; is only during development.   Most JS builds end up merging the source files into one big file for distribution.<br>
+<p>
+This is because HTTP is similarly inefficient at transferring many small files versus one larger one.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839708/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839749"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 10, 2020 19:59 UTC (Thu)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/839749/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not necessarily… it&#x27;s completely up to the developers.<br>
+<p>
+See kibana for example (an elasticsearch product). It ships with a staggering amount of js files and random garbage, since the repos of those libraries are all cloned. So it contains licenses, README, .h files, example files, and whatnot.<br>
+<p>
+The power of npm :D (the js tool to pull dependencies).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839749/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor839371"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 21:17 UTC (Tue)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/839371/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One of the biggest problems with patchsets like dmemfs and other approaches to the problem is that if there is no struct page for a particular blob of memory, Linux is not able to do I/O to it.  There are various historical reasons for this, but it&#x27;s something that&#x27;s going to have to be addressed.  It&#x27;ll be a huge undertaking.  If you&#x27;ve heard of data structures like the &#x27;struct bio&#x27;, the &#x27;struct scatterlist&#x27; and &#x27;struct skbuff&#x27;, they&#x27;re full of references to struct pages.  So every driver (networking, block, usb) that touches hardware will have to change.  It is a daunting prospect.<br>
+<p>
+I think Joao&#x27;s approach has a much higher chance of success.<br>
+<a href="https://lore.kernel.org/linux-mm/20201208172901.17384-1-joao.m.martins@oracle.com/">https://lore.kernel.org/linux-mm/20201208172901.17384-1-j...</a><br>
+Obviously I&#x27;m biased because I&#x27;ve been &#x27;helping&#x27; with (aka throwing peanuts at) his approach, but I&#x27;d recommend taking a look at it.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839371/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor839373"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2020 21:23 UTC (Tue)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/839373/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This all seems reminiscent of NVRAM.  If you have terabytes of NVRAM and want to mmap some of it, you need the struct page, but where do you put it?<br>
+I recall talk of dynamically allocating struct page on demand, but I don&#x27;t know what the final outcome was.<br>
+<p>
+Was there a resolution that avoided permanently allocating the struct-page?<br>
+<p>
+If there was, could it be used here?  e.g. tell the kernel to treat some chunk of memory just like NVRAM, and allocate struct-page only on demand??<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839373/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor839453"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 9, 2020 14:52 UTC (Wed)
+                               by <b>darnok</b> (subscriber, #20299)
+                              [<a href="/Articles/839453/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="https://lore.kernel.org/linux-mm/20201208172901.17384-1-joao.m.martins@oracle.com/">https://lore.kernel.org/linux-mm/20201208172901.17384-1-j...</a> <br>
+<a href="https://lore.kernel.org/linux-nvdimm/20200110190313.17144-1-joao.m.martins@oracle.com/">https://lore.kernel.org/linux-nvdimm/20200110190313.17144...</a><br>
+<p>
+There is that - which adds a DEV-DAX and does the same thing but with less code changes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839453/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor839955"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 12, 2020 18:51 UTC (Sat)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/839955/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      As it happens, I have recently tried to <a href="http://al.howardknight.net/?ID=160779860100">measure the additional internal fragmentation from larger pages</a>.
+
+The results are (memory sizes in KB):
+
+<pre>
+VMAs unique    used     total      8KB    16KB    32KB    64KB   
+ 7552  2333    555964  1033320    6704   22344   56344  125144 machine1
+82836 25276   5346060 15707448   76072  223000  514472 1113672 machine2
+47017 15425 105490636 60186068   40804  134492  319852  708588 machine3
+</pre>
+
+So the additional cost of going to 8KB pages seems to be quite modest.
+
+<p>One other solution that comes to my mind: File system developers have tried to tackle the overhead of block meta-data by instead using meta-data for extents, which may be larger than blocks, but make space management more complex.  Maybe a similar approach could help for reducing page meta-data for memory.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/839955/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor840245"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How is RAM usage for the Kernel's MM a problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2020 19:10 UTC (Tue)
+                               by <b>pr1268</b> (subscriber, #24648)
+                              [<a href="/Articles/840245/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><font class="QuotedText">A laptop with 16GB installed has 4,194,304 pages, meaning that 256MB of memory is used just to keep track of memory. [...] a hosting provider running servers with 320GB of installed memory is losing 5GB of that memory to page structures.</font></blockquote>
+
+<p>I don't get it... It seems that since time immemorial<sup>1</sup>, 64-bit Linux has <em>always</em> used 1/64 of physical RAM just to maintain page structures.  No matter if one has 512 MB or 64 GB, that system is using 1/64 (=1.5625%) of RAM to keep track of the RAM.</p>
+
+<p>So that begs the question:  How come this is *just now* becoming an issue?  And are you really <em>losing</em> the memory?  After all, with pretty much any shared computing resource, there's always going to be some administrative overhead to maintaining said resource.</p>
+
+<p><sup>1</sup> At least since 1994, when Linux was ported to the 64-bit DEC Alpha (IIRC; someone correct me if I'm wrong).</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/840245/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor840249"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How is RAM usage for the Kernel's MM a problem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2020 20:29 UTC (Tue)
+                               by <b>james</b> (subscriber, #1325)
+                              [<a href="/Articles/840249/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      With virtualisation, you're paying the tax twice — once in the guest and once in the host.
+<p>
+As you say, you pretty much need to pay that for a general-purpose operating system. But for an OS that is only hosting standardised virtual machines running known workloads, you don't need to. I think the point of the "5 GB" is that we're now getting to the point where the tax in the host is roughly the amount you need for another guest.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/840249/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor840897"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Sidestepping kernel memory management with DMEMFS</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 21, 2020 15:43 UTC (Mon)
+                               by <b>rlhamil</b> (guest, #6472)
+                              [<a href="/Articles/840897/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Various modern CPUs can support multiple page sizes. And OSs can not just use those internally, but make them available to processes. Solaris has allowed stack and heap page size preferences (from those available on the particular hardware) to be set to non-default values, and mmap(2) together with memcntl(2) to achieve that effect for mmap() calls. Used prudently, that can considerably reduce page table entries required. I have the impression that on some CPUs, that can be used by a hypervisor too, handy insofar as VMs are big memory users. I think VirtualBox can do that on a Solaris host, but only with a suitable Intel CPU (not with those lacking the needed features nor with an AMD, even if it has some virtualization acceleration features).<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/840897/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2020, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

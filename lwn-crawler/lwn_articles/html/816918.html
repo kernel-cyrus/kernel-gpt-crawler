@@ -1,0 +1,630 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>VMX virtualization runs afoul of split-lock detection [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/816918/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/816654/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/816918/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>VMX virtualization runs afoul of split-lock detection</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 7, 2020</br>
+           </div>
+One of the many features merged for the 5.7 kernel is <a
+href="/Articles/790464/">split-lock detection</a> for the x86 architecture.
+This feature has encountered <a href="/Articles/806466/">a fair amount of
+controversy</a> over the course of its development, with the result that
+the time between its initial posting and appearance in a released kernel
+will end up being over two years.  As it happens, there is another hurdle
+for split-lock detection even after its merging into the mainline; this
+feature threatens to create problems for a number of virtualization
+solutions, and it's not clear what the solution would be.
+<p>
+To review quickly: a "split lock" occurs when a processor instruction locks
+a range of memory that crosses a cache-line boundary.  Implementing such locks
+requires locking the entire memory bus, with unpleasant effects on the
+performance of the system as a whole.  Most architectures do not allow
+split locks at all, but x86 does; only recently have some x86 processors gained
+the ability to generate a trap when a split lock is requested.
+<p>
+Kernel developers are interested in enabling split-lock detection as a
+way of eliminating a possible denial-of-service attack vector as well as
+just getting rid of a performance problem that could be especially
+problematic for latency-sensitive workloads.  In short, there is a desire
+for x86 to be like other architectures in this regard.  The implementation
+of this change has evolved considerably over time; in <a
+href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=6650cdd9a8cc">the
+patch that was merged</a>, there is a new boot-time parameter
+(<tt>split_lock_detect=</tt>) that can have one of three values.  Setting
+it to <tt>off</tt> disables this feature, <tt>warn</tt> causes a warning to
+be issued when user-space code executes a split lock, and <tt>fatal</tt>
+causes a <tt>SIGBUS</tt> signal to be sent.  The default value is
+<tt>warn</tt>.
+<p>
+
+The various discussions around split-lock detection included
+virtualization, which has always raised some interesting questions.  A
+system that runs virtualized guests is a logical place to enable split-lock
+detection, since a guest can disrupt others with hostile locking behavior.
+But a host that turns on split-lock detection risks breaking guests that
+are unprepared for it; this problem extends to the guest operating system,
+which will be directly exposed to the alignment-check traps caused by
+split-lock detection.  It may not be possible for the administrator of
+the host to even know whether the guest workloads are ready or not.  So
+various kernel
+developers wondered what the best policy regarding virtualization should
+be.
+
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+It seems that some of that discussion fell by the wayside as the final
+patch was being prepared, leading to an unpleasant surprise.  Kenneth
+Crudup first reported that split-lock detection caused VMware guests to
+crash, but the problem turns out to be a bit more widespread than that.
+<p>
+Intel's "virtual machine extensions" (VMX, also referred to as "VT-x")
+implements hardware-supported virtualization on x86 processors.  A
+<tt>VMLAUNCH</tt> instruction places the processor in the virtualized mode,
+where the client's system software can (mostly) behave like it is running
+on bare hardware
+while being contained within its sandbox.  It turns out that, if split-lock
+detection is enabled and code running within a virtual machine attempts a
+split lock, the processor will happily deliver an alignment-check
+trap to a thread running in the VMX mode; what happens next depends on the
+hypervisor.  And most hypervisors are not prepared for this to happen; they
+will often just forward the trap into the virtual machine, which, not being
+prepared for it, will likely crash.  Any hypervisor using VMX is affected
+by this issue.
+<p>
+Thomas Gleixner responded to the problem with <a
+href="/ml/linux-kernel/20200402123258.895628824@linutronix.de/">a short
+patch series</a> trying to cause the right things to happen.  One of the
+affected hypervisors is KVM; since it is a part of the kernel, the right
+solution is to just make KVM handle the trap properly.  Gleixner included
+<a href="/ml/linux-kernel/20200402124205.334622628@linutronix.de/">a
+patch</a> causing KVM to check to see whether the machine was configured to
+receive an alignment-check trap and only deliver it if so.  That patch is
+likely to be superseded by <a
+href="/ml/linux-kernel/20200402155554.27705-1-sean.j.christopherson@intel.com/">a
+different series</a> written by Xiaoyao Li, but the core idea (make KVM
+handle the trap correctly) is uncontroversial.
+<p>
+The real question is what should be done the rest of the time.  All of the
+other VMX-using hypervisors are out-of-tree, so they cannot be fixed
+directly.  Gleixner's original patch was arguably uncharacteristic of his
+usual approach to such things: it disabled split-lock detection globally if
+a hypervisor module was loaded into the kernel.  But, since modules don't
+come with a little label saying "this is a hypervisor", Gleixner's patch
+would, instead, read through each module's executable code at load time in
+search of a <tt>VMLAUNCH</tt> instruction.  Should such an instruction
+exist, the module is deemed to be a hypervisor.  Unless a special flag
+("<tt>sld_safe</tt>") is set in the module info area, the hypervisor will
+be assumed to be unready for split-lock detection and the feature will be
+turned off.
+<p>
+It is not at all clear that this approach will be adopted.  Among other
+things, it turns out that not all VMX hypervisors include <tt>VMLAUNCH</tt>
+instructions in their code.  As Gleixner <a
+href="/ml/linux-kernel/87o8s8l7t3.fsf@nanos.tec.linutronix.de/">noted</a>
+later in the discussion, VirtualBox doesn't directly contain <i>any</i> of
+the VMX instructions; those are loaded separately by the VirtualBox module,
+outside of the kernel's module-loading mechanism.  "<q>This 'design'
+probably comes from the original virtualbox implementation which
+circumvented GPL that way</q>", Gleixner observed.  Other modules use
+<tt>VMXON</tt> rather than <tt>VMLAUNCH</tt>.
+<p>
+Eventually these sorts of problems could be worked around, but there is
+another concern with this approach that was <a
+href="/ml/linux-kernel/20200406122343.GA10683@infradead.org/">expressed</a>,
+in typical style, by Christoph Hellwig:
+<p>
+<div class="BigQuote">
+	This is just crazy.  We have never cared about any out of tree module,
+	why would we care here where it creates a real complexity.  Just
+	fix KVM and ignore anything else.
+</div>
+<p>
+There is a fair amount of sympathy for this approach in kernel-development
+circles, but there is still a reluctance to ship something that is certain
+to create unexpected failures for end users even if it is not seen as a
+regression in the usual sense.  So a couple of other ideas
+for how to respond to this problem have been circulating.
+<p>
+One of those is to continue scanning module code for instructions that
+indicate hypervisor functionality.  But, rather than disabling split-lock
+detection on the system as a whole, the kernel would simply refuse to load
+the module.  There are concerns about the run-time cost of scanning through
+module code, but developers like Peter Zijlstra also <a
+href="/ml/linux-kernel/20200406144020.GP20730@hirez.programming.kicks-ass.net/">see
+an opportunity</a> to prevent the loading of modules that engage in other
+sorts of unwelcome behavior, such as directly manipulating the CPU's
+control registers.  <a
+href="/ml/linux-kernel/20200407110236.930134290@infradead.org/">A patch</a>
+implementing such checks has subsequently been posted.
+<p>
+An alternative, <a
+href="/ml/linux-kernel/20200406125010.GA29306@infradead.org/">suggested</a>
+by Hellwig, is to find some other way to break the modules in question and
+prevent them from being loaded.  Removing some exported symbols would be
+one way to do that.  Zijlstra posted <a
+href="/ml/linux-kernel/20200406140403.GL20730@hirez.programming.kicks-ass.net/">one
+attempt</a> at "fixing" the problem that way; Hellwig has <a
+href="http://git.infradead.org/users/hch/misc.git/shortlog/refs/heads/sanitize-vmalloc-api">a
+complementary approach</a> as well.
+<p>
+As of this writing, it's not clear which approach will be taken; the final
+5.7 kernel could be released with both of them, or some yet unseen third
+technique.  Then, just maybe, the long story of x86 split-lock detection
+will come to some sort of conclusion.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Architectures-x86">Architectures/x86</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Virtualization">Virtualization</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/816918/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor817031"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2020 11:47 UTC (Wed)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/817031/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; but developers like Peter Zijlstra also see an opportunity to prevent the loading of modules that engage in other sorts of unwelcome behavior, such as directly manipulating the CPU's control registers.</font><br>
+<p>
+I wonder if the end game won't be something like requiring all out-of-tree modules to be compiled to WASM or similar.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817031/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor817032"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2020 12:37 UTC (Wed)
+                               by <b>amacater</b> (subscriber, #790)
+                              [<a href="/Articles/817032/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Or just kill out of tree modules as unfixable and blacklist them from linking ... that would kill off the unfixable cheap appliances that are always out of tree :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817032/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor817034"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2020 13:35 UTC (Wed)
+                               by <b>dottedmag</b> (subscriber, #18590)
+                              [<a href="/Articles/817034/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, it will cause these appliances to be stuck on ancient kernels with out-of-tree modules.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817034/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor817035"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2020 14:18 UTC (Wed)
+                               by <b>Tov</b> (subscriber, #61080)
+                              [<a href="/Articles/817035/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Which is essentially status quo...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817035/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor817077"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2020 18:01 UTC (Wed)
+                               by <b>imMute</b> (guest, #96323)
+                              [<a href="/Articles/817077/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It'll also completely screw over people who use out-of-tree modules and *up-to-date* kernels too.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817077/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor817093"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2020 4:08 UTC (Thu)
+                               by <b>jcm</b> (subscriber, #18262)
+                              [<a href="/Articles/817093/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What isn’t spelled out clearly anywhere is just how badly they screwed up the split cache line lock implementation. There isn’t one “memory bus” in a modern system, there are many cache coherent agents talking to one another and via home agents (contained within home nodes in Intel parlance) to external memory. There are so many nasty ways that you could implement “locking the bus”.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817093/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor817104"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2020 13:42 UTC (Thu)
+                               by <b>jkingweb</b> (subscriber, #113039)
+                              [<a href="/Articles/817104/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For clarity, who is "they"?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817104/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor817189"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2020 5:40 UTC (Fri)
+                               by <b>jcm</b> (subscriber, #18262)
+                              [<a href="/Articles/817189/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Intel. This ought to be have been implemented using a TSX-like concept by putting both cache lines into effectively a write set consisting of lines exclusively held by a single core at a time, not by locking the uncore of the chip.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817189/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor817244"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2020 15:44 UTC (Fri)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/817244/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; This ought to be have been implemented using a TSX-like concept</font><br>
+<p>
+Given how many problems they have had with TSX (which includes some so bad that they had to completely disable TSX on the affected processors in a microcode update), it's a good thing they didn't do it that way.<br>
+<p>
+It makes sense that they chose the simplest possible implementation: other than legacy MS-DOS era software, no software should do atomic operations on values which are not naturally aligned in memory. Their mistake was to take so long to implement a trap on these misaligned atomic operations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817244/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor817310"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2020 22:10 UTC (Sat)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/817310/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Given how many problems they have had with TSX (which includes some so bad that they had to completely disable TSX on the affected processors in a microcode update), it's a good thing they didn't do it that way.</font><br>
+<p>
+After a huge amount of effort to get TSX working for locks in glibc, actual benchmarking was done. TSX was only slightly faster than no-TSX, and algorithmic changes made no-TSX massively faster than TSX. Whoops. (TSX remains dead useful for attackers trying to trigger speculative attacks that then erase the evidence of their execution.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817310/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor817158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 9, 2020 19:23 UTC (Thu)
+                               by <b>kmweber</b> (guest, #114635)
+                              [<a href="/Articles/817158/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As someone who knows nothing about this, I have a question: does this essentially mean putting a disassembler in the kernel?  Because presumably that particular sequence of bytes that constitutes the opcode could appear in other contexts, right?  E.g. as initialized data, as the end of one instruction opcode followed by the beginning of another, etc.  Since x86 instructions are variable in length, is there a way to reliably determine this short of disassembling the entire thing from the beginning?<br>
+<p>
+Like I said, I know nothing about this, so this isn't meant as a commentary on whether it is a good solution or not, whether the benefits outweigh the costs, and so forth--I'm just teying to better understand what's going on.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor817204"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2020 13:06 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/817204/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+I have a question: does this essentially mean putting a disassembler in the kernel?
+</blockquote>
+There's been a disassembler in the kernel for ages (or actually many, for many architectures: used e.g. for kprobes and uprobes etc to analyze function prologues to drop probe points there). This is just one of many users.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817204/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor817349"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2020 21:48 UTC (Sun)
+                               by <b>hmh</b> (subscriber, #3838)
+                              [<a href="/Articles/817349/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not to mention the emulators... Yes, the kernel can, and does, have to emulate (a few instructions of) the running processor sometimes...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817349/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor817920"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">VMX virtualization runs afoul of split-lock detection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2020 21:09 UTC (Sun)
+                               by <b>robbe</b> (guest, #16131)
+                              [<a href="/Articles/817920/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How it has worked before with VMware Workstation: the product ships a ton of pre-built kernel modules, but these are invariably not for my distribution, and even if they were, they get old pretty fast, if you are tracking Linus releases. You can fall back on compiling from the provided module sources, but if your kernel is 6-12 months newer than your release of Workstation, this will usually fail and needs manual fixing.<br>
+<p>
+So… the module breaking regularly is par for the course, at least when considering VMware. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/817920/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2020, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

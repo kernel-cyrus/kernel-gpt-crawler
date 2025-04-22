@@ -1,0 +1,1640 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Out-of-memory victim selection with BPF [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/941614/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/941868/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/941614/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Out-of-memory victim selection with BPF</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 17, 2023</br>
+           </div>
+In its default configuration, the Linux kernel will allow processes to
+allocate more memory than the system can actually provide; this policy
+enables better utilization of physical memory and works just fine — most of
+the time.  On occasions, though, the kernel may find itself unable to
+provide memory that processes may think already belongs to them.  If the
+situation gets bad enough, the only solution (short of rebooting) is to
+declare a sort of memory bankruptcy and write off some of the kernel's
+debts by killing one or more processes.  Over the years, a great deal of
+effort has gone into heuristics to select the processes that the user is
+least likely to miss.  This problem is still clearly not solved to
+everybody's satisfaction, though, so it was only a matter of time before
+somebody introduced a way to select the out-of-memory (OOM) victim using
+BPF.
+<p>
+There are numerous ways to go hunting for a process to sacrifice when
+memory runs out.  The process using the most memory is an obvious choice,
+but that process is often something important: a window-system server or a
+database manager, for example.  So developers have naturally tried, over
+the years, to enable the kernel to make a better choice; see <a
+href="/Kernel/Index/#Memory_management-Out-of-memory_handling">the LWN
+kernel index</a> to see how things have evolved over time.  In current
+kernels, this decision comes down to a function called <a
+href="https://elixir.bootlin.com/linux/v6.4.10/source/mm/oom_kill.c#L191"><tt>oom_badness()</tt></a>
+which, after exempting processes that cannot be killed for one reason or
+another, makes a simple calculation.  A process's "OOM score" comes down to
+the amount of memory it uses, adjusted by that process's <a
+href="https://www.kernel.org/doc/html/latest/filesystems/proc.html#chapter-3-per-process-parameters"><tt>oom_score_adj</tt>
+value</a>.  By tweaking those knobs, user space can shelter some
+processes from the OOM-killer's depredations while directing its attention
+toward others.
+<p>
+That, evidently, is not enough control for some users.  The <a
+href="/ml/linux-kernel/20230810081319.65668-1-zhouchuyi@bytedance.com/">BPF
+patch series</a> from Chuyi Zhou is the latest in a series of attempts
+to improve that control.
+<p>
+In current kernels, the OOM killer will iterate through all of the possible
+target processes, call <tt>oom_badness()</tt> on each, then target the
+process that is given the highest score.  Zhou's patch set allows the
+<tt>oom_badness()</tt> check to be replaced with a call to a BPF function,
+which should be defined as an "fmod_ret" tracing function (meaning it is
+invoked on return from an internal kernel function and can change that
+function's return value) with this name and prototype:
+<p>
+<pre>
+    int bpf_oom_evaluate_task(struct task_struct *task, struct oom_control *oc);
+</pre>
+<p>
+This function will be called at the beginning of the evaluation of each
+potential victim and, if it makes a decision on the given <tt>task</tt>,
+will cause the normal evaluation to be skipped.  The <a
+href="https://elixir.bootlin.com/linux/v6.4.10/source/include/linux/oom.h#L29"><tt>oom_control</tt>
+structure</a> describes the context in which the OOM kill is taking place;
+the BPF function has access to it but probably (the rules are not actually
+documented anywhere) should not make changes to it.  That function can also
+look at the <tt>task</tt> under consideration and make a decision regarding
+its fate, as reflected in its return value:
+<p>
+<ul>
+<li> <tt>NO_BPF_POLICY</tt>: no policy is in effect, so the normal
+     <tt>oom_badness()</tt> method should be used.
+<li> <tt>BPF_EVAL_ABORT</tt>: abort the selection process entirely with no
+     process chosen to kill.
+<li> <tt>BPF_EVAL_NEXT</tt>: move on to the next process, passing over this
+     one.
+<li> <tt>BPF_EVAL_SELECT</tt>: select this process as the one to kill.
+</ul>
+<p>
+Returning <tt>BPF_EVAL_SELECT</tt> does not bring an end to the iteration
+through the list of processes; there will be further calls to
+<tt>bpf_oom_evaluate_task()</tt> if there are more processes to examine.
+As a result, the function can change its mind and return
+<tt>BPF_EVAL_SELECT</tt> again if a more appealing victim comes along later
+in the sequence.
+<p>
+It is possible to use <tt>BPF_EVAL_NEXT</tt> for some processes while using
+<tt>NO_BPF_POLICY</tt> for others.  The end result will be to shield some
+processes from the OOM killer while letting the kernel make a decision in
+the usual way by looking at the rest.  Mixing <tt>BPF_EVAL_SELECT</tt> and
+<tt>NO_BPF_POLICY</tt> looks like it could create surprising results,
+though; this combination does not appear to be intended and should, unless
+something changes in a future version, be avoided.
+<p>
+Specifically, the <tt>oom_control</tt> structure contains a pointer called
+<tt>chosen</tt> identifying the currently selected victim, and an integer
+<tt>chosen_points</tt> holding its badness score.  In the absence of a BPF
+program, the kernel compares each process's score against
+<tt>chosen_points</tt>, and updates both if the new process has a higher
+score.  Returning <tt>BPF_EVAL_SELECT</tt> sets <tt>chosen</tt> without
+setting <tt>chosen_points</tt> to anything.  If <tt>BPF_NO_POLICY</tt> is
+returned for a later process, its score will be compared against a
+<tt>chosen_points</tt> that has no connection to the process selected
+earlier. 
+
+<p>
+There are two related hooks provided by the patch set as well.  One of them
+allows the name of the current victim-selection policy to be stored in the
+kernel; that name will be propagated through to the log when an actual kill
+is done.  To do so, the program should define an fmod_ret function:
+<p>
+<pre>
+    void bpf_set_policy_name(struct oom_control *oc);
+</pre>
+<P>
+That function, which will be called at the beginning of the OOM-kill
+procedure, can then turn around and call:
+<p>
+<pre>
+    void set_oom_policy_name(struct oom_control *oc, const char *name, size_t sz);
+</pre>
+<p>
+Where <tt>oc</tt> is the <tt>oom_control</tt> structure passed to
+<tt>bpf_set_policy_name()</tt>, <tt>name</tt> is the policy name to use,
+and <tt>sz</tt> is the length of that name.  Names are limited to
+16&nbsp;bytes, including the terminating NUL byte.
+<p>
+There is also a new tracepoint, <tt>select_bad_process_end</tt>, that fires
+if the OOM-kill procedure fails to find a process to kill.  It is intended
+to be a helper for developers who are trying to develop a new OOM-kill
+policy.
+<p>
+This series is currently in its second revision.  In response to <a
+href="/ml/linux-kernel/20230804093804.47039-1-zhouchuyi@bytedance.com/">the
+first posting</a>, memory-management developer Michal Hocko <a
+href="/ml/linux-kernel/ZMzhDFhvol2VQBE4@dhcp22.suse.cz/">suggested</a>
+simplifying the interface somewhat.  Roman Gushchin, instead, <a
+href="/ml/linux-kernel/ZNEpsUFgKFIAAgrp@P9FQF9L96D.lan/">argued</a> for
+taking a more general approach, where the BPF program is called once at OOM
+time and is expected to figure out a way to free some memory somewhere.
+Hocko <a
+href="/ml/linux-kernel/ZNH6X/2ZZ0quKSI6@dhcp22.suse.cz/">responded</a> that
+it would be better to start with "<q>something that is good enough</q>" add
+complexity later if it seems warranted.  In response to the second
+revision, Alexei Starovoitov <a
+href="/ml/linux-kernel/CAADnVQK=7NWbRtJyRJAqy5JwZHRB7s7hCNeGqixjLa4vB609XQ@mail.gmail.com/">also
+supported</a> a more general callback, though, and Zhou has <a
+href="/ml/linux-kernel/93627e45-dc67-fd31-ef43-a93f580b0d6e@bytedance.com/">started
+considering</a> the implications of such a change.
+<p>
+Both Hocko and Gushchin expressed worries that introducing BPF into this
+code, which runs when the system is in a distressed state, could further
+reduce the stability of an out-of-memory situation. An attempt by a BPF
+program to allocate a lot of memory in this situation seems likely to end
+in tears, for example.  That is true of any code that hooks into the
+OOM-killer, though, and is not a problem specific to BPF.
+<p>
+The conversation has shown that there is some interest in the use of BPF to
+select victims for the out-of-memory killer.  Thus far, though, there is
+not a clear consensus on the approach that this work should take. It would
+not be surprising, at this point, to see this feature go through some
+significant changes before it gets closer to the mainline; until then, the
+kernel will just have to continue choosing processes to sacrifice the
+old-fashioned way.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#BPF-Memory_management">BPF/Memory management</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Out-of-memory_handling">Memory management/Out-of-memory handling</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/941614/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor941953"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2023 16:57 UTC (Thu)
+                               by <b>rrolls</b> (subscriber, #151126)
+                              [<a href="/Articles/941953/">Link</a>] (44 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah yes, the OOM killer.<br>
+<p>
+The handling of out-of-memory situations is one of the few things I still believe Windows does better than Linux, from my personal user experience; this is across Debian (my current go-to), Arch, CentOS 5-7 and a handful of other distros.<br>
+<p>
+Windows sets up a default amount of swap space, and when RAM is close to exhaustion, programs tend to slow down a bit, but the system remains usable and stable, and all I need to do is realise what has happened, close enough programs to free up memory, and wait a minute or two, and it'll be as good as it was before.<br>
+<p>
+Linux - or at least the distros I've used - also by default sets up an amount of swap space. However, the _moment_ it starts using any of that swap, the system becomes unusably slow - even basic interactions become virtually impossible - even switching to a text console and attempting to log in there takes so long that if it ever completes, whatever runaway process has filled up my RAM has probably eaten up all of swap by then as well. I have used some systems where it was possible to run swapoff to get the system back in working order, but otherwise, the only answer is the physical reset button. As a result, I now have a personal policy of always disabling swap on any Linux installation, resulting in the OOM killer getting invoked immediately instead, which usually still results in me needing to reset the system to recover, but at least this way I get to instantly find out what the problem is, and there's a chance there might be something left to salvage.<br>
+<p>
+Personally, I've never bought the argument that overcommit provides more benefits than drawbacks. To me, the intuitive and obvious approach is that programs should be written in the first place to gracefully handle situations where malloc returns NULL, and failing that, a program should only ever get OOM-killed if that program is the one trying to allocate memory in the first place. One program calling malloc should not cause another program to get killed. (Yes, I understand that programs can cause memory to be allocated by writing to pages and so forth: I'm advocating that malloc, and its various higher-level analogues, should be the one and only point of possible OOM - and that if the system cannot guarantee memory will be available, it should not allocate the requested memory at all.)<br>
+<p>
+I do wonder, overall, if all the effort spent on overcommit and OOM-selection could have been better spent designing programs to work without overcommit and handle failure gracefully. Of course, given that just about everything on Linux is currently written to assume overcommit is a thing, it'd be a mammoth task to change the status quo now, but am I really the only one to question whether, with hindsight, this was the best path to take?<br>
+<p>
+Or, at least, why can't Linux at least do as well as Windows - in my experience - in this one respect?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941953/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor941968"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2023 18:32 UTC (Thu)
+                               by <b>wsy</b> (subscriber, #121706)
+                              [<a href="/Articles/941968/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I always install the maximum amount of RAM I can buy and disable swap. Exactly because when swap happens, I'd rather hard reset the computer than waiting indefinitely for the system to respond.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941968/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor941969"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2023 18:33 UTC (Thu)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/941969/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Handling OOM "gracefully" in application code just doesn't make sense for most applications. In almost every case you simply cannot proceed and might as well just treat it the same as a crash, power-down, or other process-kill, in which case just killing the process at the point of OOM is much much simpler than having code to propagate errors up the stack until you get to some handler that does effectively the same thing.<br>
+<p>
+And even when there is something other than just exit that you'd like to do for OOM, it's really hard to implement. You have to do whatever it is without allocating more memory, which is often impossible. When it is possible, you have to thoroughly test these code paths, which is more hard work. It's hardly ever worth it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941969/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor941972"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2023 18:36 UTC (Thu)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/941972/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It *might* be good for Linux to have a way to disable overcommit on a per-process basis, so when you've got some special processes that really can handle OOM, they can get that special treatment.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941972/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor941994"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2023 21:20 UTC (Thu)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/941994/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'd like that for the opposite - most of my desktop behaves fine with overcommit off, but a handful of programs insist on allocating a hundred gigabytes and crash when they don't get it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941994/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942043"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2023 10:36 UTC (Fri)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/942043/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>And who would write such desktop for you? Currently the worst offenders which allocate tons of memory they would never use are precisely programs that show desktop, launch other programs and so on.</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942043/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor942153"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2023 23:40 UTC (Fri)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/942153/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't know what you're running on your desktop but I don't believe "most" programs are resilient to OOM on most people's desktops. Certainly anything using Python, Javascript, Java or almost any other language than C or maybe C++ cannot be resilient to OOM. Any application that seriously tries to be resilient to OOM must have a rigorous testing regime using fault injection to test the OOM paths, and I haven't seen *any* Linux desktop application or toolkit with such a testing regime. Heck, do X or Wayland have such a regime? Because if they don't, there's no hope at all.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942153/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor942042"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2023 10:35 UTC (Fri)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/942042/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Try any program which was written before Windows craze began. Or even early Windows apps. If you don't have memory they would politely inform you about that fact and then you can close some documents or do some other thing.</p>
+
+<p>Around the beginning of XXI century memory have become cheap enough that trying to ration it have become less important and, as usual, something that user couldn't see started degrading in hurry.</p>
+
+<p>But it's absolutely feasible and possible to do, just there are no way to make that happen in a market economy where people don't know or don't care that program doesn't handle memory exhaustion gracefully.</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942042/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942155"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2023 23:50 UTC (Fri)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/942155/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Applications and libraries became more and more complex and handling OOM became less and less feasible. Popping up a messagebox, receiving input, and handling document close events without allocating memory is a lot of hard work and as the OS components involved became more complex (e.g. window compositor, more complex graphics) that work became harder and harder, so people stopped trying.<br>
+<p>
+Personally I don't hark back to those "good old days". They were also the days when a bug in one application or a power flicker would crash the entire system and cause you to lose all work not manually saved. Modern applications continually save your data so you lose practically nothing if the application dies for any reason --- a much better approach, which also makes specialized OOM handling unnecessary.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942155/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942181"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2023 14:49 UTC (Sat)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/942181/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; Modern applications continually save your data so you lose practically nothing if the application dies for any reason --- a much better approach, which also makes specialized OOM handling unnecessary.</font>
+
+<p>Tell that fairy tale to someone else, please. People wouldn't have clamored for phones with gigabytes of RAM if that approach actually worked. Apple Lisa provided that capability fourty years ago and in Apple's walled garden this even works, to some degree. But still with a lot of glitches.</p>
+
+<p>Everywhere else? Nope.</p>
+
+<font class="QuotedText">&gt; Popping up a messagebox, receiving input, and handling document close events without allocating memory is a lot of hard work and as the OS components involved became more complex (e.g. window compositor, more complex graphics) that work became harder and harder, so people stopped trying.</font>
+
+<p>It's not hard to set aside some emergency memory which can be used for showing such message boxes. <a href="https://en.wikipedia.org/wiki/Turbo_Vision">TurboVision</a> and <a href="https://en.wikipedia.org/wiki/Object_Windows_Library">OWL</a> did that and it worked.</p>
+
+<p>That's not entirely trivial, but certainly is much easier than robustly saving the app state and restoring it after crash. Saying that solution to the task which nobody was able to show is easier than something that was done routinely in the post is just useless posturing.</p>
+
+<p>But as I have said: at some point computers got enough memory for the problem not to become obvious in 2 weeks in which you may demand your money back and thus incentive to write robust programs which one may actually trust disappeared.</p>
+
+<p>In places where it actually matters they are still written and used.</p>
+
+<font class="QuotedText">&gt; Personally I don't hark back to those "good old days".</font>
+
+<p>History doesn't repeat itself, but it rhymes. I don't think we would ever return back to “good old days”, but after collapse of our modern infrastructure people would, hopefully, rebuild it in more robust fashion.</p>
+
+<p>Not 100% bullet-proof one, but, hopefully, in a way that doesn't require throwing 1000x more resources on a problem then it intrinsically needs.</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942181/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942220"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2023 5:12 UTC (Sun)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/942220/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Personally I'm pretty satisfied with the Android apps and Web apps I use not losing data. Doesn't feel like a fairy tale.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942220/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942230"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2023 10:02 UTC (Sun)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/942230/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; Personally I'm pretty satisfied with the Android apps and Web apps I use not losing data.</font>
+
+<p>Let me try. “Reply to this comment”, type something, kill the tab (like OOM killer would do), try to reload. “Conform form resubmission” and no matter what you do comment is lost.</p>
+
+<p>Let's try Reddir. “Comment”, kill. Same. Or maybe GitHub… nope.</p>
+
+<p>Or do you want to say that they are saving “before doing important work” like Turbo Pascal did 40 years ago which could save file before trying to compile and run it? That's not a new trick and is not a replacement to proper handling of memory.</p>
+
+<p>And the same with Android apps. Android assumes that it may kill them at any moment and they would just restore their state, somehow, but that's hit-and-miss and that's why phones with many gigabytes of memory are valuable.</p>
+
+<font class="QuotedText">&gt; Doesn't feel like a fairy tale.</font>
+
+<p>That's mostly thanks to modern OSes which properly isolate apps. The apps themselves are not any better and in data retention aspects they are even worse than they were 40 years ago.</p>
+
+<p>You just could afford to turn on various “auto-save” options because modern SSDs are so much faster than old floppies. But these options, themselves, existed for decades and were available way before memory sloppy programming have become the norm.</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942230/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942314"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2023 15:29 UTC (Mon)
+                               by <b>jkingweb</b> (subscriber, #113039)
+                              [<a href="/Articles/942314/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;&gt; Personally I'm pretty satisfied with the Android apps and Web apps I use not losing data.</span><br>
+<span class="QuotedText">&gt; </span><br>
+<span class="QuotedText">&gt; Let me try. “Reply to this comment”, type something, kill the tab (like OOM killer would do), try to reload. “Conform form resubmission” and no matter what you do comment is lost.</span><br>
+<p>
+I can't speak to Web apps and closing tabs (and LWN is not a Web app, anyway), but if I type into the comment form and kill my Android browser (Vivaldi) explicitly, the text is retained when I start it back up. If I close the tab and use Vivaldi's "undo" function immediately the text is retained. If I wait for the "undo" prompt to go away and re-open the tab from the list of closed tabs the text is gone (but this is not very surprising).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942314/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942316"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2023 15:55 UTC (Mon)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/942316/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>Yes. <b>Some</b> web apps are preserving content. <b>Some</b> Android apps are preserving it, too. Vivaldi is pretty good there.</p>
+
+<p>But, as I have said, auto-save is not a new invention and yet it was always spotty. It's still spotty thus I'm not sure what kind of “progress” is discussed here.</p>
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942316/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor941980"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2023 19:24 UTC (Thu)
+                               by <b>mpr22</b> (subscriber, #60784)
+                              [<a href="/Articles/941980/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Fundamentally, overcommit (in the form of copy-on-write pages) exists so that a process whose current RAM allocation exceeds the amount of remaining unallocated RAM can launch another program using the traditional Unix sequence "call fork(2), then have the child call execwhatever(2) after some small amount of housekeeping".<br>
+<p>
+Also, the kernel knows nothing about malloc(3). The kernel only knows about mmap(2) and brk(2).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941980/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor941984"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2023 19:47 UTC (Thu)
+                               by <b>gfernandes</b> (subscriber, #119910)
+                              [<a href="/Articles/941984/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The kernel may not know about malloc - but that does not invalidate the point that malloc is the (correct? certainly is for Java VMs) place to make this decision and penalise the memory hog (or rogue), as opposed to an innocent bystander... <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941984/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942244"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2023 17:57 UTC (Sun)
+                               by <b>jmspeex</b> (subscriber, #51639)
+                              [<a href="/Articles/942244/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The this is that the program calling malloc() may very well be the innocent bystander here. You can have the memory hog allocating tons of memory, and then an innocent process tries to allocate a few bytes and trigger an OOM event. The whole point of the OOM killer is to avoid that innocent process getting killed while leaving the memory hog running. Also, as others have pointed out, it's not just malloc() that allocates memory. Growing the stack means memory gets allocated without the process even making a system call. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942244/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor941992"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2023 21:25 UTC (Thu)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/941992/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; programs should be written in the first place to gracefully handle situations where malloc returns NULL,</span><br>
+<p>
+Sure. However, a memory allocation might also happen because of automatic stack expansion. Without an explicit allocation call, which could return an error,  it is much more difficult for an application to gracefully handle a failure.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/941992/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor942000"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2023 22:16 UTC (Thu)
+                               by <b>WolfWings</b> (subscriber, #56790)
+                              [<a href="/Articles/942000/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just switching off memory overcommit with the proper tunings and adding a large enough swap makes it behave basically identically to Windows.<br>
+<p>
+While it won't overcommit it will still allow unfaulted pages to be used for page cache AFAIK so there's really no downsides.<br>
+<p>
+vm.overcommit_memory=2<br>
+vm.overcommit_ratio=100<br>
+<p>
+Some may bicker about the _ratio value or using _kbytes instead, but =100 works equally regardless of swap space or lack thereof, while anything lower makes a no-swap environment (might as well for VMs) just have inaccessible RAM left on the table.<br>
+<p>
+And if there's some program that refuses to load because it relies on the page-fault handler as a lazy sparse array implementation, honestly I wrap that in it's own VM at that point.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942000/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942052"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2023 12:47 UTC (Fri)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/942052/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That “large enough” swap can easily go into hundreds of gigabytes for a pretty normal server, though. Anything that forks (e.g. Apache) eats into the overcommit space really fast.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942052/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942375"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2023 10:17 UTC (Tue)
+                               by <b>WolfWings</b> (subscriber, #56790)
+                              [<a href="/Articles/942375/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Large enough" hasn't been "RAM * 1.5" for years if not decades at this point. Any articles claiming that are cargo-culting a recommendation from many years ago when 1GB was a lot of RAM, much like generating CSRs with SNI records in OpenSSL haven't needed custom .cnf files for a very long time now but many tutorials still go that route.<br>
+<p>
+Even MS starts at "RAM / 8, max 32GB" for their page file size recommended minimum. So beyond 256GB of RAM the baseline swap space doesn't go up any further. And even if you leave it on auto it will upper-limit it to 1/8th of the system volume size, and quite often large servers such as you're describing will have a separate boot volume of say a pair of RAID-1 480GB drives in my experience and the main data on separate volumes, so that puts a hard cap of 60GB virtual memory even if the server has over a terabyte of RAM.<br>
+<p>
+<a href="https://learn.microsoft.com/en-us/troubleshoot/windows-client/performance/how-to-determine-the-appropriate-page-file-size-for-64-bit-versions-of-windows">https://learn.microsoft.com/en-us/troubleshoot/windows-cl...</a><br>
+<p>
+The only time 'full RAM' sizes figure into things is if you expect and want to capture a full memory dump for either crash debugging or uncompressed hibernation. Even Ubuntu recommends (and I quote) round(sqrt(RAM)) so 1TB = 32G of swap... hey there's that number again.<br>
+<p>
+<a href="https://help.ubuntu.com/community/SwapFaq">https://help.ubuntu.com/community/SwapFaq</a><br>
+<p>
+And disabling overcommit doesn't mean an allocation is instantly faulted in and removed from page cache. That's two separate things. Disabling overcommit just prevents the kernel from offering more pages than exist on the system, but doesn't change how those pages are actually managed. Copy-on-write still applies, etc.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942375/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor942020"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2023 5:59 UTC (Fri)
+                               by <b>timrichardson</b> (subscriber, #72836)
+                              [<a href="/Articles/942020/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Actually by default, windows and macos grow swap dynamically, which is a version of over-commit, I would say. <br>
+You can easily do the same thing in linux; in debian/linux use the package swapspace. <br>
+<p>
+Swap is always slow if it is being used to consistently compensate for lack of ram. Windows and macos can't magically make it faster. The drama for desktop users with linux is the oom killer. The kernel one was very slow to act, at least before MGLRU, in which case you can face minutes, maybe hours, of an effectively frozen system while the OOM killer waits to see what happens. <br>
+<p>
+In my stress testing, MGLRU radically improves kernel OOM handling for desktop users. user space killers are hard too; the systemd attempt based on memory pressure seems very, very hard to configure properly for the desktop, it either acts too late or kills too early. I gave up on it. I think tweaking systemd-oomd for a good out of the box experience for desktop users is going to be very, very hard.  <br>
+<p>
+I found the best option for desktop use where there is room for a swapfile on low memory systems is zswap, dynamic swap via swapspace, no user user-space killer and MGLRU activated. I don't think there is a single distribution which defaults to that combination.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942020/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942140"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2023 21:00 UTC (Fri)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/942140/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I found the best option for desktop use where there is room for a swapfile on low memory systems is zswap, dynamic swap via swapspace, no user user-space killer and MGLRU activated. I don't think there is a single distribution which defaults to that combination.</span><br>
+<p>
+I believe Arch does almost that, modulo swapspace:<br>
+<p>
+$ grep -E '(LRU_GEN|ZSWAP)' config<br>
+CONFIG_ZSWAP=y<br>
+CONFIG_ZSWAP_DEFAULT_ON=y<br>
+# CONFIG_ZSWAP_COMPRESSOR_DEFAULT_DEFLATE is not set<br>
+# CONFIG_ZSWAP_COMPRESSOR_DEFAULT_LZO is not set<br>
+# CONFIG_ZSWAP_COMPRESSOR_DEFAULT_842 is not set<br>
+# CONFIG_ZSWAP_COMPRESSOR_DEFAULT_LZ4 is not set<br>
+# CONFIG_ZSWAP_COMPRESSOR_DEFAULT_LZ4HC is not set<br>
+CONFIG_ZSWAP_COMPRESSOR_DEFAULT_ZSTD=y<br>
+CONFIG_ZSWAP_COMPRESSOR_DEFAULT="zstd"<br>
+# CONFIG_ZSWAP_ZPOOL_DEFAULT_ZBUD is not set<br>
+# CONFIG_ZSWAP_ZPOOL_DEFAULT_Z3FOLD is not set<br>
+CONFIG_ZSWAP_ZPOOL_DEFAULT_ZSMALLOC=y<br>
+CONFIG_ZSWAP_ZPOOL_DEFAULT="zsmalloc"<br>
+CONFIG_LRU_GEN=y<br>
+CONFIG_LRU_GEN_ENABLED=y<br>
+# CONFIG_LRU_GEN_STATS is not set<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942140/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor942315"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2023 15:47 UTC (Mon)
+                               by <b>patrakov</b> (subscriber, #97174)
+                              [<a href="/Articles/942315/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; In my stress testing, MGLRU radically improves kernel OOM handling for desktop users</span><br>
+<p>
+For desktop systems this is true. The reason is that MGLRU protects the working set, and the interactive applications that the user cares about are exactly the working set.<br>
+<p>
+On servers the situation is different. During a disaster, the sysadmin cares about the ability to ssh in, but, during normal operation, nobody is logged in, so sshd is an unused daemon, which gets evicted first and needs to be paged in. In other words, parts of sshd that are used only during the login procedure are not a part of the working set and are not protected by MGLRU. Result: existing connections with e.g. top (if they exist) have good response time, but new connections time out because the system cannot load the swapped-out parts of sshd fast enough.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942315/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942340"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2023 20:41 UTC (Mon)
+                               by <b>atnot</b> (subscriber, #124910)
+                              [<a href="/Articles/942340/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'd strongly recommend setting a memory.min setting on vital system services like sshd for this reason:<br>
+<p>
+<span class="QuotedText">&gt; Hard memory protection. If the memory usage of a cgroup is within its effective min boundary, the cgroup's memory won't be reclaimed under any conditions. If there is no unprotected reclaimable memory available, OOM killer is invoked. Above the effective min boundary (or effective low boundary if it is higher), pages are reclaimed proportionally to the overage, reducing reclaim pressure for smaller overages.</span><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942340/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor942032"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2023 8:36 UTC (Fri)
+                               by <b>eduperez</b> (guest, #11232)
+                              [<a href="/Articles/942032/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; To me, the intuitive and obvious approach is that programs should be written in the first place to gracefully handle situations where malloc returns NULL</span><br>
+<p>
+I do not think that the main argument in favor of overcommit are those programs that cannot handle a "no" from malloc; returning a valid pointer, to a memory that cannot be used because there is no more memory available, is just delaying the problem. Besides, that situation should be easy to take into account by the program, in most cases.<br>
+<p>
+The main argument in favor of overcommit are those programs that allocate far more memory than they really need, because (in some use cases) it is easier to allocate a large memory block, and only use some parts of it, rather than allocate multiple smaller memory blocks. With overcommit, the kernel can delay the allocation until the program really uses each block; in many cases, most of that memory will never have to be allocated at all, and can be used by other programs.<br>
+<p>
+In general, OOM kicks in when a program uses a memory block, not during the malloc.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942032/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942743"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2023 4:18 UTC (Fri)
+                               by <b>ssmith32</b> (subscriber, #72404)
+                              [<a href="/Articles/942743/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Most of the programs I've seen that try to do that have decided based on some wonky micro benchmark that They Know Best, and My Memory Allocator Algorithm Idea Is Just So Awesome, so it's time to take control of their destiny, and ignore the hard work that went into the standard allocator(s).<br>
+<p>
+So, they try to play games to work around the actual memory allocator(s), blissfully ignorant of the fact they've accomplished exactly zero, and the actual memory allocator just effectively ignores their requests, and goes ahead and allocates when it decides is best.<br>
+<p>
+Seems odd that we should worry about that scenario, but I can see why it happens, from both sides. E.g. Java programs working around the GC, which is on top of the userspace allocator, which is on top of the kernel allocator. They'd be better off with not Java, or understanding and configuring the many layers beneath them.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942743/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor942085"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2023 13:28 UTC (Fri)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/942085/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; a program should only ever get OOM-killed if that program is the one trying to allocate memory in the first place.</span><br>
+<p>
+A program allocating all memory it can and just sitting on it can then cause tiny utilities to fail to allocate a reasonably sized request.<br>
+<p>
+There's actually a leak in macOS of Mach ports we're running into on our CI machines that causes process launch to fail, so any kind of remediation without an already-open System Monitor is DOA (e.g., SSH can't launch `zsh` for any kind of administration or even investigation).<br>
+<p>
+I think that some more structured decision making behind which process needs to go is better than "whoever happens to get unlucky". Not that Linux's OOM killer is a *good* implementation, but I'd much rather something other than the processes I'm using to try and wrangle things be eligible for being next in line.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942085/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor942178"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2023 14:10 UTC (Sat)
+                               by <b>vadim</b> (subscriber, #35271)
+                              [<a href="/Articles/942178/">Link</a>] (12 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Overcommit doesn't exist because of malloc(). It exists because of fork()<br>
+<p>
+So for instance, right now I have a firefox process taking 6 GB RAM. Lots of stuff running. If it wanted to fork(), this means the allocation of 6 GB RAM more. If it wants to say, run a tiny commandline tool then the outcome would be that you'd need to satisfy the demand for 12 GB RAM for a few ms, until execve freed the additional 6GB.<br>
+<p>
+Windows doesn't have this issue because it doesn't have fork(). A process just starts from scratch, so this intermediary step of huge process having two copies of itself is never a thing that happens.<br>
+<p>
+So a solution would be to kill off fork(), but it's much easier said than done. You could deal with the execve case easily, but that leaves fork() for multiprocessing. Right now I have 65 firefox processes running, which without overcommit would take about 250 GB RAM.  Fixing this would be very difficult because it'd be an entirely new model. You might have to fork earlier, or explicitly mark memory as unshared, or something else along those lines.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942178/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942184"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2023 16:02 UTC (Sat)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/942184/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, do programs actually still use fork()?<br>
+There is vfork(), and clone() with all its flags and stuff to avoid a memory COW duplication.<br>
+COW is still kind of expensive, because it requires page table duplication. So it's worth avoiding, even without overcommit in mind.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942184/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942189"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2023 17:05 UTC (Sat)
+                               by <b>vadim</b> (subscriber, #35271)
+                              [<a href="/Articles/942189/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+vfork() blocks the parent. I don't think much uses that. <br>
+<p>
+clone() is Linux specific and thus non-portable, and much more complicated to use than fork(). I'm sure there's stuff that uses it, but I think most things just won't bother without a good reason.<br>
+<p>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942189/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942192"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2023 17:42 UTC (Sat)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/942192/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; vfork() blocks the parent. I don't think much uses that. </span><br>
+<p>
+Well, it blocks until the child calls execve(). Which is the only thing the child is supposed to do. That takes a microsecond or so (Plus two context switches).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942192/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942208"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2023 20:32 UTC (Sat)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/942208/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Well, it blocks until the child calls execve(). Which is the only thing the child is supposed to do.</span><br>
+<p>
+Well, processes almost always do other thing like close FDs, setup pipes, change permissions, configure signals, configure network/pid/ipc namepsaces, etc. The fact you need to actually do things between the fork() and execve() is why stuff like posix_spawn() never goes anywhere. There's an awful lot of state that gets inherited and you need to be able to manipulate all of it before starting the new process.<br>
+<p>
+Ideally you'd like a way to create a new (empty) process and be able to manipulate its execution state using the standard syscalls without actually forking and then at the last moment kick it off with the new ELF image directly. Probably some smart cookie has designed such an interface, but I don't see it taking off any time soon.<br>
+<p>
+Maybe an execve() with an io_uring-like list of syscalls to execute in the new process? Or via BPF?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942208/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942210"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2023 21:03 UTC (Sat)
+                               by <b>izbyshev</b> (subscriber, #107996)
+                              [<a href="/Articles/942210/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Well, processes almost always do other thing like close FDs, setup pipes, change permissions, configure signals, configure network/pid/ipc namepsaces, etc.</span><br>
+<p>
+Technically, all these things are the kernel state, not the libc state, so they can be configured after vfork() via direct syscalls without ever touching libc. But this is rarely a good option for a typical application because there are some footguns with direct syscall usage, as well as with vfork() itself.<br>
+<p>
+<span class="QuotedText">&gt; Maybe an execve() with an io_uring-like list of syscalls to execute in the new process? Or via BPF?</span><br>
+<p>
+This has been discussed: <a href="https://lwn.net/Articles/908268">https://lwn.net/Articles/908268</a>. No news after that, I'm afraid.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942210/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor942217"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2023 3:01 UTC (Sun)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/942217/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  Well, processes almost always do other thing like close FDs, setup pipes, change permissions, configure signals, configure network/pid/ipc namepsaces, etc. </span><br>
+<p>
+For 99% of cases none of that is needed.<br>
+<p>
+<span class="QuotedText">&gt; Maybe an execve() with an io_uring-like list of syscalls to execute in the new process? Or via BPF?</span><br>
+<p>
+Ideally? Create a process in a suspended state, returning its file descriptor, then poke at it with process management functions that accept FDs, and finally let it continue.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942217/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2023 16:33 UTC (Mon)
+                               by <b>ibukanov</b> (guest, #3942)
+                              [<a href="/Articles/942317/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One does not even need to extends kernel API with syscalls that takes a process handle. Just have a single api to set the process handle on the current thread the following APIs will use. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942319"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2023 16:48 UTC (Mon)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/942319/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oh man, that sounds like quite a footgun. Error paths forgetting to restore it, what about other threads, etc. But I guess that's nothing new to those coding close to the kernel. Are there any other kinds of syscalls that can manipulate a scoped resource like that (I'm excepting intrinsic properties like pid, tid, etc. here…I suppose `cwd` is such a resource, but that feels more user-y than kernel-y to me)?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942319/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor942206"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2023 20:50 UTC (Sat)
+                               by <b>izbyshev</b> (subscriber, #107996)
+                              [<a href="/Articles/942206/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Well, do programs actually still use fork()?</span><br>
+<p>
+Last time I checked the situation across the languages was the following:<br>
+<p>
+* musl and modern glibc implement posix_spawn() via vfork().<br>
+* OpenJDK has been using vfork() by default since forever.<br>
+* Modern .NET (nee .NET Core) switched to vfork() at some point.<br>
+* CPython uses vfork() in subprocess on Linux by default since 3.10 (and can use posix_spawn() in some non-default cases since 3.8).<br>
+* Go uses vfork()-equivalent clone(CLONE_VM|CLONE_VFORK).<br>
+* IIRC Rust uses posix_spawn() with a fork() fallback for cases whey they need something not supported by the former.<br>
+<p>
+So it's feasible to avoid fork() nowadays in most cases.<br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942206/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942320"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2023 16:59 UTC (Mon)
+                               by <b>ibukanov</b> (guest, #3942)
+                              [<a href="/Articles/942320/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the info!<br>
+<p>
+But then one should be able disable overcommit on Linux and things will work since most apps use vfork and that does not require for the kernel to reserve the memory as the child shares the memory with the parent until exec. Or have I missed  something?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942320/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942348"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2023 22:37 UTC (Mon)
+                               by <b>izbyshev</b> (subscriber, #107996)
+                              [<a href="/Articles/942348/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; But then one should be able disable overcommit on Linux and things will work since most apps use vfork</span><br>
+<p>
+While vfork() is used behind the scenes in many languages, I'd be surprised if most C/C++ programs migrated from fork(). And yes, posix_spawn() is suitable in many cases, but it still lacks portable options for some trivial stuff like changing the current directory (glibc and musl have posix_spawn_file_actions_addfchdir_np() extension for that). One could use a simple wrapper executable to tweak the child attributes and then execve() to the real program, but all of this is annoying.<br>
+<p>
+So I'd expect that whether disabling overcommit is fine or not still depends on your set of apps heavily.<br>
+<p>
+And of course, even if fork() had been the main reason to default to overcommit, there is stuff like mmap'ing lots of memory (without MAP_NORESERVE) and then not touching most of it, like those sparse data structures that people mentioned in the comments. Hyrum's law means that after all these years somebody definitely relies on this.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942348/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor942190"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2023 18:53 UTC (Sat)
+                               by <b>atnot</b> (subscriber, #124910)
+                              [<a href="/Articles/942190/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The great irony is that for all of the costs it imposes on the OS design, fork() and friends are more or less irreparably broken in any presence of threading or locks or signals i.e. in any modern program. Unless your process has been delicately set up for it, the only thing you can really safely do post fork is destroy the current context that you just worked so hard to duplicate by calling execve and friends. All for something that wouldn't be too hard to achieve by just sharing memory manually.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942190/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor942322"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2023 17:22 UTC (Mon)
+                               by <b>ibukanov</b> (guest, #3942)
+                              [<a href="/Articles/942322/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Windows and MacOS by default use memory compression that handles out-of memory much gracefully compared with swapping to slow or even not-so-fast SSD, while with many Linux distros the compression has to be explicitly enabled. Plus Linux has not one, but two memory compressors, zram and zswap, with each having plusses and minuses with the end result one may even need to enable and carefully configure both. Plus when the compression is enabled, it is not configured with good defaults. Like not using lz4 or zstd compression algorithms, not tuning swap look ahead etc.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942322/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942388"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2023 13:36 UTC (Tue)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/942388/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Plus Linux has not one, but two memory compressors, zram and zswap, with each having plusses and minuses with the end result one may even need to enable and carefully configure both.</span><br>
+<p>
+What are their plusses and minuses? What is the reason one might need to configure _both_?<br>
+<p>
+<span class="QuotedText">&gt; Plus when the compression is enabled, it is not configured with good defaults. Like not using lz4 or zstd compression algorithms, not tuning swap look ahead etc.</span><br>
+<p>
+Could you elaborate?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942388/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor942422"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2023 16:36 UTC (Tue)
+                               by <b>ibukanov</b> (guest, #3942)
+                              [<a href="/Articles/942422/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+See <a href="https://linuxreviews.org/Zram">https://linuxreviews.org/Zram</a> and <a href="https://www.reddit.com/r/Fedora/comments/mzun99/new_zram_tuning_benchmarks/">https://www.reddit.com/r/Fedora/comments/mzun99/new_zram_...</a> for a good overview and benchmarks.<br>
+<p>
+My anecdotal experience is that when the memory usage is bursty with only occasionally exceeding the total RAM by 20-30% (like when compiling and linking many things in parallel), lz4 performs better then zstd. Otherwise zstd is abetter choice and its pity that is not used by default.<br>
+<p>
+Also note that with a good modern SSD that has sustained read-write speed of 3 GB/s or more with hardware encryption on and does not suffer from persistent writing as in past it does not make sense to use compressed memory.  Even with lz4 and multiple parallel compression the SSD will be faster and leave CPU available to do the real job. But if one does not trust hardware encryption, then zram with zstd or lz4 is the way to go.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/942422/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor943233"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Out-of-memory victim selection with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 31, 2023 17:26 UTC (Thu)
+                               by <b>tuna</b> (guest, #44480)
+                              [<a href="/Articles/943233/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"The handling of out-of-memory situations is one of the few things I still believe Windows does better than Linux, from my personal user experience; this is across Debian (my current go-to), Arch, CentOS 5-7 and a handful of other distros."<br>
+<p>
+Fedora (and other distros) have put in a lot of work of improving the OOM behavior in desktop mode. Maybe you could try one of those and see if they behave better?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/943233/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor944198"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Turn it sideways (Out-of-memory victim selection with BPF)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2023 16:47 UTC (Mon)
+                               by <b>fest3er</b> (guest, #60379)
+                              [<a href="/Articles/944198/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      It occurs to me that the problem could be turned on its side. Instead of killing a random process, implement per-process swap space that is in addition to standard swap.<br></br>
+
+The kernel has access to 'everything', so when there is memory pressure:<ol><li>Find the  process to bully, preferably one that is growing the fastest or uses the most memory. If it has a process swap file, skip to step 4.
+<li>Find a FS that has, mmm, 10x more free space than memory requested <i>and</i> at least 10% available.
+<li>Create a contiguous swap file on that FS for the selected process, at 4x the requested space.
+<li>Page out (2x requested memory) of the process to its swap file, then complete the memory request.
+<li>Going forward, when that process wants more RAM, grow its swap space as needed and page more of it out.
+<li>When memory pressure eases, page other processes back in from their swap files as needed.
+<li>If a process' swap file hasn't been read from or written to for a minute or five and is (nearly) empty (basically use-once code/data and not much of anything else), migrate the contents to the system swap and remove the process' swap file.
+<li>When the process exits, clear and delete all of the swap spaces attached to it.
+</ol>
+
+Per-process swap space could solve several problems. The whole system wouldn't necessarily slow down because one process is using tremendous amounts of memory and disk caching would be less affected. Huge processes would largely affect only themselves.
+
+
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944198/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

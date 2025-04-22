@@ -1,0 +1,1298 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Per-file OOM badness [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/896738/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/896898/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/896738/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Per-file OOM badness</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 2, 2022</br>
+           </div>
+The kernel tries hard to keep memory available for its present and future
+needs.  Should that effort fail, though, the tool of last resort is the
+dreaded out-of-memory (OOM) killer, which is tasked with killing processes
+on the system to free their memory and alleviate the problem.  The results
+of invoking the OOM killer are never going to be good, but they can be
+distinctly worse if the wrong processes are chosen for an untimely end.  As
+one might expect, the effort to properly choose the right processes is an
+ongoing effort.  Most recently, Christian
+König has proposed <a
+href="/ml/linux-kernel/20220531100007.174649-1-christian.koenig@amd.com/">a
+new mechanism</a> to address a blind spot in the OOM killer's
+deliberations.
+<p>
+When the system runs out of memory, the OOM killer's job is to try to
+resolve the problem while causing the least possible amount of collateral
+damage; a number of heuristics have been applied to the victim-choosing
+logic toward that end.  One obvious rule is that it is generally better to
+kill fewer processes than many, and the way to do that is to select the
+processes that are currently consuming the most memory.  Often, a single
+out-of-control process is responsible for the problem in the first place;
+if that process can be identified and killed, the system can get back into
+a more stable condition.
+<p>
+The OOM killer, thus, scans through the set of running processes to find
+the most interesting target.
+At the core of this calculation is a function called <a
+href="https://elixir.bootlin.com/linux/v5.18.1/source/mm/oom_kill.c#L192"><tt>oom_badness()</tt></a>,
+which sums up the amount of memory (and swap space) being used by a
+candidate process.  That sum is then adjusted by the process's
+<a
+href="https://docs.kernel.org/filesystems/proc.html#chapter-3-per-process-parameters"><tt>oom_score_adj</tt></a>
+value (which is a knob that an administrator can 
+tweak to direct the OOM-killer's attention toward or away from specific
+processes) before being returned as the process's score.  The process with
+the highest score as determined by this function will be the first on the
+chopping block.  Any process's score can be seen at any time by reading its
+<tt>oom_score</tt> value from its <tt>/proc</tt> entry.
+<p>
+One problem with this algorithm, as identified by König, is that
+<tt>oom_badness()</tt> does not take into account all of the memory used by
+a process.  Specifically, memory associated with files is not counted;
+consider, for example, any extra memory that a device driver must allocate
+when a device special file is opened and operated upon.  For
+some workloads, this memory can be significant, with the result that the
+processes accounting for the most 
+memory use might not look like attractive OOM-killer targets.
+<p>
+As a simple
+example, he said in the patch-series cover letter, a malicious process can
+call <a
+href="https://man7.org/linux/man-pages/man2/memfd_create.2.html"><tt>memfd_create()</tt></a>,
+then just write indefinitely to the resulting memfd; the memory consumed by
+the memfd will not be seen as belonging to the offending process so, when
+the memfd ends up consuming all of the available memory, the OOM killer
+will pass over that process.  This sequence "<q>can bring down any standard
+desktop system within seconds</q>".
+Another problem area, he said, is graphics applications that allocate
+significant amounts of memory within the kernel for graphical resources.
+<p>
+The solution is to give the OOM killer visibility into the memory resources
+that are consumed in this way.  That, in turn, involves adding yet another
+member to the ever-growing <a
+href="https://elixir.bootlin.com/linux/v5.18.1/source/include/linux/fs.h#L1957"><tt>file_operations</tt>
+structure</a>:
+<p>
+<pre>
+    long (*oom_badness)(struct file *file);
+</pre>
+<p>
+Documentation is lacking, but the intent seems to be that this function, if
+it exists, should return the amount of extra memory attached to the given
+<tt>file</tt>, 
+in pages.  This function will be called from within the global
+<tt>oom_badness()</tt> function
+to take that extra memory usage into account; if the <tt>file</tt> involved
+is shared between processes, the memory usage will be divided equally among
+those processes.
+<p>
+Implementations of the new function have been added to the shared-memory
+filesystem code, the DMA-buf subsystem, and to most graphics drivers.  With
+this mechanism in place, the system has a better idea of where the OOM
+killer's wrath should be directed to maximize the chances of freeing up
+significant amounts of memory and bringing the system back to a stable
+state.
+<p>
+Of course, the hazards of any new heuristic can be seen in this claim in
+the cover letter: accounting for this memory, König says, provides "<q>a
+quite a bit better system 
+stability in OOM situations, especially while running games</q>".
+Accounting for memory used by graphics drivers is likely to point the
+finger at graphics-intensive applications — games, for example — as the
+source of an out-of-memory problem.  Having the OOM killer take its
+vengeance on that game may restore the system, but the user, whose nearly
+complete quest would be abruptly terminated thereby, might be forgiven for
+thinking that the situation was better before.
+<p>
+In other words, there is still no truly good solution to the OOM problem
+other than not getting into that situation in the first place.  After all,
+the OOM killer is still, as Andries Brouwer <a
+href="/Articles/104185/">suggested in 2004</a>, like choosing passengers to
+toss out of a crashing aircraft.  When the
+system runs out of memory anyway, though, it is important to free memory
+quickly, and that is most likely to happen if the OOM killer has an
+accurate picture of which processes are using the most memory.  Properly
+accounting for memory attached to files seems like a useful step in that
+direction.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Out-of-memory_handling">Memory management/Out-of-memory handling</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/896738/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor896928"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2022 18:40 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/896928/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; As a simple example, he said in the patch-series cover letter, a malicious process can call memfd_create(), then just write indefinitely to the resulting memfd; the memory consumed by the memfd will not be seen as belonging to the offending process so, when the memfd ends up consuming all of the available memory, the OOM killer will pass over that process. This sequence &quot;can bring down any standard desktop system within seconds&quot;. Another problem area, he said, is graphics applications that allocate significant amounts of memory within the kernel for graphical resources.</font><br>
+<p>
+That does not sound like a fixable problem in the general case. Can&#x27;t the malicious process just create files in /dev/shm (either directly, or via shm_open(3)) instead? I find it hard to believe that the kernel can keep track of who created those files, and OOM killing the process won&#x27;t even clean them up anyway.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896928/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor896933"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2022 20:00 UTC (Thu)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/896933/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Can&#x27;t the malicious process just create files in /dev/shm (either directly, or via shm_open(3)) instead?</font><br>
+<p>
+Files created in /dev/shm/ reside in a named tmpfs filesystem, which sets an upper bound on the memory consumed (50% of RAM by default—Debian doesn&#x27;t appear to override this). The files created with memfd_create() are also tmpfs files, from an internal, unmounted tmpfs, but they behave more like anonymous shared memory mappings (mmap() with MAP_ANONYMOUS)—so far as I can tell the limits on /dev/shm/ do not apply. There is a limit on the total amount of shared memory, the kernel.shmall sysctl knob, which I think would also affect memfd_create(), but this defaults to &quot;unlimited&quot; (~2**64 pages).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896933/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor896932"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2022 19:29 UTC (Thu)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/896932/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It&#x27;s unfortunate that it&#x27;s impossible to say &quot;this application will only ever need X memory and no more&quot; in the general case. Then you could just assign memory to tasks, and stop adding tasks when you run out of memory. Essentially, no dynamic allocation.<br>
+<p>
+In reality, the amount of memory is tied to subtleties in the input. If you ask them to come up with a number, programmers usually just guess the amount and then the application occasionally runs out of memory and dies anyway. And it also dies in cases when borrowing some memory from the rest of the system would have saved it. Ask someone about setting container memory quotas sometime.<br>
+<p>
+Maybe it&#x27;s possible to have a compiler say &quot;worst_case_mem_used=f(num_inputs1, num_inputs2)&quot; and assign input constraints, but I doubt that will work in general.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896932/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor896939"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2022 20:36 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/896939/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It depends on how the application is architected, and to some extent, on what it is designed to do. It is often possible to apply one or more of these strategies:<br>
+<p>
+1. The inputs are normally small (and should always be small). Place an upper bound on how large they can be.<br>
+2. The inputs are normally large (or at least, they can be large). Divide the input into constant-size or bounded-above-size pieces and process each piece independently (in separate processes or on separate machines). These separate tasks may need to coordinate with one another, so this is often a more complex design, but it&#x27;s also more scalable.<br>
+3. The application is a cache or denorm layer. Evict data in an LRU pattern, or whatever other pattern your testing shows is optimal.<br>
+4. The application is a storage layer (i.e. an RDBMS or something like that). Generally speaking, a properly-designed storage layer should be able to persist or retrieve (as a stream) a larger amount of data than what fits in memory, but certain operations (e.g. sorting) may require moving data back and forth between storage and memory repeatedly, so make indices and benchmark your queries appropriately.<br>
+5. The problem is not the size of each input, but the sheer number of inputs (e.g. incoming connections). Place a limit on how large your event queue is allowed to get, and drop or refuse excess inputs. This must be combined with a coherent load-balancing strategy, so that inputs can be redirected to less-overloaded tasks. People often object to this on the grounds that dropping inputs is an unacceptable loss of reliability. In some contexts, that&#x27;s a valid concern, but if you&#x27;re just running a regular web service over the internet, you already have much worse unreliability at other layers before the traffic even hits your box. Be realistic about what you can accomplish in a real-world setting.<br>
+<p>
+Finally, load test it and record how much memory is actually consumed in a worst-case overload scenario. Repeat those load tests periodically, or at the very least look at your daily peak traffic and how it correlates with your memory consumption, and try to figure out how much worse it could get. That&#x27;s not perfect, but you can add a safety margin and call it close enough.<br>
+<p>
+At Google, if you use more memory than you asked for, we just kill the whole container. There are tools to help figure out how much memory you should have asked for in the first place, and the memory limit can be quickly or even automatically scaled up if it becomes necessary, but we have been quite successful at saying &quot;this application will only ever need X memory&quot; for a wide variety of applications.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896939/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor896943"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 2, 2022 21:19 UTC (Thu)
+                               by <b>atnot</b> (subscriber, #124910)
+                              [<a href="/Articles/896943/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is actually a thing in many safety-critical RTOSes. All resources like processes, tasks, memory, etc. are allocated at compile time and there is no way to create any more. Of course that degree of inflexibility is rarely desirable on general purpose machines.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896943/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor896952"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2022 3:41 UTC (Fri)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/896952/">Link</a>] (29 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; In other words, there is still no truly good solution to the OOM problem</font><br>
+<p>
+Sure there is.  It involves applications being written so as to checkpoint important data regularly.  i.e. they should be designed to crash.<br>
+<a href="https://lwn.net/Articles/191059/">https://lwn.net/Articles/191059/</a><br>
+<p>
+Seems to work OK on Android - though some apps are certainly better than others.<br>
+My web-browser comes up much where it was before a crash, when that happens.<br>
+I don&#x27;t play &quot;games&quot; (my quest is for better code :-), but I have painful memories of my children on their GameBoy saying &quot;I can&#x27;t save just now&quot;, and how much that annoyed me.  You should *always* be able to save, and you should *never* have to because it should be automatic.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896952/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor896953"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2022 5:23 UTC (Fri)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/896953/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not all games are necessarily amenable to perfect autosaving, although I agree that it should be implemented where feasible. But I can think of quite a few games where it would either detract from the gameplay, or at the very least would provide minimal or no improvement over the status quo:<br>
+<p>
+* Undertale (the save mechanic exists in-universe, and removing it would completely wreck the backstory).<br>
+* Outer Wilds (no traditional progression mechanics such as leveling up or collecting items; you progress by learning more about the world and its history, so there&#x27;s nothing to save other than a log of your discoveries).<br>
+* Most visual novels (usually, they automatically track which bits you&#x27;ve seen and let you skip past those; saving is at best a convenience function in most cases).<br>
+* Most turn-based RPGs (saving in-battle would be a Bad Idea because battles typically have a lot of highly complicated state that the player needs to be reminded of when they resume the game - better to just restart the battle from scratch since it&#x27;s probably only a few minutes long anyway).<br>
+* Most racing games (individual races are typically a few minutes long, it&#x27;s just not worth it).<br>
+* Any game that you can lose, and that doesn&#x27;t have permadeath (if an autosave happens right before the player loses, the game may become soft-locked, so *some* amount of manual save-loading is required to exist, or else the game has to be very conservative about when and where it autosaves, and either way, the human playing the game has to think about what has or has not been saved at any given time).<br>
+<p>
+Finally, I feel obligated to point out that kids know perfectly well when they can and cannot save. Depending on their age/maturity, they are either deliberately choosing to enter a section of the game where saving is not supported, or they are failing to plan ahead. I don&#x27;t presume to tell parents how to raise their children, but in either case, you could choose to use this as an object lesson, if you felt it appropriate. For older or more responsible/mature children, it might also help to give them a 10-minute warning, if feasible. But, obviously, it&#x27;s up to you to decide what works for your kids and your situation.<br>
+<p>
+(I suppose some people might argue that none of the above games ought to exist. I shudder to think of what a boring world that would be!)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896953/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor896954"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2022 5:46 UTC (Fri)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/896954/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; or they are failing to plan ahead</font><br>
+<p>
+Yep, that&#x27;s the one<br>
+<p>
+<font class="QuotedText">&gt; you could choose to use this as an object lesson</font><br>
+<p>
+Indeed!  And the lesson &quot;the world is deliberately designed to manipulate your behaviour, to your own determent&quot; can be a valuable one.  Still annoying though.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896954/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor897058"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2022 21:56 UTC (Fri)
+                               by <b>bartoc</b> (guest, #124262)
+                              [<a href="/Articles/897058/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In fairness you _can_ usually save in outer wilds by finding some way to kill yourself :D<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897058/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor897307"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2022 14:56 UTC (Wed)
+                               by <b>azumanga</b> (subscriber, #90158)
+                              [<a href="/Articles/897307/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One solution to (I think) all the autosaving issues you raised, which would still handle OOM / crash / reboots is autosaves which are constantly updated and cannot be copied.<br>
+<p>
+This means you can&#x27;t use the saves to retry, just pick up where you left off. To me that doesn&#x27;t feel like it would upset any of the games you discuss, any more than just &quot;leaving them paused overnight&quot; (which I used to do on consoles back in my youth).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897307/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897310"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2022 16:13 UTC (Wed)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/897310/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; autosaves which are constantly updated and cannot be copied</font><br>
+<p>
+Using some sort of hardware-backed DRM, presumably? Or a mandatory connection to a server? Neither is really acceptable in a single-player game, but I don&#x27;t see how you could otherwise prevent someone from killing the program to simulate a crash and then making a backup copy of the save—or perhaps the entire game if necessary—which could be restored at will to revert back to that point.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897310/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897312"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2022 16:57 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/897312/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Pause the game, snapshot your VM, and continue. Completely out of the game&#x27;s hand, and you&#x27;ve just saved a checkpoint.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897312/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor896969"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2022 12:06 UTC (Fri)
+                               by <b>tao</b> (subscriber, #17563)
+                              [<a href="/Articles/896969/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+&quot;You should always be able to save&quot; kind of ignores dedicated multiplayer games, but also this whole new (in my opinion rather annoying) trend that so many games try to squeeze in multiplayer even when the game suffers from it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896969/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor897114"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2022 22:46 UTC (Sun)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/897114/">Link</a>] (21 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A migration to $cloudDocuments at $BIGCORP found a minority of people upset by the &quot;autosave&quot; default. Further investigation showed they were using the &quot;Save&quot; button as an archaic form of version control / undo feature restricted to a single version... <br>
+<p>
+(true story)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897114/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897118"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2022 23:16 UTC (Sun)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/897118/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What ..... do you mean that &quot;autosave&quot; actually saved the document just like clicking the &quot;save&quot; button would?<br>
+That is totally broken.<br>
+Deliberate-save and auto-save are both important, but they are different.<br>
+<p>
+This relates to the comment by NYKevin above:<br>
+<p>
+<font class="QuotedText">&gt; if an autosave happens right before the player loses, the game may become soft-locked</font><br>
+<p>
+That is nonsense.  After a crash/power-off you should always be able to choose between what you deliberately saved (if that is ever an option, which sometimes it might not be) and what was autosaved (which must always have happened &quot;recently&quot;).<br>
+<p>
+Any other behaviour is a bug.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897118/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897121"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2022 1:47 UTC (Mon)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/897121/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As far as video games are concerned: I was specifically discussing a hypothetical in which manual saves don&#x27;t exist, and the game &quot;always&quot; saves all progress. In this context, there is simply no such thing as &quot;what you deliberately saved.&quot;<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897121/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897122"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2022 1:49 UTC (Mon)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/897122/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+(To be clear, this is a real type of saving that has actually been implemented for some games, most notably Minecraft. Minecraft gets around it because the player respawns after death, unless permadeath is enabled for that world, and so soft-locking is nearly impossible in practice. But there are many games where a respawning player would not fit the narrative or tone of the game.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897122/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor897430"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2022 18:24 UTC (Thu)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/897430/">Link</a>] (17 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+I think a better description than "archaic form of version control / undo" is "simple commit/rollback control."
+<p>
+I rely heavily on that; I'd be really pissed if a new version of a document editor started committing my work, overwriting my last good version, when I'm halfway through an update.
+<p>
+Of course, if I were a brand new user who had not yet developed the discipline of frequent checkpointing (saving), I suppose I would appreciate the system clicking "save" for me periodically, and then I could turn that feature off after I learn there's a better way.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897430/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897478"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 10, 2022 7:32 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/897478/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As someone who has (at work) found myself moving to cloud documents, yes &quot;autosave&quot; does mean &quot;update the current version of the doc&quot;, but it also means &quot;take a checkpoint&quot;, &quot;update the doc with other peoples&#x27; changes&quot;, and maybe more. It&#x27;s interesting (and actually very useful), in a meeting, having three or four people update the same document, at the same time ...<br>
+<p>
+You just need to change your mindset, although it&#x27;s also annoyingly frustrating when you want to make temporary changes, and you can&#x27;t ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897478/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor897538"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 10, 2022 14:54 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/897538/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why the need to manually checkpoint at specific times when &quot;undo&quot; checkpoints everything all the time?<br>
+<p>
+This really sounds like a niche use case, are you running a test suite on your Word-like documents?<br>
+<p>
+If you do, Word and others support versionimg now, so you can upgrade to &quot;save version&quot;, keep autosave on, not risk losing anything if your computer crashes and collaborate in real time. Welcome to the 21st century.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897538/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897560"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 10, 2022 18:48 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/897560/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Undo does not checkpoint at meaningful stages.
+<p>
+This is the scenario: I decide to restructure a table.  Five minutes into it, I figure out it's not as easy as I thought and I have just made a mess and want to go back to the original table.  I was careful not to save because I knew I might need to go back and it's a bigger risk to screw up my document because of my own miscalculation than to lose five minutes of work if the system crashes.  How many times do I click Undo to get back to where I was before I started messing with the table?  It could be dozens.  But I can easily toss out all the changes I haven't committed yet.
+<p>
+And what if the system crashes?  Now I have a corrupted table and Undo history probably won't be there after restart.
+<p>
+I work this way as a matter of course when editing almost everything -- documents, code, spreadsheets, ...  It's not a niche for me.  
+
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897560/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897575"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 10, 2022 21:05 UTC (Fri)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/897575/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just go back to the venerable 1960&#x27;s way of emulating version control: copy the table and work on the copy and delete the original if you accept it. Sure, those nerds have Git and fancy things, but they&#x27;re so hard to use; I prefer juggling these bowling balls instead.<br>
+<p>
+(There may or may not be any sarcasm here.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897575/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897579"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 10, 2022 22:05 UTC (Fri)
+                               by <b>pebolle</b> (guest, #35204)
+                              [<a href="/Articles/897579/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  (There may or may not be any sarcasm here.)</font><br>
+<p>
+But there sure was trolling.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897579/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897924"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 14, 2022 20:39 UTC (Tue)
+                               by <b>jschrod</b> (subscriber, #1646)
+                              [<a href="/Articles/897924/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why? Directly below, marcH recommended that method.<br>
+<p>
+I&#x27;m glad that I still use emacs for documents, which has both autosave and a different &quot;real&quot; save action. It&#x27;s much more flexible.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897924/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897945"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 14, 2022 23:59 UTC (Tue)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/897945/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Of course making copy seems very &quot;primitive&quot; compared to proper version control.<br>
+<p>
+Yet a copy may be faster and more convenient if it&#x27;s only for a very short term and throw-away safety before doing something quick and a bit &quot;dangerous&quot;. Combined with autosave it&#x27;s also safer than holding back a manual save (no loss on crash or user error) and barely more effort. It&#x27;s not mutually exclusive with proper version control.<br>
+<p>
+The best tool for the job and manual saves offer very little advantages in very few situations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897945/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897946"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 15, 2022 0:27 UTC (Wed)
+                               by <b>jschrod</b> (subscriber, #1646)
+                              [<a href="/Articles/897946/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have to apologize for my comment that may be interpreted as a snide remark. It was not meant as that -- though, in hindsight, it looks like it does.<br>
+<p>
+Of course, making explicit copies (or intermediate explicit copies) is a most valuable tool. I use it often, myself. Involving git in that moment is too much work afterwards, frankly.<br>
+<p>
+My comment was a reaction to the opinion of pebolle that &quot;making explicit intermediate copies&quot; is a troll argument. Which it is not at all -- and I think, we agree on that. It was a spontaneous reaction and not formulated adequately, please accept my apologies.<br>
+<p>
+What irks me in this discussion: There are really experienced folks who thinks that the difference between autosave and an explicit save is not necessary; any change is immediately applied to the original document. (I experience that with Google Docs, and it&#x27;s horrible.) In our software development activities, we have now version control systems that differentiate between commit and push and allow rebasing in between. Do you remember SVN? A bad commit happened and you cannot change it because it was immediately pushed to the centreal repository. WTF? Today we have better tools.<br>
+<p>
+How can anybody who is used to such a fine and flexible software development workflow, as exemplified by git, think that it&#x27;s not necessary to have the same control over the change process of one&#x27;s document content?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897946/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897948"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 15, 2022 1:40 UTC (Wed)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/897948/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+<p>Some people here think hardly anyone benefits from explicit save and that hardly anyone wants it.  I'm not convinced anyone here knows any more than I do about what everyone wants (and <em>I</em> assume I'm far from alone in highly valuing explicit save), but here is some evidence in the form of expensive engineering that has been done to support explicit save that explicit savers are legion:
+<p>
+Products that autosave usually provide a way to turn it off.  And they usually tell you (<em>warn</em> you) that they are autosaving.
+<p>
+And here's a gem I recently discovered in Microsoft Word:  My editing session got interrupted.  When I restarted, Word said to me, "I automatically saved some of your work since you last saved.  Would you like to keep that?"  I said Hell no because I didn't know what half-baked change of mine it might have saved, but on other occasions I surely would have said yes.
+<p>
+Making a copy before starting a change and doing explicit version control with something like Git is impractical.  I sometimes hit ctl-S (Emacs ctl-X ctl-S) multiple times a minute.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897948/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897960"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 15, 2022 8:43 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/897960/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; And here&#x27;s a gem I recently discovered in Microsoft Word: My editing session got interrupted. When I restarted, Word said to me, &quot;I automatically saved some of your work since you last saved. Would you like to keep that?&quot; I said Hell no because I didn&#x27;t know what half-baked change of mine it might have saved, but on other occasions I surely would have said yes.</font><br>
+<p>
+That&#x27;s been there a while.<br>
+<p>
+The *problem* with auto-save is that I can no longer &quot;quit without saving&quot;! That is functionality I sometimes *desire*, even before I start my edit. Sometimes I want to play before starting work in earnest. I can no longer do that ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897960/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor898183"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 16, 2022 22:29 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/898183/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Making a copy before starting a change and doing explicit version control with something like Git is impractical. I sometimes hit ctl-S (Emacs ctl-X ctl-S) multiple times a minute.</font><br>
+<p>
+Automate it! (In particular, see &#x27;magit-wip-mode&#x27;.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898183/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor897958"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 15, 2022 8:21 UTC (Wed)
+                               by <b>pebolle</b> (guest, #35204)
+                              [<a href="/Articles/897958/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; My comment was a reaction to the opinion of pebolle that &quot;making explicit intermediate copies&quot; is a troll argument. </font><br>
+<p>
+My beef was the wording of marcH&#x27;s comment. It seemed chosen to trigger the recipient - whom I know to be polite and focussed on the subject at hand - into replying over the top too.<br>
+<p>
+(For the record: I actually have no opinion on the pros and cons of autosave.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897958/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor897581"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 11, 2022 0:04 UTC (Sat)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/897581/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe not &quot;niche&quot; but for sure it is not the most common activity in a text document. When undo is not enough, simply use version control or its grand daddy: make a copy. Done.<br>
+<p>
+Like it or not the &quot;save&quot; button is disappearing really fast and very few people struggle to switch to the new, more powerful and more flexible ways.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897581/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897610"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 11, 2022 12:18 UTC (Sat)
+                               by <b>rschroev</b> (subscriber, #4164)
+                              [<a href="/Articles/897610/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Like it or not the &quot;save&quot; button is disappearing really fast and very few people struggle to switch to the new, more powerful and more flexible ways.</font><br>
+<p>
+The way I see it, the new ways are more convenient for most use cases and may well be the way forward, but the old way with the save button is the one that is more powerful and more flexible (but requires the user to have a bit more discipline).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897610/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897612"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 11, 2022 13:30 UTC (Sat)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/897612/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; the new ways are more convenient for *MOST* use cases</font><br>
+<p>
+Emphasis added ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897612/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor897684"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 13, 2022 12:43 UTC (Mon)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/897684/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Of course, there&#x27;s the issue that showed up on a machine I was helping out with where MS Office lost the ability to &quot;Save As&quot; (the directory selection never showed up). This was…OK, but when it lost even &quot;Save&quot;, the only way to save work was:<br>
+<p>
+- autosave to OneDrive (could not choose a local directory AFAICT) behind a Microsoft account<br>
+- &quot;Send&quot; the document over email then save the attachment from the draft message<br>
+- reinstall MS Office (which forced an upgrade)<br>
+<p>
+There are all kinds of complexities involved in this new mechanism and I&#x27;m sure all kinds of new bugs will show up because of it too. I love how companies seem to be ensuring future prospects by deleting working code in preference for new, buggy code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897684/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897689"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">autosave</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 13, 2022 13:30 UTC (Mon)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/897689/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I love how companies seem to be ensuring future prospects by deleting working code in preference for new, buggy code.</font><br>
+<p>
+The problem, of course, is when your working code stops working because of a forced upgrade somewhere else.<br>
+<p>
+I&#x27;m now an Excel VBA programmer in practice - oh how I wish I could push all that crap into a decent database ...<br>
+<p>
+(And no, I don&#x27;t fancy the politics that would entail ...)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897689/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor896957"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2022 7:46 UTC (Fri)
+                               by <b>daenzer</b> (subscriber, #7050)
+                              [<a href="/Articles/896957/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; if the file involved is shared between processes, the memory usage will be divided equally among those processes.</font><br>
+<p>
+My reading of the patches is that it&#x27;s divided equally among all file descriptors referencing the file. So e.g. if process A has one file descriptor referencing a file and process B has two file descriptors, process A will be accounted 1/3 of the file&#x27;s memory, process B 2/3.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896957/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor896960"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Per-file OOM badness</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2022 8:07 UTC (Fri)
+                               by <b>Fowl</b> (subscriber, #65667)
+                              [<a href="/Articles/896960/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How is this memory accounted for (and limited!) in cgroups? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896960/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

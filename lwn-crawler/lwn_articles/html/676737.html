@@ -1,0 +1,613 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>DAX and fsync: the cost of forgoing page structures [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/676737/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/676233/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/676737/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>DAX and fsync: the cost of forgoing page structures</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>We're bad at marketing</b>
+<p>
+We can admit it, marketing is not our strong suit. Our strength is
+writing the kind of articles that developers, administrators, and
+free-software supporters depend on to know what is going on in the
+Linux world. Please <a href="/Promo/nsn-bad/subscribe">subscribe today</a> to help us keep doing that, and so
+we don’t have to get good at marketing.
+</blockquote>
+<div class="GAByline">
+           <p>February 24, 2016</p>
+           <p>This article was contributed by Neil&nbsp;Brown</p>
+           </div>
+<p>DAX, the support library that can help Linux filesystems provide direct
+access to persistent memory (<a
+href="https://en.wikipedia.org/wiki/Persistent_memory">PMEM</a>), has seen
+substantial ongoing development since we <a
+href="/Articles/610174/">covered it</a> nearly 18 months ago.  Its main
+goal is to bypass the page cache, allowing reads and writes to become
+memory copies directly to and from the PMEM, and to support mapping that
+PMEM directly into a process's address space with <code>mmap()</code>.
+Consequently, it was a little surprising to find that one of the challenges
+in recent months was the correct implementation of <code>fsync()</code> and
+related functions that are primarily responsible for synchronizing the page
+cache with permanent storage.</p>
+
+<p>While that primary responsibility of <code>fsync()</code> is obviated by
+not caching any data in volatile memory, there is a secondary
+responsibility that is just as important: ensuring that all writes that have
+been sent to the device have landed safely and are not still in the
+pipeline.  For devices attached using SATA or SCSI, this involves sending (and
+waiting for) a particular command; the Linux block layer provides the
+<code>blkdev_issue_flush()</code> API (among a few others) for achieving
+this.  For PMEM we need something a little different.</p>
+
+<p>There are actually two "flush" stages needed to ensure that CPU writes
+have made it to persistent storage.
+One stage is a very
+   close parallel to the commands sent by <tt>blkdev_issue_flush()</tt>.  There
+   is a subtle distinction between PMEM "accepting" a write and
+   "committing" a write.  If power fails between these events, data could
+   be lost. The necessary "flush" can be performed transparently by a
+   memory controller using  <a
+href="http://www.snia.org/sites/default/files/NVDIMM%20Messaging%20and%20FAQ%20Jan%2020143.pdf#page=8">Asynchronous
+DRAM Refresh (ADR)
+[PDF]</a>, or explicitly by the CPU using, for example,
+the new x86_64 instruction <a
+href="http://danluu.com/clwb-pcommit/"><code>PCOMMIT</code></a>.  This can be seen in the <tt>wmb_pmem()</tt> calls sprinkled
+   throughout the DAX and PMEM code in Linux; handling this stage is no
+   great burden. 
+
+<p>
+   The burden is imposed by the other requirement: the need to flush
+   CPU caches to ensure that the PMEM has "accepted" the writes. This
+   can be avoided by performing
+"<a
+href="http://stackoverflow.com/questions/37070/what-is-the-meaning-of-non-temporal-memory-accesses-in-x86">non-temporal
+writes</a>"
+to bypass the
+   cache, but that cannot be ensured when the PMEM is mapped directly into
+   applications.
+Currently, on x86_64 hardware, this requires explicitly flushing each cache
+line that might be dirty by invoking the <tt>CLFLUSH</tt> (Cache Line Flush)
+instruction or possibly a newer variant if available (<tt>CLFLUSHOPT</tt>, <tt>CLWB</tt>).
+An easy approach, referred to in discussions as the "<a
+href="http://mid.gmane.org/1446070176-14568-1-git-send-email-ross.zwisler@linux.intel.com">Big
+Hammer</a>", is to implement the <code>blkdev_issue_flush()</code> API by
+calling <tt>CLFLUSH</tt> on every address of the entire persistent memory.  While
+<tt>CLFLUSH</tt> is not a particularly expensive operation, performing it over
+potentially terabytes of memory was seen as worrisome.</p>
+
+<p>The alternative is to keep track of which regions of memory might have
+been written recently and to only flush those.  This can be expected to
+bring the amount of memory being flushed down from terabytes to gigabytes
+at the very most, and hence to reduce run time by several orders of magnitude.
+Keeping track of dirty memory is easy when the page cache is in use by
+using a flag in <code>struct&nbsp;page</code>.  Since DAX bypasses the
+page cache, there are no page structures for most of PMEM,
+so an alternative is needed.  Finding that alternative was the focus of most
+of the discussions and of the implementation of <tt>fsync()</tt> support
+for DAX, culminating in patch sets posted by Ross Zwisler (<a
+href="http://mid.gmane.org/1452103263-1592-1-git-send-email-ross.zwisler@linux.intel.com">original</a>
+and <a
+href="http://mid.gmane.org/1453498573-6328-1-git-send-email-ross.zwisler@linux.intel.com">fix-ups</a>)
+that <a
+href="https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=20c759ca98468d96d1fff8bd5e6753f458dbbfbd">landed</a>
+upstream for 4.5-rc1.</p>
+
+<h4>Is it worth the effort?</h4>
+
+<p>There was a subthread running through the discussion that wondered
+whether it might be best to <a
+href="http://mid.gmane.org/CAPcyv4hjGYYPRyPjZc3CymmnSObB7mULRbeMZFjnKdoCD_m7pw@mail.gmail.com">avoid
+the problem</a> rather than fix it.  A filesystem does not <em>have</em> to use
+DAX simply because it is mounted from a PMEM device.  It can selectively
+choose to use DAX or not based on usage patterns or policy settings (and,
+for example, would never use DAX on directories, as metadata
+   generally needs to be staged out to storage in a controlled fashion).
+   Normal page-cache access 
+could be the default and write-out to PMEM would use non-temporal writes.
+DAX would only be enabled while a file is memory mapped with a new
+<code>MMAP_DAX</code> flag.  In that case, the application would be
+explicitly requesting DAX access (probably using the <a
+href="https://github.com/pmem/nvml"><code>nvml</code></a> library) and it
+would take on the responsibility of calling <tt>CLFLUSH</tt> as
+appropriate.  It is 
+even conceivable that future processors could make cache flushing for a
+physical address range much more direct, so keeping track of addresses to
+flush would become pointless.</p>
+
+<p>Dan Williams <a
+href="http://mid.gmane.org/CAPcyv4hof4rVN0EZHhV9Q7VBE0WMw6hcSrLK-HvB5FOrOwY+tg@mail.gmail.com">championed</a>
+this position putting his case quite succinctly:</p>
+
+<div class="BigQuote">
+  <p>DAX in my opinion is not a transparent accelerator of all existing
+  apps, it's a targeted mechanism for applications ready to take
+  advantage of byte addressable persistent memory.  </p>
+</div>
+
+<p>He also expressed a concern that <code>fsync()</code> would end up being
+painful for large amounts of data.</p>
+
+<p>Dave Chinner <a
+href="http://mid.gmane.org/20151103054039.GQ10656@dastard">didn't
+agree</a>.  He provided a demonstration suggesting
+that the proposed overheads
+needed for <tt>fsync()</tt> would be negligible. He asserted instead:
+
+<div class="BigQuote">
+  <p>DAX is a method of allowing POSIX compliant applications get the best
+  of both worlds - portability with existing storage and filesystems,
+  yet with the speed and byte [addressablity] of persistent storage
+  through the use of mmap.  </p>
+</div>
+
+<p>Williams' position resurfaced from time to time as it became clear that
+there were real and ongoing challenges in making <code>fsync()</code> work,
+but he didn't seem able to rally much support.</p>
+
+<h4>Shape of the solution</h4>
+
+<p>In general, the solution chosen is to
+still use the page cache data structures, but not to store <code>struct&nbsp;page</code> pointers in them.  The page cache uses a <a
+href="/Articles/175432/">radix tree</a> that can store a pointer and a few
+tags (single bits of extra information) at every page-aligned offset in a
+file.  The space reserved for the page pointer can be used for anything
+else by setting the least significant bit to mark it as an exception.
+For example, the tmpfs filesystem uses exception entries to keep track of
+file pages that have been written out to swap.</p>
+
+<p>Keeping track of dirty regions of a file can be done by allocating
+entries in this radix tree, storing a blank exception entry in place of the
+page pointer, and setting the <code>PAGECACHE_TAG_DIRTY</code> tag.
+Finding all entries with a tag set is quite efficient, so flushing all the
+cache lines in each dirty page to perform <code>fsync()</code> should be
+quite straightforward.</p>
+
+<p>As this solution was further explored, it was repeatedly found that some
+of those fields in <code>struct&nbsp;page</code> really are useful, so an
+alternative needed to be found.</p>
+
+<h4>Page size: <code>PG_head</code></h4>
+
+<p>To flush "all the cache lines in each dirty page" you need to know how
+big the page is — it could be a regular page (4K on x86) or it could be a
+huge page (2M on x86).  Huge pages are particularly important for PMEM, which
+is expected to sometimes be huge.  If the filesystem creates files with the
+required alignment, DAX will automatically use huge pages to map them.
+There are even
+    <a href="http://mid.gmane.org/1454242175-16870-1-git-send-email-matthew.r.wilcox@intel.com">patches</a> from Matthew Wilcox that aim to support the direct mapping
+    for extra-huge 1GB pages — referred to as "PUD pages" after the Page
+    Upper Directory level in the <a href="/Articles/117749/">four-level page tables</a> from which they
+    are indexed.
+</p>
+
+<p>With a <code>struct&nbsp;page</code> the <code>PG_head</code> flag can be
+used to determine the page size.  Without that, something else is needed.
+Storing 512 entries in the radix tree for each huge page would be an
+option, but not an elegant option.  Instead, one bit in the otherwise
+unused pointer field is used to flag a huge-page entry, which is also known as a
+"PMD" entry because it is linked from the Page Middle Directory.</p>
+
+<h4>Locking: <code>PG_locked</code></h4>
+
+<p>The page lock is central to handling concurrency within filesystems and
+memory management.  With no <code>struct&nbsp;page</code> there is no page lock.
+One place where this has <a
+href="http://mid.gmane.org/1449602325-20572-1-git-send-email-ross.zwisler@linux.intel.com">caused
+a problem</a> is in managing races between one thread trying to sync a page
+and mark it as clean and another thread dirtying that page.  Ideally, clean
+pages should be removed from the radix tree completely as they are not
+needed there, but attempts to do that have, so far, failed to avoid the race.
+Jan Kara <a
+href="http://mid.gmane.org/20160208134840.GC9451@quack.suse.cz">suggested</a>
+that another bit in the pointer field could be used as a bit-spin-lock,
+effectively duplicating the functionality of <code>PG_locked</code>.  That
+seems a likely approach but it has not yet been attempted.</p>
+
+<h4>Physical memory address</h4>
+
+<p>Once we have enough information in the radix tree to reliably track
+which pages are dirty and how big they are, we just need to know where each
+page is in PMEM so it can be flushed.  This information is generally of
+little interest to common code so handling it is left up to the filesystem.
+Filesystems will normally attach something to the <code>struct&nbsp;page</code>
+using the <code>private</code> pointer.  In filesystems that use the
+<code>buffer_head</code> library, the <code>private</code> pointer links to
+a <code>buffer_head</code> that contains a <code>b_blocknr</code> field
+identifying the location of the stored data.</p>
+
+<p>Without a <code>struct&nbsp;page</code>, the address needs to be found some
+other way.  There are a number of options, several of which have been
+explored.
+The filesystem could be asked to perform the lookup from file offset to
+physical address using its internal indexing tables.  This is an
+indirect approach and may require the filesystem to reload some indexing
+data from the PMEM (it wouldn't use direct-access for that).  While the
+first patch set used this approach, it did not survive long.</p>
+
+<p>Alternately, the physical address could be stored in the radix tree when
+the page is marked as dirty; the physical address will already be available
+at that time as it is just about to be accessed for write.  This leads to
+another question: exactly how is the physical address represented?  We
+could use the address where the PMEM is mapped into the kernel address
+space, but that leads to <a
+href="http://mid.gmane.org/CAPcyv4irspQEPVdYfLK+QfW4t-1_y1gFFVuBm00=i03PFQwEYw@mail.gmail.com">awkward
+races</a> when a PMEM device is disabled and unmapped.  Instead, we could use a
+sector offset into the block device that represents the PMEM.  That is what
+the current implementation does, but it implicitly assumes there is just
+one block device, or at least just one per file.  For a filesystem that
+integrates volume management (as Btrfs does), this may not be the case.</p>
+
+<p>Finally, we could use the page frame number (PFN), which is a
+stable index that is assigned by the BIOS when the memory is discovered.
+Wilcox <a
+href="http://mid.gmane.org/20160131023247.GZ2948@linux.intel.com">has
+patches</a> to move in this direction, but the work is <strike>70%</strike>
+maybe <a
+href="http://mid.gmane.org/20160201134410.GD2948@linux.intel.com">50%</a>
+done.  Assuming that the PFN can be <a
+href="http://mid.gmane.org/20160131180738.GB2948@linux.intel.com">reliably
+mapped</a> to the kernel address that is needed for <tt>CLFLUSH</tt>, this seems
+like the best solution.</p>
+
+<h4>Is this miniature <code>struct page</code> enough?</h4>
+
+<p>One way to look at this development is that a 64-bit miniature <code>struct&nbsp;page</code> has been created for the DAX use case to avoid the cost of a
+full <code>struct&nbsp;page</code>.  It currently contains a "huge page" flag
+and a physical sector number.  It may yet gain a lock bit and have a PFN in
+place of the sector number.  It seems prudent to ask if there is anything
+else that might be needed before DAX functionality is complete.</p>
+
+<p>As quoted above, Chinner appears to think that transparent support
+for full POSIX semantics should be the goal. He went on to <a
+href="http://mid.gmane.org/20160203075411.GC459@dastard">opine</a>
+that:</p>
+
+<div class="BigQuote">
+  <p>This is just another example of how yet another new-fangled storage
+    technology maps precisely to a well known, long serving storage
+    architecture that we already have many, many experts out there that
+    know to build reliable, performant storage from... :)  </p>
+</div>
+
+<p>Taking that position to its logical extreme would suggest that anything
+that can be done in the existing storage architecture should work with PMEM
+and DAX.  One such item of functionality that springs to mind is
+the <a
+href="http://man7.org/linux/man-pages/man8/pvmove.8.html"><code>pvmove</code></a>
+tool.
+When a filesystem is built on an LVM2 volume, it is possible to use
+<code>pvmove</code> to move some of the data from one device to another,
+to balance the load, decommission old hardware, or start
+using new hardware.  Similar functionality could well be useful with
+PMEM.</p>
+
+<p>There would be a number of challenges to making this work with DAX, but
+possibly the biggest would be tearing down memory mappings of a section of
+the old memory before moving data across to the new.  The Linux kernel has
+some infrastructure for memory <a href="/Articles/157066/">migration</a>
+that would be a perfect fit — if only the PMEM had a table of <code>struct&nbsp;page</code> as regular memory does.  Without those page structures, moving
+memory that is currently mapped becomes a much more 
+interesting task, though likely not an insurmountable one.</p>
+
+<p>On the whole, it seems like DAX is showing a lot of promise but is still
+in its infancy.  Currently, it can only be used on ext2, ext4, and XFS, and
+only where they are directly mounted on a PMEM device (i.e. there is no LVM
+support).  Given the recent rate of change, it is unlikely to stay this
+way.  Bugs will be fixed, performance will be improved, coverage and
+features will likely be added.  When inexpensive persistent memory
+starts appearing on our motherboards it seems that Linux will be
+ready to make good use of it.</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#DAX">DAX</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Nonvolatile_memory">Memory management/Nonvolatile memory</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Brown_Neil">Brown, Neil</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/676737/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor677237"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">DAX and fsync: the cost of forgoing page structures</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2016 10:20 UTC (Thu)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/677237/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've been considering the idea of a locked bit in the radix tree entry for a while. I think I may even have some awful patches from three years ago languishing in a git tree on my laptop. The problem is that we would need to change a lot of code to use a pointer into the radix tree rather than the value found in the radix tree. That implies holding the radix tree lock (or possibly the RCU lock) for an extended period, which means no sleeping (the page lock is a sleeping lock).<br>
+<p>
+Another issue is that each bit consumed by a feature reduces the amount of physical memory supportable. Right now I have six bits consumed; two for the radix tree, two for PFN_MAP and PFN_DEV and two for the size (PTE, PMD or PUD). That limits us to 256GB on 32-bit systems with a 4k page size. Quite a lot of memory, but a mere laptop drive for storage.<br>
+<p>
+Maybe PFN_DEV is implicit for DAX and that bit can be reused for locking.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/677237/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor677251"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">DAX and fsync: the cost of forgoing page structures</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2016 11:09 UTC (Thu)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/677251/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; That implies holding the radix tree lock</font><br>
+<p>
+Does it?  radix_tree_node.count could be used to count externally held references as well as the internal ones (non-trivial change, but quite practical).  That could be used to stabilize the entry while spinning on the lock.<br>
+<p>
+Making this credible on 32bit does seem .... challenging.  There is one tag bit that isn't used I think but at best that would get you to 1TB.  Maybe 32bit systems don't deserve any more...<br>
+<p>
+Hmmm.. You don't really need two bits for PMD and PUD.  Once the PMD bit is set you have 9 bits in the PFN that you expect to be zero.  One of those could distinguish between PMD and PUD.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/677251/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor677275"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">DAX and fsync: the cost of forgoing page structures</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2016 12:44 UTC (Thu)
+                               by <b>roblucid</b> (guest, #48964)
+                              [<a href="/Articles/677275/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Worrying about the limitations of 32bit systems, seems a bit perverse when gearing up for mmap-ing vast arrays of storage directly into memory.<br>
+<p>
+You'ld face similar program limitations to UNIX Version 6 on a PDP11, where address space was smaller than physical memory &amp; data, you then want things to reside in files processed by record by record.  But pmem sounds like it'd make an ideal swap/hibernate disk device.  The recent 32bit ARM CPUs launched, for ultra low powered applications, forgo an MMU so are moot.<br>
+<p>
+The whole idea sounds like good material for one of Linus's colourful statements, IIRC he dislikes the 32bit PAE kernel extensions.  So why compromise the 64bit &amp; up design, for something that'll never really be useful on 32bit systems?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/677275/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor679784"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">DAX and fsync: the cost of forgoing page structures</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 11, 2016 19:35 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/679784/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+could this be addressed by having an offset to a mount? it would mean no one 'drive/partition' could be larger than X, but if this is only an issue on 32 bit systems, is this really that bad an option?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/679784/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor677431"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">DAX and fsync: the cost of forgoing page structures</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2016 21:07 UTC (Thu)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/677431/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It seems odd to me that there would be anything new to worry about with CPU caches when implementing fsync() for DAX. Why don't you have the same problems with CPU caches and the page cache? And I'd think that, in the case where PMEM is mapped directly into applications, the application should be expecting to call msync() (or munmap()) in order to be sure that its changes to those pages are more globally visible. I'd understand scalability concerns around the fact that mmap()ing a terabyte of data hadn't been plausible before; is this a case where the removal of a different bottleneck (page cache space) would allow something formerly limited to overwhelm the system? Or are people trying to make PMEM-backed mmaps easier to use than page-cache-backed mmaps?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/677431/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor677460"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">DAX and fsync: the cost of forgoing page structures</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2016 22:31 UTC (Thu)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/677460/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It seems odd to me that there would be anything new to worry about </font><br>
+<p>
+It took me a little while to convince myself of why there really is something new.<br>
+When you write to a traditional storage device, the device gets the data using DMA.<br>
+On x86 at least, the DMA controller sees memory that is consistent with that the CPU sees.<br>
+So the data doesn't need to be in "main memory" for the DMA controller to copy it to the target device.<br>
+<p>
+Details might be different on non-x86 hardware. Documentation/DMA-API-HOWTO.txt might be helpful.<br>
+<p>
+<font class="QuotedText">&gt;  the application should be expecting to call msync() </font><br>
+<p>
+I probably should have been more explicit, but when I wrote " fsync() and related functions", that includes msync.  Msync does the same thing as fsync and has the same difficulties.  It just identifies the target file differently.<br>
+<p>
+I am not able to address your other questions.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/677460/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor677477"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">DAX and fsync: the cost of forgoing page structures</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 25, 2016 23:51 UTC (Thu)
+                               by <b>dgc</b> (subscriber, #6611)
+                              [<a href="/Articles/677477/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It seems odd to me that there would be anything new to worry about with CPU</font><br>
+<font class="QuotedText">&gt; caches when implementing fsync() for DAX. Why don't you have the same </font><br>
+<font class="QuotedText">&gt; problems with CPU caches and the page cache?</font><br>
+<p>
+We do have the same problems - it's just they were solved a long time ago and its assumed that filesystem developers understand the need for these cache flushes and where to locate them. e.g.. go have a look at all the flush_dcache_page() calls in the filesystem and IO code....<br>
+<p>
+-Dave.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/677477/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

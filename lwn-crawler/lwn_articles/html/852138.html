@@ -1,0 +1,716 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>NUMA-aware qspinlocks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/852138/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/851953/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/852138/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>NUMA-aware qspinlocks</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 12, 2021</br>
+           </div>
+While some parts of the core kernel reached a relatively stable "done"
+state years ago, others never really seem to be finished.  One of the
+latter variety is undoubtedly the kernel's implementation of spinlocks,
+which arbitrate access to data at the lowest levels of the kernel.  Lock
+performance can have a significant effect on the performance of the system
+as a whole, so optimization work can pay back big dividends.  Lest one
+think that this work is finally done, the <a
+href="/ml/linux-kernel/20210401153156.1165900-1-alex.kogan@oracle.com/">NUMA-aware
+qspinlock patch set</a> shows how some more performance can be squeezed out
+of the kernel's spinlock implementation.
+<p>
+In its simplest form, a spinlock is a single word in memory, initially set to one.
+Any CPU wishing to acquire the lock will perform an atomic
+decrement-and-test operation; if the result is zero, the lock has been
+successfully taken.
+Otherwise the CPU will increment the value, then "spin" in tight loop until
+the operation succeeds.  The kernel has long since left this sort of
+implementation behind, though, for a number of reasons, including
+performance.  All those atomic operations on the lock word cause its cache
+line to be bounced around the system, slowing things considerably even if
+contention for the lock is light.
+<p>
+The current "qspinlock" implementation is based on MCS locks, which
+implement a queue of CPUs waiting for the lock as a simple linked list.
+Normally, linked lists are just the sort of data structure that one wants
+to avoid when cache efficiency is a concern, but nobody ever has to
+traverse this list.  Instead, each CPU will spin on its own entry in the
+list, and only reach into the next entry to release the lock.  See <a
+href="/Articles/590243/">this article</a> for a more complete description,
+complete with cheesy diagrams, of how MCS locks work.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+<h4>MCS locks on NUMA systems</h4>
+<p>
+MCS locks seem nearly optimal; each CPU focuses on its own queue entry, so
+cache-line bouncing between processors is nearly eliminated.  They are also
+fair; the queue of waiters ensures that no CPU is starved of access.  But
+it seems that there is a way to do better, at least on non-uniform
+memory-access (NUMA) systems.
+
+Such machines are made up of multiple nodes, each of which contains some
+number of CPUs; memory attached to a CPU's node will be faster to
+access than memory attached to a remote node.  Access to cached memory is
+(relatively) fast, of course, regardless of the node that memory is
+attached to, but moving cache lines between nodes is expensive, even more
+expensive than bouncing cache lines between CPUs on the same node.  Thus,
+minimizing cache-line movement between NUMA nodes will be good for
+performance.
+<p>
+If a spinlock is released by a CPU on one node and subsequently acquired by
+a CPU on a different node, its cache line will have to move between the
+nodes.  If, instead, a contended spinlock could be passed to another CPU on
+the same node, that expense will be avoided.  That alone can make a
+difference, but it's worth remembering that spinlocks protect data
+structures.  Two processors contending for a given lock are quite likely to
+be trying to access the same data, so moving the lock between nodes will
+also cause the cache lines for the protected data to move.  For heavily
+contended data structures, the resulting slowdown can hurt.
+<p>
+The NUMA-aware qspinlock attempts to keep locks from bouncing between NUMA
+nodes by handing them off to another CPU on the same node whenever
+possible.  To do this, the queue of CPUs waiting for the lock is split into
+two — a primary and secondary queue.  If a CPU finds the lock unavailable,
+it will add itself to the primary queue and wait as usual.  When a CPU gets
+to the head of the queue, though, it will look at the next CPU in line; if
+that next CPU is on a different NUMA node, it will be shunted over to the
+secondary queue.
+<p>
+In this way, the waiting CPUs will eventually be sorted into two queues,
+one of which (the primary queue) consists only of CPUs on the same node as
+the current owner of the lock, and one (the secondary) which contains all
+the rest.  When a CPU releases the lock it will hand it to the next CPU in
+the primary queue, thus keeping the lock on the same NUMA node.  The lock
+will only move to another node once the primary queue empties out, at which
+point the secondary queue will be moved to the primary and the process
+starts all over again.
+<p>
+<h4>Tweaks and benchmarks</h4>
+<p>
+There is an obvious pitfall with a scheme like this: if the lock is heavily
+contended, the primary queue may never empty out and the other nodes in the
+system will be starved for the lock.  The solution to this problem is to
+make a note of the time when the first CPU was moved to the secondary
+queue.  If the primary queue does not empty out for 10ms (by default), the entire
+secondary queue will be promoted to the head of the primary queue,
+thus forcing the lock to move to another node.  The timeout can be changed
+(within a range of 1-100ms) with the <tt>numa_spinlock_threshold</tt>
+command-line parameter.
+<p>
+One optimization that has been added is called "shuffle reduction".  If the
+lock is not all that heavily contended, the extra work of maintaining the
+secondary queue does not really buy anything.  To mitigate this extra cost,
+the code uses a pseudo-random number generator to only try to create the
+secondary queue one time out of every 128 lock acquisitions.  If the lock
+gets busy, that will happen relatively often, after which the secondary
+queue will be maintained until the primary queue empties again (or the
+above-mentioned timeout occurs).
+<p>
+Finally, the code exempts CPUs running in interrupt (or non-maskable
+interrupt) mode, and those running realtime tasks, from being pushed to the
+secondary queue.  That allows
+these CPUs, which presumably have a higher priority, to acquire the lock
+relatively quickly even if they are running on the wrong NUMA node.
+<p>
+A number of benchmark results are included with the patch set.  For lightly
+contended locks the performance benefits of NUMA awareness are relatively
+modest.  As the number of contending threads grows, though, the speedup
+does as well, approaching a factor of two for ridiculously heavily
+contended loads.
+<p>
+This patch set has been through 14 revisions since it was <a
+href="/ml/linux-kernel/20190131030136.56999-1-alex.kogan%40oracle.com/">first
+posted</a> in January 2019.  It has evolved quite a bit over that time as
+comments were raised and addressed; it would appear to be approaching a
+sort of steady state where it is getting close to being ready to merge.
+Given that this work has been pending for over two years already, though,
+and given that it makes significant changes to one of the kernel's
+fundamental synchronization primitives,
+it would not be surprising if it took a little longer yet before it hits
+the mainline.
+<p>
+<a href="https://arxiv.org/abs/1810.05600">This paper</a> describes
+the NUMA-aware qspinlock algorithm in more detail, though the details of
+the implementation have diverged somewhat from what is described there.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#NUMA">NUMA</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Spinlocks">Spinlocks</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/852138/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor852389"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2021 19:38 UTC (Mon)
+                               by <b>edeloget</b> (subscriber, #88392)
+                              [<a href="/Articles/852389/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I find it amazing that we still find new ways to implements something which is &quot;as simple as&quot; a spinlock (quoted because, well, spinlocks *looks* like simple primitives ; given the explaination in the article and the accompagning paper, it&#x27;s very clear that they are not). I&#x27;d like to thank all the kernel developpers who are working on all these difficult to understand subjects in order to enhance our experience. <br>
+<p>
+Thanks a lot. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852389/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor852403"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2021 21:28 UTC (Mon)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/852403/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe I&#x27;m missing something, but I would have thought that if there&#x27;s a chance you&#x27;ll be spinning for 10ms on a lock, then you&#x27;re using the wrong kind of lock. That&#x27;s the CPU basically wasting hundreds of millions of cycles it could have been doing other useful work. Or is this supposed to be a &quot;never happen&quot; scenario?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852403/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor852423"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2021 22:49 UTC (Mon)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/852423/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I could have read it wrong, but I thought it was if the lock stays on the same NUMA node for 10ms, not a single lock spin of 10ms.<br>
+<p>
+I could easily see a node stacking up new locks for a 10ms total runtime.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852423/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor852424"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2021 23:05 UTC (Mon)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/852424/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think it&#x27;s that someone on a different NUMA node is spinning for 10ms while the lock ping-pongs between CPUs on the same node continuously. I think this means that, over the course of 10ms, there are always at least 3 tasks that want the lock, but probably no task holds it very long; traditionally, all the tasks would get their turns soon, do an operation, and go back to waiting for another turn, but now, ones on the same node can get all of the time until this cuts in.<br>
+<p>
+You used to be burning a ton of cycles spinning, but not all in a row, so you don&#x27;t want to sleep; with this patch set, you might end up burning them all in a row due to unfairness, but the lucky tasks are getting the quick response at the very same time that you&#x27;re wishing this was a sleeping lock.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852424/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor852425"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2021 23:38 UTC (Mon)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/852425/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That&#x27;s my reading of it too. It&#x27;s not that the lock is expected to burn up to 10ms of CPU time, it&#x27;s an escape hatch for *if* it does, under the condition of a NUMA system being so loaded that it can&#x27;t be freed within 10ms. Sounds like a dire situation and hopefully not a common one.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852425/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor852431"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2021 2:11 UTC (Tue)
+                               by <b>nickodell</b> (subscriber, #125165)
+                              [<a href="/Articles/852431/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This patch weakens the fairness of the spinlock, and weakening fairness is something which should be done carefully.<br>
+<p>
+To quote Linus:<br>
+<p>
+<font class="QuotedText">&gt;Pretty much every time we picked an unfair - but fast - locking model in the kernel, we ended up regretting it eventually, and had to add fairness.</font><br>
+<p>
+If there were no upper limit on how long the primary queue could occupy the spinlock, you could have a situation where two CPUs on the same node trade a spinlock back and forth forever, starving CPUs on other nodes. Having an upper limit on how long a single node can hold the spinlock is sensible. It should help with the worst-case latency spikes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852431/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor853127"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2021 8:15 UTC (Sat)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/853127/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not necessarily. It might almost never happen, justifying the usage of a cheap spinlock, but when it happens it could deadlock the whole system, so the protection is essential.<br>
+<p>
+It is very common in distributed systems to see that some data remains of no interest for a long time, and suddenly it attracts 64 CPUs at once. It is important to handle such situations gracefully and that&#x27;s extremely difficult.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/853127/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor852430"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2021 2:07 UTC (Tue)
+                               by <b>Conan_Kudo</b> (subscriber, #103240)
+                              [<a href="/Articles/852430/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I just wish we could make NUMA go away. It's a terrible hack that makes running workloads more complicated than it needs to be. AMD's newest Ryzen processors don't require NUMA, POWER systems don't require NUMA, and Apple's M1 <em>also</em> don't require NUMA. It's pretty clear that NUMA is not a requirement for performant multi-core systems now.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852430/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor852440"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2021 3:47 UTC (Tue)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/852440/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ummm.  From a physical hardware perspective, the only way to achieve non-NUMA in larger systems is to slow everyone to the lowest common denominator.<br>
+<p>
+But, also: Single socket Xeon setups *usually* have only one physical NUMA node.  (There are reasons one might set up multiple logical ones.). For multi-socket ones, well, some resources are physically more distant from a given socket.  So...yeah.  NUMA.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852440/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor852441"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2021 3:56 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/852441/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+NUMA is not a &quot;hack&quot;, it&#x27;s basically an admission of reality that the memory access is not uniform. And AMD Ryzen most definitely does support NUMA.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852441/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor852457"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2021 8:29 UTC (Tue)
+                               by <b>chris_se</b> (subscriber, #99706)
+                              [<a href="/Articles/852457/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; AMD&#x27;s newest Ryzen processors don&#x27;t require NUMA,</font><br>
+<p>
+For desktop CPUS: No, but it effectively implements NUMA internally due to the chiplet design. It hides it quite well, but I don&#x27;t think their approach will scale to a lot more cores than they currently have in their desktop lineup. Their 16c/32t 5950X is probably the upper end of what&#x27;s possible while more or less completely hiding NUMA.<br>
+<p>
+And that does change once you get into the HEDT and/or server market where you have tons and tons of cores, and even multiple sockets. The speed of light will automatically impose NUMA on multi-socket systems unless you want to run them at really slow speeds. (And if you are not NUMA-aware you&#x27;re effectively doing that.) AMD Threadripper (HEDT) and EPYC (server) are all NUMA designs.<br>
+<p>
+<font class="QuotedText">&gt; Apple&#x27;s M1 also don&#x27;t require NUMA.</font><br>
+<p>
+Sure, but that&#x27;s only 8 cores. And instead of NUMA Apple&#x27;s M1 has its own can of worms when it comes to scheduling, because it&#x27;s effectively a big.LITTLE type of system (though it&#x27;s not exactly big.LITTLE), as half of the cores are high-performance, while the other half are lower performance, but lower power draw. Furthermore, because M1 is an SoC with integrated RAM, you&#x27;re stuck with at most 16 GiB of RAM - both my laptop and desktop computer currently have more than that, and in a server context that&#x27;s laughably low in current times. (And I&#x27;m not criticizing Apple for this specifically: for many tasks the M1 was designed for 16 GiB RAM is perfectly fine. But you can&#x27;t compare that to server CPUs.)<br>
+<p>
+<font class="QuotedText">&gt; It&#x27;s pretty clear that NUMA is not a requirement for performant multi-core systems now. </font><br>
+<p>
+For up to 16 cores? Probably not. But for more than that: most likely. And in the end you have to consider the following: the CPU frequency will not drastically improve anymore. The IPC (instructions per clock) will still improve somewhat in the future, but I don&#x27;t see that improving dramatically -- in the best case these improve by 10-20% every couple of years. So if you want more performance, the only real ways to improve that are specialized instructions for specific workloads and more cores. While the former will be quite useful for specific tasks (think AES-NI, for example), the latter is the only one that will be able to address generic computation needs. And that then by necessity means NUMA.<br>
+<p>
+Especially for multi-socket systems, when it comes to latency (not throughput!) we are already starting to see designs that are limited by the speed of information transmission, which itself is limited by the speed of light. (Copper in _ideal_ situations transmits information at about 2/3rds of the speed of light.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852457/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor852469"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2021 11:40 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/852469/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>AMD EPYC systems require NUMA to get peak performance; multi-socket POWER systems require NUMA to get peak performance. And Apple M1 is a single socket solution; no single socket solution thus far requires NUMA.
+<p>NUMA is a reflection of the fact that not all memory is physically as close to the CPU as needed to be reachable in one clock tick; propagation delays in a vacuum at 5GHz result in a maximum radius of 3cm from source to destination and back, 6cm if the signal only needs to propagate one-way in that time, and that this is an unmanageable constraint for a complete system with a need for more than about 64 GiB DRAM per socket with today's process tech.
+<p>NUMA will definitely become less relevant as we get more RAM and more compute into a small volume, but it'll never completely die because it reflects the fact that circuits are limited in size by the speed of light.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852469/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor852493"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2021 14:54 UTC (Tue)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/852493/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+“ And Apple M1 is a single socket solution; no single socket solution thus far requires NUMA.”<br>
+<p>
+FWIW, this isn’t *quite* true.  The now dead Xeon Phi (KNL) line of many-core chips had internal NUMA, in a few toggleable flavors, including “off”.  (Some but not all were related to the behavior of the large on chip RAM.  Some were just NUMA segmentation of the processor.)<br>
+<p>
+That was an exception, though, and doubly so because that NUMA seemed to be more about hyper-optimization for compute tasks than general system needs.  IE, it was not very non-uniform.  (The extensive testing done at my employer suggested it didn’t matter much except for certain compute/simulation tasks.  I wasn’t able to measure an effect for OS/system performance.  That doesn’t mean there wasn’t one, but it was below any threshold we needed to care about.  The “optimize the compute performance of this simulation” people cared though.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852493/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor852471"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2021 13:18 UTC (Tue)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/852471/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+NUMA is not as hard a requirement as it was in the 90s MP days, but it *is* the most understood topology as a result. The tooling to optimise workloads for Apple&#x27;s asymmetric cores, or Ryzen&#x27;s shared bus per CCX, or Intel&#x27;s mesh topology just doesn&#x27;t exist yet.<br>
+<p>
+For that matter, Intel&#x27;s the only one of those three that provides a complete driver stack (government backdoors notwithstanding). AMD&#x27;s leaving an unknown amount of performance on the table by not upstreaming CPPC2 code, and the M1 has more undocumented purpose-specific coprocessors on it than a Sega Saturn; non-uniform memory is the least of its problems.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852471/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor852764"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 15, 2021 17:35 UTC (Thu)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/852764/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wish the opposite were true. That more CPUs exposed that they effectively are NUMA. Obviously I&#x27;d like latency to be zero, but given that that won&#x27;t happen, I&#x27;d rather be able to write software utilizing the latency differences. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852764/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor852462"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2021 11:12 UTC (Tue)
+                               by <b>k3ninho</b> (subscriber, #50375)
+                              [<a href="/Articles/852462/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; One optimization that has been added is called &quot;shuffle reduction&quot;. If the lock is not all that heavily contended, the extra work of maintaining the secondary queue does not really buy anything. To mitigate this extra cost, the code uses a pseudo-random number generator to only try to create the secondary queue one time out of every 128 lock acquisitions. If the lock gets busy, that will happen relatively often, after which the secondary queue will be maintained until the primary queue empties again (or the above-mentioned timeout occurs). ...</font><br>
+<p>
+<font class="QuotedText">&gt;A number of benchmark results are included with the patch set. For lightly contended locks the performance benefits of NUMA awareness are relatively modest. As the number of contending threads grows, though, the speedup does as well, approaching a factor of two for ridiculously heavily contended loads. </font><br>
+<p>
+It doesn&#x27;t seem like it&#x27;s needed yet, but this is a place for the &#x27;sock-pairing lemma&#x27; wherein, if you&#x27;re going to decide where to hang a wet sock on a drying rack, your optimal choice is to eliminate work pairing it later. Can the secondary tier be partitioned into NUMA zones and each task be grouped with those in its zone at the time you add it to that list? It would make sense, provided you take a strategy for picking the next zone to execute in when the primary list is empty. Apparent options are pseudo-randomly (don&#x27;t predict the future, half the time you&#x27;ll be better than average and half you won&#x27;t), longest-list (to crank through those tasks that are waiting), or some measure of CPU busy-ness and queue depth (will that zone really be able to give all the tasks the access they ask for?). <br>
+<p>
+The crucial problem -- as Amdahl&#x27;s Law points out -- is to do the least work possible marshalling tasks so you leave time for the requested work.<br>
+<p>
+K3n.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852462/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor852470"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NUMA-aware qspinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2021 11:35 UTC (Tue)
+                               by <b>k3ninho</b> (subscriber, #50375)
+                              [<a href="/Articles/852470/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I read teh patch notes and they say that there&#x27;s also a timely switch to the NUMA zone of the task waiting at the head of the secondary queue:<br>
+<p>
+<font class="QuotedText">&gt;We change the NUMA node preference after a waiter at the head of the secondary queue spins for a certain amount of time. We do that by flushing the secondary queue into the head of the primary queue, effectively changing the preference to the NUMA node of the waiter at the head of the secondary queue at the time of the flush.</font><br>
+<p>
+I think that, over time, this will sort the secondary queue into blocks grouped by zone -- with 2 zones, your secondary list is the second zone; with 3, a second pass groups items in the third zone in a block before or after the list of items in the first zone; with 4, it takes until the third swap to group them. So maybe sorting upfront isn&#x27;t needed.<br>
+<p>
+K3n.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/852470/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2021, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

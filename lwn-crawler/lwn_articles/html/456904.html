@@ -1,0 +1,486 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>No-I/O dirty throttling [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/456904/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/456507/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/456904/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>No-I/O dirty throttling</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 31, 2011</br>
+           </div>
+"Writeback" is the process of writing dirty pages back to persistent
+storage, allowing those pages to be reclaimed for other uses.  Making
+writeback work properly has been one of the more challenging problems faced
+by kernel developers in the last few years; systems can bog down completely
+(or even lock up) when writeback gets out of control.  Various approaches
+to improving the situation have been discussed; one of those is Fengguang
+Wu's I/O-less throttling patch set.  These changes have been circulating
+for some time; they are seen as having potential - if only others could
+actually understand them.  Your editor doesn't understand them either, but
+that has never stopped him before.
+<p>
+One aspect to getting a handle on writeback, clearly, is slowing down
+processes that are creating more dirty pages than the system can handle.
+In current kernels, that is done through a call to
+<tt>balance_dirty_pages()</tt>, which sets the offending process to work
+writing pages back to disk.  This "direct reclaim" has the effect of
+cleaning some pages; it also keeps the process from dirtying more pages
+while the writeback is happening.  Unfortunately, direct reclaim also tends
+to create terrible I/O patterns, reducing the bandwidth of data going to
+disk and making the problem worse than it was before.  Getting rid of
+direct reclaim has been on the "to do" list for a while, but it needs to be
+replaced by another means for throttling producers of dirty pages.
+<p>
+That is where Fengguang's <a href="/Articles/456503/">patch set</a> comes
+in.  He is attempting to create a control loop capable of determining how
+many pages each process should be allowed to dirty at any given time.
+Processes exceeding their limit are simply put to sleep for a while to
+allow the writeback system to catch up with them.  The concept is simple
+enough, but the implementation is less so.  Throttling is easy; performing
+throttling in a way that keeps the number of dirty pages within reasonable
+bounds and maximizes backing store utilization while not imposing
+unreasonable latencies on processes is a bit more difficult.
+<p>
+If all pages in the system are dirty, the
+system is probably dead, so that is a good situation to avoid.  Zero dirty
+pages is almost as bad; performance in that situation will be exceedingly
+poor.  The virtual memory subsystem thus aims for a spot in the middle
+where the ratio of dirty to clean pages is deemed to be optimal; that
+"setpoint" varies, but comes down to tunable parameters in the end.
+Current code sets a simple threshold, with throttling happening when the
+number of dirty pages exceeds that threshold; Fengguang is trying to do
+something more subtle.  
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+Since developers have complained that his work is hard to understand,
+Fengguang 
+has filled out the code with lots of documentation and diagrams.  This is
+how he depicts the goal of the patch set:
+<p>
+<div class="BigQuote">
+<pre>
+  ^ task rate limit
+  |
+  |            *
+  |             *
+  |              *
+  |[free run]      *      [smooth throttled]
+  |                  *
+  |                     *
+  |                         *
+  ..bdi-&gt;dirty_ratelimit..........*
+  |                               .     *
+  |                               .          *
+  |                               .              *
+  |                               .                 *
+  |                               .                    *
+  +-------------------------------.-----------------------*------------>
+                          setpoint^                  limit^  dirty pages
+</pre>
+</div>
+<p>
+The goal of the system is to keep the number of dirty pages at the
+setpoint; if things get out of line, increasing amounts of force will be
+applied to bring things back to where they should be.  So the first order
+of business is to figure out the current status; that is done in two
+steps.  The first is to look at the global situation: how many dirty pages
+are there in the system relative to the setpoint and to the hard limit that
+we never want to exceed?  Using a cubic polynomial function (see <a
+href="http://permalink.gmane.org/gmane.linux.kernel.mm/67529">the code</a>
+for the grungy details), Fengguang calculates a global "pos_ratio" to
+describe how strongly the system needs to adjust the number of dirty
+pages.
+<p>
+This ratio cannot really be calculated, though, without taking the backing
+device (BDI) into account.  A process may be dirtying pages stored on a
+given BDI, and the system may have a surfeit of dirty pages at the moment,
+but the wisdom of throttling that process depends also on how many dirty
+pages exist for that BDI.  If a given BDI is swamped with dirty pages, it
+may make sense to throttle a dirtying process even if the system as a whole
+is doing OK.  On the other hand, a BDI with few dirty pages can clear its
+backlog quickly, so it can probably afford to have a few more, even if the
+system is somewhat more dirty than one might like.  So the patch set tweaks
+the calculated pos_ratio for a specific BDI using a complicated formula
+looking at how far that specific BDI is from its own setpoint and its
+observed bandwidth.  The end result is a modified pos_ratio describing whether the
+system should be dirtying more or fewer pages backed by the given BDI, and
+by how much.
+<p>
+In an ideal world, throttling would match the rate at which pages are being
+dirtied to the rate that each device can write those pages back; a process
+dirtying pages backed by a fast SSD would be able to dirty more pages more
+quickly than
+a process writing to pages backed by a cheap thumb drive.  The idea is simple:
+if N processes are dirtying pages on a BDI with a given bandwidth, each
+process should be throttled to the extent that it dirties 1/N of that
+bandwidth.  The problem is that processes do not register with the kernel
+and declare that they intend to dirty lots of pages on a given BDI, so the
+kernel does not really know the value of&nbsp;N.  That is handled by
+carrying a running estimate of N.  An initial per-task bandwidth limit is
+established; after a period of time, the kernel looks at the number of
+pages actually dirtied for a given BDI and divides it by that bandwidth limit to
+come up with the number of active processes.  From that estimate, a new
+rate limit can be applied; this calculation is repeated over time.
+<p>
+That rate limit is fine if the system wants to keep the number of dirty
+pages on that BDI at its current level.  If the number of dirty pages (for
+the BDI or for the system as a whole) is out of line, though, the per-BDI
+rate limit will be tweaked accordingly.  That is done through a simple
+multiplication by the pos_ratio calculated above.  So if the number of
+dirty pages is low, the applied rate limit will be a bit higher than what
+the BDI can handle; if there are too many dirty pages, the per-BDI limit
+will be lower.  There is some additional logic to keep the per-BDI limit
+from changing too quickly.
+<p>
+Once all that machinery is in place, fixing up
+<tt>balance_dirty_pages()</tt> is mostly a matter of deleting the old
+direct reclaim code.  If neither the global nor the per-BDI dirty limits have
+been exceeded, there is nothing to be done.  Otherwise the code calculates
+a pause time based on the current rate limit, the pos_ratio, and number of
+pages recently dirtied by the current task and sleeps for that long.  The maximum
+sleep time is currently set to 200ms.  A final tweak tries to account for
+"think time" to even out the pauses seen by any given process.  The end
+result is said to be a system which operates much more smoothly when lots
+of pages are being dirtied.
+<p>
+Fengguang has been working on these patches for some time and would
+doubtless like to see them merged.  That may yet happen, but adding core
+memory management code is never an easy thing to do, even when others can
+easily understand the work.  Introducing regressions in obscure workloads
+is just too easy to do.  That suggests that, among other things, a lot of
+testing will be required before confidence in these changes will be up to
+the required level.  But, with any luck, this work will eventually result
+in better-performing systems for us all.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Writeback">Memory management/Writeback</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Write_throttling">Write throttling</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/456904/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor457291"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No-I/O dirty throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 1, 2011 12:09 UTC (Thu)
+                               by <b>akumria</b> (guest, #7773)
+                              [<a href="/Articles/457291/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><q>The problem is that processes do not register with the kernel and declare that they intend to dirty lots of pages on a given BDI</q></blockquote>
+
+Perhaps I'm understanding the problem here; but isn't a process open(2)'ing a file on the BDI a declaration of intent?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/457291/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor457295"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No-I/O dirty throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 1, 2011 12:34 UTC (Thu)
+                               by <b>mpr22</b> (subscriber, #60784)
+                              [<a href="/Articles/457295/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      An open(..., O_RDWR, ...) or open(..., O_WRONLY, ...) is a statement of intent to dirty a number of pages greater than zero. It's not necessarily a statement of intent to dirty <em>lots</em> of pages.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/457295/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor457296"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No-I/O dirty throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 1, 2011 12:35 UTC (Thu)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/457296/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That would result in using the worst-case assumption that every process writes as fast as it can to all its writable fds. Not really a useful assumption when you try to distribute a scarce resource.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/457296/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor457520"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No-I/O dirty throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 2, 2011 15:20 UTC (Fri)
+                               by <b>dcg</b> (subscriber, #9198)
+                              [<a href="/Articles/457520/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm the only one who loves how Fengguang Wu does his kernel work? His changelogs are always very well detailed and give a lot of insight of what they do and why they do it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/457520/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor457872"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No-I/O dirty throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2011 10:01 UTC (Wed)
+                               by <b>zmi</b> (guest, #4829)
+                              [<a href="/Articles/457872/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That patch sounds nice, but has to be tested a lot to confirm it does what it should in every situation. It especially needs testing on lots of different systems with different storages, from USB sticks to big irons. I like the description of how everything is calculated, seems like the Right Approach.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/457872/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor459296"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No-I/O dirty throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 18, 2011 10:17 UTC (Sun)
+                               by <b>oak</b> (guest, #2786)
+                              [<a href="/Articles/459296/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Compressed RAM swap could also be an interesting test-case.<br>
+<p>
+The differences to normal swap devices are:<br>
+- swapping causes CPU load, not IO load<br>
+- smaller than the amount of RAM instead of larger<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/459296/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor458003"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No-I/O dirty throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2011 8:41 UTC (Thu)
+                               by <b>kevinm</b> (guest, #69913)
+                              [<a href="/Articles/458003/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From an application developer / system administrator perspective, it would be nice if processes that are sleeping due to being throttled would appear in a state other than 'S', which implies voluntary blocking.  Perhaps 'E' for "Enforced Sleep" (even just 'D' state would be good enough, if a new process state would be deemed to be a breaking ABI change).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/458003/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor458036"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No-I/O dirty throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2011 13:19 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/458036/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      The current patches just put the process into a normal interruptible sleep, so it won't appear any different.  Remember, though, that the maximum sleep period is measured in milliseconds, so it's not something you would expect to see all that often in a <tt>ps</tt> display.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/458036/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor466415"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">No-I/O dirty throttling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 9, 2011 4:21 UTC (Wed)
+                               by <b>hamjudo</b> (guest, #363)
+                              [<a href="/Articles/466415/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      If something has a 20% duty cycle, and you are randomly sampling, you expect to see the something in that special state in about 1 out of 5 samples. It doesn't matter if the average cycle time is 37 milliseconds or 20 microseconds. <p>
+
+If the throttling code, only throttles back 20%, then things are probably running just fine. A nightmare situation, such as running a web browser from 2011 swapping to a thumbdrive designed in 2006, would more likely have the process generating dirty pages for less than 10ms, then being put to sleep for 200ms. This would give the observer less than a 5% chance of witnessing the process while it was "awake".
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/466415/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2011, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

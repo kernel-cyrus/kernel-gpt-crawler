@@ -1,0 +1,616 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>NAPI polling in kernel threads [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/833840/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/833796/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/833840/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>NAPI polling in kernel threads</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 9, 2020</br>
+           </div>
+Systems that manage large amounts of network traffic end up dedicating a
+significant part of their available CPU time to the network stack itself.
+Much of this work is done in software-interrupt context, which can be
+problematic in a number of ways.  That may be about to change, though,
+once <a href="/ml/netdev/20201002222514.1159492-1-weiwan@google.com/">this
+patch series</a> posted by Wei Wang is merged into the mainline.
+<p>
+Once a packet arrives on a network interface, the kernel must usually
+perform a fair amount of protocol-processing work before the data in that
+packet can be delivered to the user-space application that is waiting for
+it.  Once upon a time, the network interface would interrupt the CPU when a
+packet arrived; the kernel would acknowledge the interrupt, then trigger a
+software interrupt to perform this processing work.  The problem with this
+approach is that, on busy systems, thousands of packets can arrive every
+second; handling the corresponding thousands of hardware interrupts can run
+the system into the ground.
+<p>
+The solution to this problem <a href="/Articles/30107/">was merged in
+2003</a> in the form of a mechanism that was called, at the time, "new
+API" or "NAPI".  Drivers that support NAPI can disable the packet-reception
+interrupt most of the time and rely on the network stack to poll for new
+packets at a frequent interval.  Polling may seem inefficient, but on busy
+systems there will always be new packets by the time the kernel polls for
+them; the driver can then process all of the waiting packets at once.  In
+this way, one poll can replace dozens of hardware interrupts.
+<p>
+NAPI has evolved considerably since 2003, but one aspect remains the same:
+it still runs in software-interrupt mode.  These interrupts, once queued by
+the kernel, will be processed at either the next return from a hardware
+interrupt or the next return from kernel to user mode.  They thus run in an
+essentially random context, stealing time from whatever unrelated process
+happens to be running at the time.  Software interrupts are hard for system
+administrators to manage and can create surprising latencies if they run
+for a long time.  For this reason, kernel developers have wanted to reduce
+or eliminate their use for years; they are an old mechanism that is deeply
+wired into core parts of the kernel, though, and are hard to get rid of.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+Wang's patch set (which contains work from Paolo Abeni, Felix Fietkau, and
+Jakub Kicinski) doesn't eliminate software interrupts, but it is a possible
+step in that direction.  With these patches applied, the kernel can
+optionally (under administrator control) create a separate kernel thread
+for each NAPI-enabled network interface.  After that, NAPI polling will be
+done in the context of that thread, rather than in a software interrupt.
+<p>
+The amount of work that needs to be done is essentially unchanged with this
+patch set, but the change in the way that work is done is significant.
+Once NAPI polling moves to its own kernel thread, it becomes much more
+visible and subject to administrator control.  A kernel thread can have its
+priority changed, and it can be bound to a specific set of CPUs; that
+allows the administrator to adjust how that work is done in relation to the
+system's user-space workload.  Meanwhile, the CPU scheduler will have a better
+understanding of how much CPU time NAPI polling requires and can avoid
+overloading the CPUs where it is running.  Time spent handling software
+interrupts, instead, is nearly invisible to the scheduler.
+<p>
+There aren't a lot of benchmark results posted with the patch set; those
+that are available indicate a possible slight increase in overhead when the
+threaded mode is used.  Users who process packets at high rates tend to
+fret over every nanosecond, but even they might find little to quibble
+about if these results hold.  Meanwhile, those users should also see more
+deterministic scheduling for their user-space code, which is also
+important.
+<p>
+The networking developers seem to be generally in favor of this work; Eric
+Dumazet <a
+href="/ml/netdev/CANn89iJDM97U15Znrx4k4bOFKunQp7dwJ9mtPwvMmB4S+rSSbA@mail.gmail.com/">indicated</a>
+a desire to merge it quickly.  This feeling is not unanimous, though;
+Kicinski, in particular, <a
+href="/ml/netdev/20200930130839.427eafa9@kicinski-fedora-pc1c0hjn.dhcp.thefacebook.com/">dislikes
+the kernel-thread implementation</a>.  He believes that better performance
+can be had by using the kernel's workqueue mechanism for the polling rather
+than threads.  Dumazet <a
+href="/ml/netdev/CANn89iK2-Wu8HMkWiD8U3pdRbwj2tjng-4-fJ81zVw_a3R6OqQ@mail.gmail.com/">answered</a>
+that workqueues would not perform well on "<q>server class
+platforms</q>" and indicated a lack of desire to wait to see a new
+workqueue-based implementation at some point in the future.
+<p>
+So it appears that this work will be merged soon; it's late for 5.10, so
+landing in the 5.11 kernel seems likely.  It's worth noting that the
+threaded mode will remain off by default.  Making the best use of it will
+almost certainly require system tuning to ensure that the NAPI threads are
+able to run without interfering with the workload; for now, administrators
+who are unwilling or unable to do that tuning are probably well advised to
+stick with the default, software-interrupt mode.  Software interrupts
+themselves are still not going away anytime soon, but this work may help in
+the long-term project of moving away from them.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#NAPI">NAPI</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Networking-NAPI">Networking/NAPI</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/833840/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor833925"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2020 20:54 UTC (Fri)
+                               by <b>darwi</b> (subscriber, #131202)
+                              [<a href="/Articles/833925/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Once NAPI polling moves to its own kernel thread, it becomes much more visible and subject to administrator control. A kernel thread can have its priority changed, and it can be bound to a specific set of CPUs; that allows the administrator to adjust how that work is done in relation to the system&#x27;s user-space workload.  Meanwhile, the CPU scheduler will have a better understanding of how much CPU time NAPI polling requires... Time spent handling software interrupts, instead, is nearly invisible to the scheduler. </font><br>
+<p>
+IMHO, this would also be very helpful in making !RT and RT kernels closer...<br>
+<p>
+PREEMPT_RT already runs softirqs in their own kernel threads, so that they can be prioritized and not affect random victims and real-time threads. Maybe, soon, all mainline kernels will be like RT in that regard ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/833925/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor833938"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2020 4:30 UTC (Sat)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/833938/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; this would also be very helpful in making !RT and RT kernels closer...</font><br>
+<p>
+Indeed, it makes one wonder if a new implementation is needed.<br>
+<p>
+I suppose we&#x27;ll call this solution the NNAPI.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/833938/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor833980"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2020 17:46 UTC (Sun)
+                               by <b>darwi</b> (subscriber, #131202)
+                              [<a href="/Articles/833980/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  Indeed, it makes one wonder if a new implementation is needed.</font><br>
+<p>
+Softirqs are used still used in a big number of places beyond networking. See the full list, enum *_SOFTIRQ, at include/linux/interrupt.h<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/833980/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor833992"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2020 22:16 UTC (Sun)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/833992/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Softirqs are used still used in a big number of places beyond networking. </font><br>
+<p>
+I am aware, but NAPI is used only in networking AFAIK.   Thanks for saying &quot;softirqs&quot; rather than &quot;software interrupts&quot;: ugh!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/833992/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor834008"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2020 3:40 UTC (Mon)
+                               by <b>darwi</b> (subscriber, #131202)
+                              [<a href="/Articles/834008/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I am aware, but NAPI is used only in networking AFAIK.</font><br>
+<p>
+Yes of course. My point was that RT runs almost all softirqs at kthread/task context, not just NAPI. Thus, RT handles the generic case (almost all softirqs), while the patch set mentioned in the article only handles one of its special cases (NAPI).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/834008/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor834086"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2020 20:01 UTC (Mon)
+                               by <b>nevets</b> (subscriber, #11875)
+                              [<a href="/Articles/834086/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Exactly! I proposed this work back in 2009 at Linux Plumbers. My idea was to call it &quot;ENAPI&quot; for &quot;Even-Newer API&quot;.<br>
+<p>
+<a href="https://blog.linuxplumbersconf.org/ocw/proposals/53">https://blog.linuxplumbersconf.org/ocw/proposals/53</a><br>
+<p>
+I may even be able to find my slides somewhere. There was a lot of skepticism about this approach (even from Eric Dumazet), but like threaded interrupts in general, I was confident that this would sooner or later be something that non RT folks would want.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/834086/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor834087"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2020 20:08 UTC (Mon)
+                               by <b>nevets</b> (subscriber, #11875)
+                              [<a href="/Articles/834087/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My slides are there: <a href="https://blog.linuxplumbersconf.org/2009/slides/Steven-Rostedt-network-thread-irqs.pdf">https://blog.linuxplumbersconf.org/2009/slides/Steven-Ros...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/834087/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor833940"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2020 8:40 UTC (Sat)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/833940/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Those of us who care most about performance and minimizing overhead are using &quot;kernel-bypass&quot; libraries with NICs that dump incoming packets into a ring buffer mapped into user-space memory. The kernel driver for such a NIC sets up filter criteria programmed into registers in an ASIC or FPGA on the NIC, and then leaves it to run freely DMAing incoming packets sequentially into the ring buffer interspersed with annotations like length, timestamp, and checksum, and updates an atomic shared index/pointer when the packet is ready.<br>
+<p>
+The user program just needs to poll for updates to this index, and then finish all its work on the packet before it gets overwritten, as little as a few ms later. That work might be just to copy the packet to a bigger ring buffer for other processes to look at under more-relaxed time constraints.<br>
+<p>
+The kernel driver watches its own mapping of such a ring buffer, and copies out packets that processes have expressed interest in to regular buffers to be delivered, or to be processed according to TCP protocol, e.g. to acknowledge, or to run them past the firewall first.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/833940/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor834101"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2020 3:15 UTC (Tue)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/834101/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You mean like DPDK?<br>
+<p>
+Any reason not to mention any specific example(s)?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/834101/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor834192"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2020 20:59 UTC (Tue)
+                               by <b>wkudla</b> (subscriber, #116550)
+                              [<a href="/Articles/834192/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don&#x27;t think they are referring to DPDK. It&#x27;s rather about solutions such as SolarFlare NICs and kernel bypass with OpenOnload.<br>
+It&#x27;s extremely popular in fintech and other latency sensitive fields.<br>
+<p>
+I can&#x27;t wait to get rid of softirqs from my critical CPUs. Those and tasklets are a nightmare when you&#x27;re trying to reduce platform jitter to the minimum.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/834192/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor834314"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 14, 2020 22:38 UTC (Wed)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/834314/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Agreed, I don&#x27;t have any direct experience with DPDK. I have used Onload/Ef_vi for Solarflare hardware (sold by Xilinx, maybe soon AMD), libexanic for Exablaze hardware (sold by Cisco now), and Napatech. I have studied Netronome, which enables running eBPF on the packet before it hits host memory, that can drop the packet at that stage.<br>
+<p>
+Each has its own idiosyncratic filtering configuration and ring buffer layout. ExaNIC is unusual in delivering packets 120 bytes at a time, enabling partial processing while the rest of the packet is still coming in.<br>
+<p>
+There are various accommodations to use in VMs, which I have not experimented with.<br>
+<p>
+Keeping the kernel&#x27;s greedy fingers off of my cores is one of the harder parts of the job. It means lots of custom boot parameter incantations, making deployment to somebody else&#x27;s equipment a chore. It would be much, much better if the process could simply tell the kernel, &quot;I will not be doing any more system calls, please leave my core completely alone from this point&quot;, and have that stick. Such a process does all its subsequent work entirely via mapped memory. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/834314/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor835865"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 2, 2020 17:00 UTC (Mon)
+                               by <b>immibis</b> (guest, #105511)
+                              [<a href="/Articles/835865/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That sounds exactly like NOHZ_FULL<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/835865/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor833952"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2020 15:41 UTC (Sat)
+                               by <b>tpo</b> (subscriber, #25713)
+                              [<a href="/Articles/833952/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wow, excellent article about fundamental mechanisms and concepts and how they are evolving. So much appreciated &lt;3 !<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/833952/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor833973"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2020 12:29 UTC (Sun)
+                               by <b>itsmycpu</b> (guest, #139639)
+                              [<a href="/Articles/833973/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It sounds like it can be toggled through sysfs. So much better than having to (re)compile the kernel. :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/833973/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor835060"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">NAPI polling in kernel threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2020 1:39 UTC (Sat)
+                               by <b>amworsley</b> (subscriber, #82049)
+                              [<a href="/Articles/835060/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+About time. Having packets processed in high priority software IRQs is a gift to those who want to carry out denial of service attacks against CPU limited embedded processors.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/835060/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2020, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

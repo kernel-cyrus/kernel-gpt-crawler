@@ -1,0 +1,894 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Deferring mtime and ctime updates [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/564120/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/563667/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/564120/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Deferring mtime and ctime updates</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 21, 2013</br>
+           </div>
+Back in 2007, the kernel developers <a
+href="/Articles/244829/">realized</a> that the maintenance of the last-accessed
+time for files ("atime") was a significant performance problem.  Atime
+updates turned every read operation into a write, slowing the I/O subsystem
+significantly.  The response was to add the "relatime" mount option that
+reduced atime updates to the minimum frequency that did not risk breaking
+applications.  Since then, little thought has gone into the performance
+issues associated with file timestamps.
+<p>
+Until now, that is.  Unix-like systems actually manage three timestamps
+for each file: along with atime, the system maintains the time of the last
+modification of the file's contents ("mtime") and the last metadata change
+("ctime").  At a first glance, maintaining these times would appear to be
+less of a performance problem; updating mtime or ctime requires writing the
+file's inode back to disk, but the operation that causes the time to be
+updated will be causing a write to happen anyway.  So, one would think, any
+extra cost would be lost in the noise.
+<p>
+It turns out, though, that there is a situation where that is not the
+case — uses where a file is written through a mapping created with
+<tt>mmap()</tt>.  Writable memory-mapped files are a bit of a challenge for
+the operating system: the application can change any part of the file with
+a simple memory reference without notifying the kernel.  But the kernel
+must learn about the write somehow so that it can eventually push the
+modified data back to persistent storage.  So, when a file is mapped for
+write access and a page is brought into memory, the kernel will mark that
+page (in the hardware) as being read-only.  An attempt to write that page
+will generate a fault, notifying the kernel that the page has been
+changed.  At that point, the page can be made writable so that further
+writes will not generate any more faults; it can stay writable until the
+kernel cleans the page by writing it back to disk.  Once the page is clean,
+it must be marked read-only once again.
+<p>
+The problem, as <a href="/Articles/564122/">explained</a> by Dave Chinner,
+is this: as soon as the kernel receives the page fault and makes the page
+writable, it must update the file's timestamps, and, for some filesystem
+types, an associated 
+revision counter as well.  That update is done synchronously in a filesystem
+transaction as part of the process of handling the page fault and allowing
+write access.  So a quick operation to make a page writable turns into a
+heavyweight filesystem operation, and it happens every time the application
+attempts to write to a clean page.  If the application writes large numbers
+of pages that have been mapped into memory, the result will be a painful
+slowdown.  And most of that effort is wasted; the timestamp updates
+overwrite each other, so only the last one will persist for any useful
+period of time.
+<p>
+As it happens, Andy Lutomirski has an application that is affected badly by
+this problem.  One of his
+previous attempts to address the associated performance problems —
+<tt>MADV_WILLWRITE</tt> — was <a href="/Articles/562211/">covered here</a>
+recently.  Needless to say, he is not a big fan of the current behavior
+associated with mtime and ctime updates.  He also asserted that the current
+behavior violates the Single Unix Specification, which states that those
+times must be updated between any write to a page and either the next
+<tt>msync()</tt> call or the writeback of the data in question.  The
+kernel, he said, does not currently implement the required behavior.
+<p>
+In particular,
+he pointed out that the timestamp updates happen after the <i>first</i>
+write to a given page.  After that first reference, the page is
+left writable and the kernel will be unaware of any subsequent modifications until
+the page is written back.  If the page remains in memory for a long time
+(multiple seconds) before being written back — as is often the case — the
+timestamp update will incorrectly reflect the time of the first write, not
+the last one. 
+<p>
+In an attempt to fix both the performance and correctness issues, Andy has
+put together <a href="/Articles/563909/">a patch set</a> that changes the
+way timestamp updates are handled.  In the new scheme, timestamps are not
+updated when a page is made writable; instead, a new flag
+(<tt>AS_CMTIME</tt>) is set in the associated <tt>address_space</tt>
+structure.  So there is no longer a filesystem transaction that must be done when
+the page is made writable.  At some future time, the kernel will call the
+new <tt>flush_cmtime()</tt> address space operation to tell the filesystem
+that an inode's times should be updated; that call will happen in response
+to a writeback operation or an <tt>msync()</tt> call.  So, if thousands of
+pages are dirtied before writeback happens, the timestamp updates will be
+collapsed into a single transaction, speeding things considerably.
+Additionally, the timestamp will reflect the time of the last update
+instead of the first.
+<p>
+There have been some quibbles with this approach.  One concern is that
+there are tight requirements around the handling of timestamps and revision
+numbers in filesystems that are exported via NFS.  NFS clients use those
+timestamps to learn when cached copies of file data have gone stale; if the
+timestamp updates are deferred, there is a risk that a client could work
+with stale data for some period of time.  Andy <a
+href="/Articles/564138/">claimed</a> that, with the current scheme, the
+timestamp could be wrong for a far longer period, so, he said, his patch
+represents 
+an improvement, even if it's not perfect.  David Lang <a
+href="/Articles/564141/">suggested</a> that perfection could be reached by
+updating the timestamps in memory on the first fault but not flushing that
+change to disk; Andy saw merit in the idea, but has not implemented it thus
+far.
+<p>
+As of this writing, the responses to the patch set itself have mostly been
+related 
+to implementation details.  Andy will have a number of things to change in
+the patch; it also needs filesystem implementations beyond just ext4 and a
+test for the xfstests package to show that things work correctly.  But the
+core idea no longer seems to be controversial.  Barring a change of opinion
+within the community, faster write fault handling for file-backed pages
+should be headed toward a mainline kernel sometime soon.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Access-time_tracking">Filesystems/Access-time tracking</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/564120/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor564309"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2013 2:30 UTC (Thu)
+                               by <b>Ben_P</b> (guest, #74247)
+                              [<a href="/Articles/564309/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Great article, thanks.<br>
+<p>
+I had no idea about the mmap()/mtime semantics, nor the perf impacts.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564309/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor564352"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2013 11:23 UTC (Thu)
+                               by <b>jlayton</b> (subscriber, #31672)
+                              [<a href="/Articles/564352/">Link</a>] (17 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, great article!<br>
+<p>
+I'm not convinced that the NFS problem is really a huge issue. mmap and NFS have a long and problematic history together...<br>
+<p>
+The answer for people trying to enforce cache-coherency across multiple clients has always been "use POSIX locking". If we simply have nfsd force the c/mtime update whenever a lock is released then that may be enough keep that in check.<br>
+<p>
+Another idea might be to somehow allow the c/mtime to be updated in memory without requiring that to be flushed to disk until flush_cmtime() is called. knfsd could then report the in-memory time on GETATTR calls. That could be problematic though if the host crashes, I guess. The client could see c/mtime move backward. For the Linux client, that's not such a huge problem -- it watches for the c/mtime to change and that change doesn't necessarily need to move toward the future. Other clients might not like it though.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564352/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564413"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2013 15:28 UTC (Thu)
+                               by <b>bfields</b> (subscriber, #19510)
+                              [<a href="/Articles/564413/">Link</a>] (16 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Yeah, I don't think it's worth trying for perfect consistency between a local application using mmap and a remote NFS client.
+
+<p>"The answer for people trying to enforce cache-coherency across multiple clients has always been "use POSIX locking". If we simply have nfsd force the c/mtime update whenever a lock is released then that may be enough keep that in check."
+
+<p>That might not be a bad idea.
+
+<p>For ordinary NFS clients the requirement that "times must be updated between any write to a page and either the next msync() call or the writeback of the data in question" may be all we need to guarantee that clients will see updates when they should, as they should normally be committing data before unlocking or opening.  (Though I wonder about the case where they hold a write delegation.)
+
+<p>"that change doesn't necessarily need to move toward the future."
+
+<p>Though in the v4 case there's a chance the change attribute could repeat a value after reboot.  I wonder if the filesystem could somehow add N to all change attributes after an unclean shutdown, for some big enough N.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564413/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564485"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2013 20:26 UTC (Thu)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/564485/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The trouble with forcing early cmtime updates is that we don't really know whether there's a dirty pte without walking all dirty pages.<br>
+<p>
+(Given that the kernel doesn't currently support clean+writable ptes for shared mappings, this could be hacked around by tracking the number of writable ptes, but this is IMO gross.  The other reason I don't want to do that is because I want the system to have a chance of working on writable XIP devices and on some magic future kernel that does support clean+writable.)<br>
+<p>
+It would be possible to write a function to collect dirty ptes for an entire address_space much faster than calling page_mkclean on every page.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564485/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564568"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2013 12:08 UTC (Fri)
+                               by <b>etienne</b> (guest, #25256)
+                              [<a href="/Articles/564568/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe the other trouble with forcing early cmtime updates is that you do not know if someone will ask for it - i.e. the amount of work to maintain cmtime should be reduced to a minimum, even if that means more work when someone "stat()" the file.<br>
+Maybe even scan both versions (on disk and on memory) to look for difference when a stat() of a mmap file is done...<br>
+I wonder if someone has a idea about measuring the amount of time taken by managing a "page written" bit by setting the page read-only and faulting at first write (on Intel/AMD) and on ARM also managing a "page accessed" bit by setting the page non-accessible and faulting at the first access... that is a lot of faults (lots of pages) and each one may slow down the faulted process (cache and jump target cache pollution, out-of-order CPU stalled)...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564568/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564654"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2013 17:33 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/564654/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+think about a multi-GB video file that's accessed via NFS, then look at your proposal to scan the entire file again and see if it still seems reasonable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564654/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor564567"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2013 11:55 UTC (Fri)
+                               by <b>jlayton</b> (subscriber, #31672)
+                              [<a href="/Articles/564567/">Link</a>] (12 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Though in the v4 case there's a chance the change attribute could repeat a</font><br>
+<font class="QuotedText">&gt; value after reboot.</font><br>
+<p>
+Is that really a problem though? IIRC, the change_attribute is supposed to be opaque. The client is only supposed to care if it's different from the last one it saw, not necessarily that it has gone forward.<br>
+<p>
+Oh but...I suppose you could get bitten if you saw the change attribute transition from (for instance) 3-&gt;4 and then server reboots without committing that to disk. It then comes back again and does another 3-&gt;4 transition with a different set of data. Client then sees change attribute is "still" at 4 and doesn't purge the cache.<br>
+<p>
+In that case...yeah -- maybe adding some sort of random offset to the change_attribute that's generated at boot time might make sense.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564567/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564583"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2013 13:41 UTC (Fri)
+                               by <b>bfields</b> (subscriber, #19510)
+                              [<a href="/Articles/564583/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Yeah, exactly.  At the time of a crash the in-memory change attribute may be well ahead of the on-disk one, and when the client resends the uncommitted data after boot it probably doesn't send exactly the same number and sequence of write rpc's, so as the server processes those resends it could reuse old change attributes with different data.
+
+<p>I don't know if the problem would be easy to hit in practice.
+
+<p>For a fix: we'd rather not invalidate all caches on every boot.  We can't know which inodes are affected as that would require a disk write before allowing dirtying of any pages.  Especially if there's a possibility of multiple reboots and network partitions I don't think we even know which boots are affected (maybe this is a boot after a clean shutdown but we still have a back-in-time change attribute left over from a previous crash).
+
+<p>Maybe a simple fix would be: instead of making the change attribute a simple 64-bit counter, instead put current unix time in the top 32 bits and a counter in the bottom 32 bits.  Print a warning and congratulations to the log the first time anyone manages to sustain more than 4 billion writes in a second....
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564583/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564655"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2013 17:34 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/564655/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+keep in mind that the in-memory version should only be used if you are NOT exporting the file via NFS.<br>
+<p>
+So you don't have to worry about clients after a reboot.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564655/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564660"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2013 18:45 UTC (Fri)
+                               by <b>bfields</b> (subscriber, #19510)
+                              [<a href="/Articles/564660/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      You're suggesting ensuring that any pending ctime/mtime/change attribute updates be committed to disk before responding to an nfs stat?  I'm not sure that's practical.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564660/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564691"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2013 1:31 UTC (Sat)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/564691/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+remember that the NFS spec requires that any writes to a NFS volume must be safe on disk before the write completes.<br>
+<p>
+This requires a fsync after every write, which absolutely kills performance (unless you avoid ext3 and you have NVRAM or battery backed cache to write to), updating the attribute at the same time seems to be required by the standard.<br>
+<p>
+Now, many people configure their systems outside the standard, accepting less data reliability in the name of performance, but if you are trying to provide all of the NFS guarantees, you need to update the timestamp after every write<br>
+<p>
+This is why it's a _really_ bad idea to put things like Apache logs on NFS, unless you have a server with a lot of NVRAM to buffer your writes, and even then it's questionable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564691/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564694"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2013 2:18 UTC (Sat)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/564694/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I… think that reminding the maintainer of the kernel NFS server how NFS works might be a touch unnecessary.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564694/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564695"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2013 2:28 UTC (Sat)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/564695/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+could be (and for the record, I didn't recognize that was who he was), but I've seen people manage to miss obvious things before in their area of expertise (and I've done it myself)<br>
+<p>
+If I'm wrong about my understanding of what NFS requires, I'm interested in being corrected, I'll learn something and be in a better position to setup or troubleshoot in the future.<br>
+<p>
+David Lang<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564695/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564713"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2013 19:45 UTC (Sat)
+                               by <b>bfields</b> (subscriber, #19510)
+                              [<a href="/Articles/564713/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>No problem, I can overlook the obvious....
+
+<p>But as jlayton says, what you describe is not the typical case for NFS since v3, and reverting to NFSv2-like behavior would be a significant regression in some common cases.
+
+<p>And on a quick check....  I think the Linux v4 client, as one example, does request the change attribute on every write (assuming it doesn't hold a delegation), so the server would be forcing a commit to disk on every write.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564713/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564716"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2013 20:11 UTC (Sat)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/564716/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ok, I wasn't aware that newer versions of NFS had relaxed the standard (I've been dealing with NFS for a while, but for the last 10 years or so it's either been with home-grade machines that I didn't expect great performance from, or with EMC/Netapp high end devices that include a lot of NVRAM to handle writes fast anyway)<br>
+<p>
+just so I can see if I've got the use cases correct, I am understanding that we have the following cases<br>
+<p>
+1. no NFS: ctime and mtime updates can be deferrred<br>
+<p>
+2. NFSv2 in use: all writes are synchronous and ctime/mtime updates should be as well.<br>
+<p>
+3. NFSv3+ in use: writes can be delayed (which should include ctime/mtime updates), unless the client says they can't, in which case NFSv2 rules apply<br>
+<p>
+It seems to me that having a mount options like relctime or relmtime where the timestamp gets written out when the file is closed/mmunmap, when a fsync is done, or sooner if the kernel feels like it, should work (assuming NFS does flushes)<br>
+<p>
+The only gap I can see is if the writes to the file are being done locally (mmap for example), then the writes may not be visible to NFS clients immediatly, but if this is a mount option like relatime is, people who care about this case just don't use the mount option and get the old (slower but reliable) mode.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564716/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor564701"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2013 11:23 UTC (Sat)
+                               by <b>jlayton</b> (subscriber, #31672)
+                              [<a href="/Articles/564701/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; remember that the NFS spec requires that any writes to a NFS volume must</font><br>
+<font class="QuotedText">&gt; be safe on disk before the write completes. This requires a fsync after</font><br>
+<font class="QuotedText">&gt; every write, which absolutely kills performance (unless you avoid ext3 and</font><br>
+<font class="QuotedText">&gt; you have NVRAM or battery backed cache to write to), updating the</font><br>
+<font class="QuotedText">&gt; attribute at the same time seems to be required by the standard.</font><br>
+<p>
+That was true for NFSv2, but NFSv3 and later allow you to do UNSTABLE writes. Those don't need to be written to stable storage until the client issues a COMMIT (though the server is free to write them out earlier if it needs to). Most clients (Linux' included) will use UNSTABLE writes for the bulk of the writes that it does. STABLE (NFSv2-ish) writes are still used in some cases, but that's only where we deem that it's more efficient to do it that way.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564701/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor564702"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2013 11:28 UTC (Sat)
+                               by <b>jlayton</b> (subscriber, #31672)
+                              [<a href="/Articles/564702/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Maybe a simple fix would be: instead of making the change attribute a</font><br>
+<font class="QuotedText">&gt; simple 64-bit counter, instead put current unix time in the top 32 bits</font><br>
+<font class="QuotedText">&gt; and a counter in the bottom 32 bits. Print a warning and congratulations</font><br>
+<font class="QuotedText">&gt; to the log the first time anyone manages to sustain more than 4 billion</font><br>
+<font class="QuotedText">&gt; writes in a second.... </font><br>
+<p>
+I suspect it wouldn't be too hard to hit that mark ;)<br>
+<p>
+This scheme might work, but you'd still have the same problem that all caches would end up invalidated when the server reboots. You're quite correct that that *is* a problem that can crush an NFS server if it has a lot of clients dealing with large files. I do think we'll need to come up with some scheme that avoids that.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564702/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564715"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2013 19:59 UTC (Sat)
+                               by <b>bfields</b> (subscriber, #19510)
+                              [<a href="/Articles/564715/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>I suspect it wouldn't be too hard to hit that mark ;)</blockquote>
+
+<p>I'm not so sure, but actually this is really only a problem if the counter wraps around *and* a client's two successive stats manage to hit the same value each time through, which sounds pretty unlikely.
+
+<blockquote>This scheme might work, but you'd still have the same problem that all caches would end up invalidated when the server reboots.</blockquote>
+
+<p>I'm suggesting replacing inode_inc_version by something that does this instead of just i_version++.  So existing change attributes wouldn't change on reboot.  It'd just ensure that when we write the file again, we choose a genuinely new change attribute and not one we might have used on the previous boot.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564715/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor564833"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2013 16:25 UTC (Mon)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/564833/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; manage to hit the same value each time through, which sounds pretty unlikely</font><br>
+<p>
+Just throwing this out there because I'm not an expert on this but it might also be useful to look from a security perspective, how could someone intentionally cause this to fail because if there is a thing with can fail than someone is going to try very hard and make it fail just to screw up your system if they can.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564833/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor564510"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2013 0:41 UTC (Fri)
+                               by <b>PaulWay</b> (subscriber, #45600)
+                              [<a href="/Articles/564510/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So is the idea that the mtime will be set as the time when the page is finally written to disk?  Or the time of the page fault?  The former seems to make sense to me, but may be less accurate for some.  Or is it something else?<br>
+<p>
+Obviously the correct answer is the time when the memory was actually written, but knowing that time is bordering on impossible.<br>
+<p>
+Great reporting on a very interesting improvement, Jon!<br>
+<p>
+Have fun,<br>
+<p>
+Paul<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/564510/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor565171"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 29, 2013 3:05 UTC (Thu)
+                               by <b>heijo</b> (guest, #88363)
+                              [<a href="/Articles/565171/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wow, how did this apparently huge issue get missed for 20 years?<br>
+<p>
+Does this *really* mean that if you write a 4GB file via mmap on a 4KB page architecture, the mtime field is updated on disk a million times, or is it mitigated somehow?<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/565171/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor565211"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 29, 2013 10:21 UTC (Thu)
+                               by <b>cladisch</b> (<b>&#x272D; supporter &#x272D;</b>, #50193)
+                              [<a href="/Articles/565211/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The inode in the page cache will be updated and scheduled for an eventual write to disk a million times. How many of those writes are merged or do actually happen depends on the caching policy, and on how seriously a journaling FS takes metadata updates.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/565211/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor565781"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deferring mtime and ctime updates</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 5, 2013 7:01 UTC (Thu)
+                               by <b>kevinm</b> (guest, #69913)
+                              [<a href="/Articles/565781/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if it's really worth trying to fix the remote NFS client thing perfectly, since there's still the issue that subquent writes to the dirty page won't cause more mtime updates - the fault only happens when the page is first marked as dirty.  So if the NFS client does a GETATTR and a read after the first write on a page, but then the application with a mapping does another write to the same page, followed by the NFS client doing another GETATTR, it will see the timestamp as unchanged when the file contents have changed.<br>
+<p>
+It seems to me like the "perfect" fix would require marking all the PTEs mapping the file as read-only again at every remote GETATTR call, which is likely to be expensive enough to rule out entirely.<br>
+<p>
+In my view you shouldn't be relying on changes to mmap()ed files propagating to remote NFS clients until you msync().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/565781/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

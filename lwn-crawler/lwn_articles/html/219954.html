@@ -1,0 +1,515 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Fibrils and asynchronous system calls [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/219954/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/218986/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/219954/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Fibrils and asynchronous system calls</h1>
+<div class="Byline">[Posted January 31, 2007 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+The kernel's support for asynchronous I/O is incomplete, and it always has
+been.  While certain types of operations (direct filesystem I/O, for
+example) work well in an asynchronous mode, many others do not.  Often
+implementing asynchronous operation is hard, and nobody has ever gotten
+around to making it work.  In other cases, patches have been around for
+some time, but they have not made it into the mainline; AIO patches can be
+fairly intrusive and hard to merge.  Regardless of the reason, things tend
+to move very slowly in the AIO area.
+<p>
+
+Zach Brown has decided to stir things up by asking a basic question: could
+it be that the way the kernel implements AIO is all wrong?  The current
+approach adds a fair amount of complexity, requiring explicit AIO handling
+in every subsystem which supports it.  IOCB structures have to be passed
+around, and kernel code must always check whether it is supposed to block
+on a given operation or return one of two "it's in the works" codes.  It
+would be much nicer if most kernel operations could simply be invoked
+asynchronously without having to clutter them up with explicit support.
+<p>
+
+To that end, Zach has posted <a href="http://lwn.net/Articles/219928/">a
+preliminary patch set</a> which simplifies asynchronous I/O support
+considerably, but doesn't stop there: it also makes any system call
+invokable in an asynchronous mode.  The key is a new type of in-kernel
+lightweight thread known as a "fibril."
+<p>
+
+A fibril is an execution thread which only runs in kernel space.  A process
+can have any number of fibrils active, but only one of them can actually
+execute in the processor(s) at any given time.  Fibrils have their own
+stack, but otherwise they share all of the resources of their parent
+process.  They are kept in a linked list attached to the task structure.
+<p>
+
+When a process makes an asynchronous system call, the kernel creates a new
+fibril and executes the call in that context.  If the system call completes
+immediately, the fibril is destroyed and the result goes back to the
+calling process in the usual way.  Should the fibril block, however, it
+gets queued and control returns to the submitting code, which can then
+return the "it's in progress" status code.  The "main" process can then run
+in user space, submit more asynchronous operations, or do just about
+anything else.
+<p>
+
+Sooner or later, the operation upon which the fibril blocked will
+complete.  The wait queue entry structure has been extended to include
+information on which fibril was blocked; the wakeup code will find that
+fibril and make it runnable by adding it to a special "run queue" linked
+list in the parent task structure.  The kernel will then schedule the
+fibril for execution, perhaps displacing the "main" process.  That fibril
+might make some progress and block 
+again, or it may complete its work.  In the latter case, the final exit
+code is saved and the fibril is destroyed.
+<p>
+
+By moving asynchronous operations into a separate thread, Zach's patch
+simplifies their implementation considerably - with few exceptions, kernel
+code need not be changed at all to support asynchronous calls.  The
+creation of fibrils is intended to make it all happen quickly - fibrils are
+intended to be less costly than kernel threads or ordinary processes.  Their
+one-at-a-time semantics help to minimize the concurrency issues which might
+otherwise come up.
+<p>
+
+The user-space interface starts with a structure like this:
+<p>
+<pre>
+    struct asys_input {
+	int 		syscall_nr;
+	unsigned long	cookie;
+	unsigned long	nr_args;
+	unsigned long	*args;
+    };
+</pre>
+<p>
+The application is expected to put the desired system call number in
+<tt>syscall_nr</tt>; the arguments to that system call are described by
+<tt>args</tt> and <tt>nr_args</tt>.  The <tt>cookie</tt> value will be
+given back to the process when the operation completes.  User space can
+create an array of these structures and pass them to:
+<p>
+<pre>
+    long asys_submit(struct asys_input *requests, unsigned long nr_requests);
+</pre>
+<p>
+The kernel will then start each of the requests in a fibril and return to
+user space.  When the process develops an interest in the outcome of its
+requests, it uses this interface:
+<p>
+<pre>
+    struct asys_completion {
+	long 		return_code;
+	unsigned long	cookie;
+    };
+
+    long asys_await_completion(struct asys_completion *comp);
+</pre>
+<p>
+A call to <tt>asys_await_completion()</tt> will block until at least one
+asynchronous operation has completed, then return the result in the
+structure pointed to by <tt>comp</tt>.  The <tt>cookie</tt> value given at
+submission time is returned as well.
+<p>
+
+Your editor notes that the current <tt>asys_await_completion()</tt>
+implementation does not check to see if any asynchronous operations are
+outstanding; if none are, the call is liable to wait for a long time.
+There are a number of other issues with the patch set, all acknowledged by
+their author.  For example, little thought has been given to how fibrils
+should respond to signals.  Zach's purpose was not to present a completed
+work; instead, he wants to get the idea out there and see what people think
+of it.
+<p>
+
+Linus <a href="/Articles/219957/">likes the idea</a>:
+<p>
+<div class="BigQuote">
+Yee-haa! [...]
+<p>
+I heartily approve, although I only gave the actual patches a very cursory 
+glance. I think the approach is the proper one, but the devil is in the 
+details. It might be that the stack allocation overhead or some other 
+subtle fundamental problem ends up making this impractical in the end, but 
+I would _really_ like for this to basically go in.
+</div>
+<p>
+There are a lot of details - Linus noted that there is no limit on how many
+fibrils a process can create, for example - but this seems to be the way that he would
+like to see AIO implemented.  He suggests that fibrils might be useful in
+the kevent code as well.
+<p>
+
+On the other hand, Ingo Molnar <a href="/Articles/219958/">is opposed</a>
+to the fibril approach; his argument is long but worth reading.  In Ingo's
+view, there are only two solutions to any operating system problem which
+are of interest: (1)&nbsp;the one which is easiest to program with, and
+(2)&nbsp;the one that performs the best.  In the I/O space, he claims, the
+easiest approach is synchronous I/O calls and user-space processes.  The
+fastest approach will be "a pure, minimal state machine" optimized for the
+specific task; his Tux web server is given as an example.
+<p>
+According to Ingo, the fibril approach serves neither goal:
+<p>
+<div class="BigQuote">
+	Now where do all these LWP, fibre, firbril, micro-thread or N:M
+	concepts fit? Most of the time they are just a /weakening/ of the
+	#1 concept. And that's why they will lose out, because #1 is all
+	about programmability and they don't offer anything new: because
+	they cannot. Either you go for programmability or you go for
+	performance. There is /no/ middle ground for us in the kernel!
+</div>
+<p>
+
+Ingo makes the claim that Linux is sufficiently fast at switching between
+ordinary processes that the advantages offered by fibrils are minimal at
+best, and not worth their cost.  Anybody wanting performance will still
+have to face the full kernel AIO state machine.  So, he says, there is no
+real advantage to fibrils at this time that are worth the cost of
+complicating the scheduler and moving away from the 1:1 thread model.
+<p>
+
+These patches are in an early stage, and this story will clearly take some
+time to play out.  Even if a consensus develops in favor of the fibril
+idea, the process of turning them into a proper, robust kernel feature
+could make them too expensive to be worthwhile.  But it's an interesting
+idea which brings a much-needed fresh look at how the kernel does AIO; it's
+hard to complain too much about that.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Asynchronous_IO">Asynchronous I/O</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Fibrils">Fibrils</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/219954/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor220095"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fibrils and asynchronous system calls</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2007 11:48 UTC (Thu)
+                               by <b>simlo</b> (guest, #10866)
+                              [<a href="/Articles/220095/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      It reminds me of call/cc in functional programming, which can be used to emulate volentary preemption. Using such a mechanism is much easier than making explicit state machines.<br>
+<p>
+Having several fibrils per thread could be used event handling as well:<br>
+Interfaces often contain callbacks on which the user of a subsystem can get function executed on a special event. In multi-threaded environments this is hazardeous due to deadlocks. However, if the callback can be executed in a fibril in the user's thread instead of originating thread, you can avoid deadlocks and maybe even the need for a lock in the first place. (A fibril should not be allowed to run if the thread owns a mutex. Does the sample patch take care of that?).<br>
+That would in fact be a message passing system, which is really, really usefull for many applications. I am not a huge fan of message parsing systems, but I think the technique has it's places.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/220095/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor220303"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fibrils and asynchronous system calls</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 2, 2007 2:27 UTC (Fri)
+                               by <b>pimlott</b> (guest, #1535)
+                              [<a href="/Articles/220303/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote type=cite>It reminds me of call/cc in functional programming</blockquote>
+
+Bingo, I was hoping someone would say that.  The functional world has some nice mechanisms for handling concurrency.  For example you can express an IO operation as a description of the request, plus a function to run on the result (and this is natural with lambda and lexical closure).  The runtime can manage all outstanding requests and pass the responses to the functions as they become available.  Similarly, a driver can be expressed as a computation that returns either an answer, or a message indicating what resource it needs before it can continue, plus a function to run on that resource.  The runtime again obtains the needed resources and runs the continuations.  You get most of the benefit of event-driven programming, with the illusion of sequential processing (outside the runtime).
+<p>
+I'm reminded of Alan Cox's quote, "Computers are state machines. Threads are for people who can't program state machines."  To which the best programmer I've ever known answered, "I can't program state machines!"  The appearance of sequential execution is a boon to programmer productivity.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/220303/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor220154"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fibrils and asynchronous system calls</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2007 14:53 UTC (Thu)
+                               by <b>kirkengaard</b> (guest, #15022)
+                              [<a href="/Articles/220154/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      So a process which causes all of these mini-threadlets to exit simultaneously would be a de-fibril-ator?  ;)<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/220154/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor220191"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fibrils and asynchronous system calls</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2007 16:47 UTC (Thu)
+                               by <b>liljencrantz</b> (guest, #28458)
+                              [<a href="/Articles/220191/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      This looks a lot like various cooperative threading libraries I've seen. You basically set up a bunch of different stacks and pretend that each one is  a new thread. Context switching is just a longjmp - it's significantly faster than a real context switch and significantly easier to code for as well, since you don't have any problems with sharing data between threads. Multithreading is much easier when you get to say when and where context switches can take place.<br>
+<p>
+I don't agree with Ingo Molnars assertion that one should aim to either make something as simple or as fast as possible and never anything in between, I've found cooperative threading to sometimes offer a very nice tradeoff between the two. <br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/220191/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor220252"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fibrils and asynchronous system calls</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2007 21:27 UTC (Thu)
+                               by <b>schabi</b> (guest, #14079)
+                              [<a href="/Articles/220252/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      I fully agree with Ingo here. The real way to do this is to work completely asynchroneous inside the kernel, and provide both an async and a sync interface to it.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/220252/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor220274"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fibrils and asynchronous system calls</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 1, 2007 22:56 UTC (Thu)
+                               by <b>Nir</b> (guest, #27440)
+                              [<a href="/Articles/220274/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      One of my systems generates approximately 1000 aios a second.
+What will be the cost in "IO wait" ? 
+Will the CPU suffer more  ?
+Will it better or worst than the current implementation ?
+
+Raz
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/220274/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor220473"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Windows NT</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 3, 2007 18:09 UTC (Sat)
+                               by <b>mikov</b> (guest, #33179)
+                              [<a href="/Articles/220473/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>In the Windows driver model all calls are asynchronous. Every user mode request is represented by an IRP structure which can be linked in various lists, etc, and completed asynchrounsly.
+<p>I have always liked that approach - it can be complicated to grasp and implement, but it is consistent and after all is the natural way for handling IO operations at the low level:
+<ul>
+  <li>User mode makes a request to the driver
+  <li>An operation is submitted to the hardware
+  <li>The hardware starts executing it
+  <li>At some later time the hardware completes and generates a completion interrupt
+  <li>The user mode request is completed asynchronously
+</ul>
+
+<p>Fibrils seem like an awful patch to me.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/220473/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor222322"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Windows NT</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 15, 2007 16:02 UTC (Thu)
+                               by <b>IXRO</b> (guest, #39871)
+                              [<a href="/Articles/222322/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Unfortunately that was slow enough, so they introduced FastIO, that bypasses the stack<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/222322/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor221668"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The duality of Threads and Events</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 12, 2007 5:57 UTC (Mon)
+                               by <b>HalfMoon</b> (guest, #3211)
+                              [<a href="/Articles/221668/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>I basically agree with Ingo here.  Been there, done that.
+
+<p>The underlying observation is not new; threads and events/state-machines are the two basic ways to express concurrency in an OS context.  Why do so many folk have a hard time understanding IRQ handling?  Because that's purely an event mechanism.  Why do so many people (think they) like threads?  Because they've been taught that the world is really single threaded, in all those intro programming courses, and most text books don't burst that bubble.  Hardware designers work with state machines all the time, of course...
+
+<p>The classic problem of evolving an operating system so it scales up without losing performance can also be stated as:  how do we move this pile of legacy crap more towards a primarily event-driven model?
+
+<p>Of course it's not like threads will ever vanish.  They work hand in hand with event frameworks, the other side of the coin ... and no sane person will say "heads" is always better than "tails".  But on the other hand, a large system with 10,000 threads crunching away inside of it is going to be more wasteful than the equivalent one with all those threads waiting at the periphery, while the insides are an event-driven state machine chewing away at the requests issued by those threads.
+
+<p>Remember:  ten thousand thread/fibril/LWP/... stacks takes up a lot of memory (4K each), and the thing that makes them <em>seem</em> to be "easy to program" is in large part that critical system state is isolated on all those stacks.  So <em><b>when</b> something goes wrong</em>, it's almost completely invisible to code tasked with recovering.  But if that state were made explicit as part of the state machine, it would be available.
+
+<p>Concurrent programming isn't easy.  And threads are not a silver bullet; there is no such thing.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/221668/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2007, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

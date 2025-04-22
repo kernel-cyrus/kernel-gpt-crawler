@@ -1,0 +1,402 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Better per-CPU variables [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/258238/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/257828/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/258238/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Better per-CPU variables</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 12, 2007</br>
+           </div>
+One of the great advantages of multiprocessor computers is the fact that
+main memory is available to all processors on the system.  This ability to
+share data gives programmers a great deal of flexibility.  One of the first
+things those programmers learn (or should learn), however, is that actually
+sharing data between processors is to be avoided whenever possible.  The
+sharing of data - especially data which changes - causes all kinds of bad
+cache behavior and greatly reduced performance.  The recently-concluded <a
+href="http://lwn.net/Articles/250967/">What every programmer should know
+about memory</a> series covers these problems in great detail.
+<p>
+
+Over the years, kernel developers have made increasing use of per-CPU data
+in an effort to minimize memory contention and its associated performance
+penalties.  As a simple example, consider the disk operation statistics
+maintained by the block layer.  Incrementing a global counter for every
+disk operation would cause the associated cache line to bounce continually
+between processors; disk operations are frequent enough that the
+performance cost would be measurable.  So each CPU maintains its own set of
+counters locally; it never has to contend with any other CPU to increment
+one of those counters.  When a total count is needed, all of the per-CPU
+counters are added up.  Given that the counters are queried far more rarely
+than they are modified, storing them in per-CPU form yields a significant
+performance improvement.
+<p>
+
+In current kernels, most of these per-CPU variables are managed with an
+array of pointers.  So, for example, the <tt>kmem_cache</tt> structure (as
+implemented by the SLUB allocator) contains this field:
+<p>
+<pre>
+    struct kmem_cache_cpu *cpu_slab[NR_CPUS];
+</pre>
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+
+<img src="https://static.lwn.net/images/ns/kernel/percpu-array.png" width=242 height=212
+alt="[percpu array]" hspace = 3 align="right">
+
+
+Note that the array is dimensioned to hold one pointer for every possible
+CPU in the system.  Most deployed computers have fewer than the maximum
+number of processors, though, so there is, in general, no point in
+allocating <tt>NR_CPUS</tt> objects for that array.  Instead, only the
+entries in the array which correspond to existing processors are populated;
+for each of those processors, the requisite object is allocated using
+<tt>kmalloc()</tt> and stored into the array.  The end result is an array
+that looks something like the diagram on the right.  In this case, per-CPU
+objects have been allocated for four processors, with the remaining entries
+in the array being unallocated.
+<p>
+A quick look at the diagram immediately shows one potential problem with
+this scheme: each of these per-CPU arrays is likely to have some wasted
+space at the end.  <tt>NR_CPUS</tt> is a configuration-time constant; most
+general-purpose kernels (e.g. those shipped by distributors) tend to have
+<tt>NR_CPUS</tt> set high enough to work on most or all systems which might
+reasonably be encountered.  In short, <tt>NR_CPUS</tt> is likely to be quite a bit
+larger than the number of processors actually present, with the result that
+there will be a significant amount of wasted space at the end of each
+per-CPU array.
+<p>
+In fact, Christoph Lameter noticed that are more problems than that; in
+response, he has posted <a href="/Articles/258248/">a patch
+series for a new per-CPU allocator</a>.  The deficiencies addressed by
+Christoph's patch (beyond the wasted
+space in each per-CPU array) include:
+<p>
+<ul>
+
+<li> If one of these per-CPU arrays is embedded within a larger data
+     structure, it may separate the other variables in that structure,
+     causing them to occupy more cache lines than they otherwise would.
+<p>
+<li> Each CPU uses exactly one pointer from that array (most of the time);
+     that pointer will reside in the processor's data cache while it is
+     being used.  Cache lines hold quite a bit more than one pointer,
+     though; in this case, the rest of the cache line is almost certain to
+     hold the pointers for the other CPUs.  Thus, scarce cache space is
+     being wasted on completely useless data.
+<p>
+<li> Accessing the object requires two pointer lookups - one to get the
+     object pointer from the array, and one to get to the object itself.
+</ul>
+<p>
+
+Christoph's solution is quite simple in concept: turn all of those little
+per-CPU arrays into one big per-CPU array.  With this scheme, each
+processor is allocated a dedicated range of memory at system initialization
+time.  These ranges are all contiguous in the kernel's virtual address
+
+<img src="https://static.lwn.net/images/ns/kernel/percpu-noarray.png" width=242 height=204
+alt="[New percpu structure]" hspace=3 align="right" border=0 vspace=3>
+
+space, so, given a pointer to the per-CPU area for CPU&nbsp;0, the area for
+any other processor is just a pointer addition away.
+<p>
+When a per-CPU object is allocated, each CPU gets a copy obtained from its
+own per-CPU area.  Crucially, the offset into each CPU's area is the same,
+so the address of any CPU's object is trivially calculated from the address
+of the first object.  So the array of pointers can go away, replaced by a
+single pointer to the object in the area reserved for CPU&nbsp;0.  The
+resulting organization looks (with the application of sufficient
+imagination) something like the diagram to the right.  For a given object,
+there is only a single pointer; all of the other versions of that object
+are found by applying a 
+constant offset to that pointer.
+<p>
+
+The interface for the new allocator is relatively straightforward.  A new
+per-CPU variable is created with:
+<p>
+<pre>
+    #include &lt;linux/cpu_alloc.h&gt;
+
+    void *per_cpu_var = CPU_ALLOC(type, gfp_flags);
+</pre>
+<p>
+This call will allocate a set of per-CPU variables of the given
+<tt>type</tt>, using the usual <tt>gfp_flags</tt> to control how the
+allocation is performed.  A pointer to a specific CPU's version of the
+variable can be had with:
+<p>
+<pre>
+    void *CPU_PTR(per_cpu_var, unsigned int cpu);
+    void *THIS_CPU(per_cpu_var);
+</pre>
+<p>
+The <tt>THIS_CPU()</tt> form, as might be expected, returns a pointer to
+the version of the variable allocated for the current CPU.  There is a
+<tt>CPU_FREE()</tt> macro for returning a per-CPU object to the system.
+Christoph's patch converts all users of the existing per-CPU interface and
+ends by removing that API altogether.
+<p>
+There are a number of advantages to this approach.  There's one less
+pointer operation for each access to a per-CPU variable.  The same pointer
+is used on all processors, resulting in smaller data structures and better
+cache line utilization.  Per-CPU variables for a given processor are
+grouped together in memory, which, again, should lead to better cache use.
+All of the memory wasted in the old pointer arrays has been reclaimed.
+Christoph also claims that this mechanism, by making it easier to keep
+track of per-CPU memory, makes the support of CPU hotplugging easier.
+<p>
+
+The amount of discussion inspired by this patch set has been relatively
+low.  There were complaints about the UPPER CASE NAMES used by the macros.
+The biggest complaint, though, has to do with the way the static
+per-CPU areas bloat the kernel's data space.  On some architectures it
+makes the kernel too large to boot, and it's a real cost on all
+architectures.  Just how this issue will be resolved is not yet clear.
+If a solution can be found, the new per-CPU code has a good chance of
+getting into the mainline when the 2.6.25 merge window opens.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Internal_API">Memory management/Internal API</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Per-CPU_variables">Per-CPU variables</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/258238/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor259017"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better per-CPU variables</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 17, 2007 11:59 UTC (Sat)
+                               by <b>ms</b> (subscriber, #41272)
+                              [<a href="/Articles/259017/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+"One of the great advantages of multiprocessor computers is the fact that main memory is
+available to all processors on the system."
+
+Hah!
+1) It's simply stupid to write software that assumes this as it won't scale to distributed
+systems.
+2) If we didn't have shared mutable memory, vast classes of bugs, typically concurrency
+related, wouldn't exist.
+3) The direction in which CPU architectures are moving makes it less and less likely that a
+single unified address space and general shared mutable memory are a) likely and b) desirable.
+
+Hence the endless rise of languages like Erlang and Haskell which aren't built, unlike, say C,
+on an unachievable model of a computer.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/259017/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor259075"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better per-CPU variables</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2007 1:56 UTC (Mon)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/259075/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+One of the great advantages of multiprocessor computers is the fact that main memory is
+available to all processors on the system.
+</blockquote>
+<p>
+That's like saying one of the great advantages of a lamp is that it illuminates things.  It's not just a great advantage, it's the definition.
+What would make a system in which the various processors have separate memory a multiprocessor system?
+
+<blockquote>
+1) It's simply stupid to write software that assumes this as it won't scale to distributed
+systems.
+</blockquote>
+<p>
+It sounds like you're saying it's stupid to write software for multiprocessor systems because then it would be software for multiprocessor systems.
+<p>
+I'm actually a foe of multiprocessor systems.  My experience makes me believe processors separated by TCP/IP, FCP, etc. links are more profitable for most things.  But I can definitely see the advantages of SMP.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/259075/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor259594"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better per-CPU variables</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 22, 2007 7:52 UTC (Thu)
+                               by <b>eduperez</b> (guest, #11232)
+                              [<a href="/Articles/259594/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <i>One of the great advantages of multiprocessor computers is the fact that main memory is available to all processors on the system. 
+<br />
+<br />
+> That's like saying one of the great advantages of a lamp is that it illuminates things. It's not just a great advantage, it's the definition. What would make a system in which the various processors have separate memory a multiprocessor system?</i>
+<br />
+<br />
+I think <b>ms</b> was talking about NUMA architectures.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/259594/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor259673"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better per-CPU variables</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 23, 2007 6:28 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/259673/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+I think ms was talking about NUMA architectures.
+</blockquote>
+<p>
+Everything <b>ms</b> says, and everything the article says, is applicable to to all multiprocessor systems, NUMA and non-NUMA alike.  They all have shared memory and they all have difficulty because of that.
+<p>NUMA shares memory in a way that strikes a different balance between the difficulties and the advantages of shared memory than other multiprocessor systems, but it remains a defining characteristic, not just an incidental feature, of multiprocessor systems that they have shared memory.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/259673/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2007, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

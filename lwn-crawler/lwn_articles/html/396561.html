@@ -1,0 +1,497 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Fixing writeback from direct reclaim [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/396561/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/396181/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/396561/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Fixing writeback from direct reclaim</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 20, 2010</br>
+           </div>
+"Writeback" is the process of writing the contents of dirty memory pages
+back to their backing store, where that backing store is normally a file or
+swap area.  Proper handling of writeback is crucial for both system
+performance and data integrity.  If writeback falls too far behind the
+dirtying of pages, it could leave the system with severe memory pressure
+problems.  Having lots of dirty data in memory also increases the amount of
+data which may be lost in the event of a system crash.  Overly enthusiastic
+writeback, on the other hand, can lead to excessive I/O bandwidth usage,
+and poorly-planned writeback can greatly reduce I/O performance with
+excessive disk seeks.  Like many memory-management tasks, getting writeback
+right is a tricky exercise involving compromises and heuristics.
+
+<p>
+Back in April, LWN <a href="http://lwn.net/Articles/384093/">looked at a
+specific writeback problem</a>: quite a bit of writeback activity was
+happening in direct reclaim.  Normally, memory pages are reclaimed (made
+available for new uses, with data written back, if necessary) in the
+background; when all goes well, there will always be a list of free pages
+available when memory is needed.  If, however, a memory allocation request
+cannot be satisfied 
+from the free list, the kernel may try to reclaim pages directly in the
+context of the process performing the allocation.  Diverting an allocation
+request into this kind of cleanup activity is called "direct reclaim."
+<p>
+Direct reclaim normally
+works, and it is a good way to throttle memory-hungry processes, but it
+also suffers from a couple of significant problems.  One of those is stack
+overflows; direct reclaim can happen from almost anywhere in the kernel, so
+it may be that the kernel stack is already mostly used before the reclaim process even
+starts.  But if reclaim involves writing file pages back, it can be just
+the beginning of a long call chain in its own right, leading to the
+overflow of the kernel stack.  Beyond that, direct reclaim, which reclaims
+pages wherever it can find them, tends to create
+seek-intensive I/O, hurting the whole system's I/O performance.
+<p>
+Both of these problems have been seen on production systems.  In response,
+a number of filesystems have been changed so that they simply ignore
+writeback requests which come from the direct reclaim code.  That makes the
+problem go away, but it is a kind of papering-over that pleases nobody; it
+also arguably increases the risk that the system could go into the dreaded
+out-of-memory state.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+Mel Gorman has been working on the reclaim problem, on and off, for a few
+months now.  His <a href="http://lwn.net/Articles/396512/">latest patch
+set</a> will, with luck, improve the situation.  The actual changes made
+are relatively small, but they apparently tweak things in the right
+direction.
+<p>
+The key to solving a problem is understanding it.  So, perhaps, it's not
+surprising that the bulk of the changes do not actually affect writeback;
+they are, instead, tracing instrumentation and tools which provide
+information on what the reclaim code is actually doing.  The new
+tracepoints provide visibility into the nature of the problem and,
+importantly, how much each specific change helps.
+<p>
+The core change is deep within the direct reclaim loop.  If direct reclaim
+stumbles across a page which is dirty, it now must think a bit harder about
+what to do with it.  If the dirty page is an anonymous (process data) page,
+writeback happens as before.  The reasoning here seems to be that the
+writeback path for these pages (which will be going to a swap area) will be
+simpler than it is for file-backed pages; there are also fewer
+opportunities for anonymous pages to be written back via other paths.  As a
+result, anonymous writeback might still create seek problems - but only if
+the swap area shares a spindle with other, high-bandwidth data.
+<p>
+For dirty, file-backed pages, the situation is a little different; direct
+reclaim will no longer try to write back those pages directly.  Instead, it
+creates a list of the dirty pages it encounters, then hands them over to
+the appropriate background process for the real writeback work.  In some
+cases (such as when <a href="http://lwn.net/Articles/211505/">lumpy
+reclaim</a> is trying to free specific larger chunks of memory), the direct
+reclaim code will wait in the hope that the identified pages will soon
+become free.  The rest of the time, it simply moves on, trying to find free
+pages elsewhere.
+<p>
+Handing the reclaim work over to the threads which exist for that task has
+a couple of benefits.  It is, in effect, a simple way of switching to
+another kernel stack - one which is known to be mostly empty - before
+heading into the writeback paths.  Switching stacks directly in the direct
+reclaim code had been discussed, but it was decided that the mechanism the
+kernel already has for switching stacks (context switches) was probably the
+right thing to use in this situation.  Keeping the writeback work in kswapd
+and the per-BDI writeback threads should also help performance, since those
+threads try to order operations to minimize head seeks.
+<p>
+When this problem was discussed in April, Andrew Morton pointed out that,
+over time, the amount of memory written back in direct reclaim has grown
+significantly, with an adverse effect on system performance.  He wanted to
+see thought put into why that change has happened rather than trying to
+mitigate its effects.  The final patch in Mel's series looks like an
+attempt to address this concern.  It changes the direct reclaim code so
+that, if that code starts encountering dirty pages, it pokes the writeback
+threads and tells them to start cleaning pages more aggressively.  The idea
+here is to keep the normal reclaim mechanisms running at a fast-enough pace
+that direct reclaim is not needed so often.  
+
+<p>
+This
+tweak seems to have a significant effect on some benchmarks; Mel says:
+<p>
+<div class="BigQuote">
+	Apparently, background flush must have been doing a better job
+	getting [pages] cleaned in time and the direct reclaim stalls are
+	harmful overall. Waking background threads for dirty pages made a
+	very large difference to the number of pages written back. With all
+	patches applied, just 759 filesystem pages were written back in
+	comparison to 581811 in the vanilla kernel and overall the number
+	of pages scanned was reduced.
+</div>
+<p>
+Anybody who likes digging through benchmark results is advised to look at
+Mel's patch posting - he appears to have run just about every test that he
+could to quantify the effects of this patch series.  This kind of extensive
+benchmarking makes sense for deep memory management changes, since even
+small changes can have surprising results on specific workloads.  At this
+point, it seems that the changes have the desired effect and most of the
+concerns expressed with previous versions have been addressed.  The
+writeback changes, perhaps, are getting ready for production use.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Writeback">Memory management/Writeback</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/396561/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor397038"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Yay! Finally!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 22, 2010 18:47 UTC (Thu)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/397038/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I really hope that they've finally got all this ironed out.<br>
+<p>
+Linux's problems with dirty memory pages have made it awful to use since forever. My old 1 GB Athlon64 laptop (now deceased) would often end up in minutes-long read/swap/flush storms when loading applications (laptop disk did not help here!). I had to use hacks to mlock X.org, critical libraries and Gnome daemons in order to maintain any kind of interactive response.<br>
+<p>
+Try running Evolution and Eclipse in 1 GB RAM in 64-bit mode and using the 2.6.24 kernel if you don't believe me. :)<br>
+<p>
+On that machine Windows XP64 used to run Eclipse so much nicer than 2.6.24.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/397038/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor397158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing writeback from direct reclaim</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2010 16:13 UTC (Fri)
+                               by <b>sbohrer</b> (guest, #61058)
+                              [<a href="/Articles/397158/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is there a user tunable setting to control how many pages are kept in the free list at all times?  Specifically I'm wondering If I can make Linux a little more aggressive at flushing old data in the page cache to avoid hitting direct reclaim when my process does a large allocation. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/397158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor397221"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing writeback from direct reclaim</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2010 21:12 UTC (Fri)
+                               by <b>i3839</b> (guest, #31386)
+                              [<a href="/Articles/397221/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+/proc/sys/vm/min_free_kbytes sounds like what you're looking for.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/397221/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor397225"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing writeback from direct reclaim</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2010 21:55 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/397225/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+But remember that the "free list" is not the list of pages available for use.  It's much more complicated than that, and in fact nearly all the pages are available for use because of page stealing.
+<p>
+Some pages are more expensive to steal than others, and that's what makes the problem so hard.  But a clean page with evidence that it isn't going to be accessed soon is about as cheap to use to satisfy an allocation as a member of the free list.
+<p>
+The free list is a list of pages that don't contain data the kernel has any way of using in the future, and a large free list represents memory waste.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/397225/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor397315"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing writeback from direct reclaim</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2010 13:34 UTC (Sun)
+                               by <b>i3839</b> (guest, #31386)
+                              [<a href="/Articles/397315/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+True, it's all a bit more complicated. Perhaps he should tune things like<br>
+dirty_ratio and other dirty_* settings instead.<br>
+<p>
+But a large free list is useful to handle sudden memory pressure situations<br>
+well without destroying latency. So if you have a spiky load having a bigger<br>
+free list seems like a good idea to me. If you make sudden huge allocations<br>
+then a bigger free list won't help much, what you want then is little dirty<br>
+data hanging around.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/397315/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor397320"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing writeback from direct reclaim</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2010 15:13 UTC (Sun)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/397320/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+I don't know that there is any noticeable difference in the time it takes to get a page from the free list and the time it takes to steal a clean inactive page not in the free list.  But maybe, since it does take a certain number of CPU cycles to forget what used to be in the page.
+<p>
+I believe the only point of a minimum free list size is to provide some reserve for use in contexts where stealing is not possible.  In particular, when the page stealer itself needs memory in order to progress, it can't wait for a page steal to get it.  I.e. the parameter in question is for adjusting the probability of deadlock and maybe OOM.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/397320/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor397433"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing writeback from direct reclaim</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2010 19:29 UTC (Mon)
+                               by <b>i3839</b> (guest, #31386)
+                              [<a href="/Articles/397433/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If it doesn't make a difference then this option is redundant.<br>
+<p>
+The page stealer can't possibly need memory itself, that would be too stupid. It can't really wait anyway because it's generally called from interrupt, when a page fault happens (or maybe the call is deferred to the process causing the fault). And if it waits then it's a lot slower than the page allocator.<br>
+<p>
+Deadlock shouldn't be possible whatever value you set. OOM is only more likely with higher values because the kernel only OOMS when it can't allocate memory for itself.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/397433/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor397578"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing writeback from direct reclaim</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2010 21:12 UTC (Tue)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/397578/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>The page stealer does need memory itself.  I've always hated the lack of strict resource ordering in Linux, such that it avoids deadlock only by parameters being set so that it's really unlikely, but that's the way it is.  The kmalloc pool sits above and below many other layers.  The page stealer is more complex than you're probably thinking, because it can involve, for example, writing the contents of a page to its backing store on a network filesystem.
+<p>
+There is a flag (PF_MEMALLOC) on a memory request that says, "this request is part of memory allocation itself" or, equivalently, "don't wait for memory under any circumstance."  The requester is supposed to have some way to respond to a failed memory allocation that is better than a deadlock.  For example, it could try to find an easier page to steal.
+<p>
+Page fault handling does happen in process context.  It normally requires I/O, so interrupt context is pretty much out of the question.
+<p>
+I remember a similar discussion some years ago, in which someone as an experiment set his minimum free list size to zero, and the system froze.
+<p>
+Of course, everything here must be taken with a grain of salt because this stuff changes frequently, so what's true of one particular version of kernel isn't necessary true of another.  I do remember being tormented by the network subsystem's requests for memory as part of page stealing and then someone later doing something to ameliorate that.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/397578/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor397703"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing writeback from direct reclaim</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 28, 2010 19:01 UTC (Wed)
+                               by <b>i3839</b> (guest, #31386)
+                              [<a href="/Articles/397703/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Peter Zijlstra was busy with a VM deadlock prevention patch a while ago, no idea if that made it or if that PF_MEMALLOC flag came from there.<br>
+<p>
+Anyway, those cases come from cleaning dirty pages, and the deadlock comes into view when that is triggered by the page stealer, but those paths try to allocate memory and trigger the page stealer again. I wouldn't really say the page stealer is the one needing memory, but rather that to steal dirty pages you sometimes need memory, especially with network file systems. The main problem there being that they need to receive packets to have forward progress in the dirty data writeout (and you don't know before receiving whether it's a critical packet or not). I think they added a memory pool to mostly fix this case.<br>
+<p>
+Most page faults don't require IO, just memory mapping updates. If a process allocates memory it gets virtual memory, only when it actually uses it real memory is allocated for it. In that case a page fault occurs and a page needs to be allocated and mapped. Same for copy-on-write handling. Looking at the code it seems that the kernel just has to enable interrupts and can continue handling the page fault in process context without doing much special.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/397703/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2010, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

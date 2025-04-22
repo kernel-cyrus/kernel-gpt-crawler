@@ -1,0 +1,580 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Fixing the symlink race problem [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/472071/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/471208/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/472071/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Fixing the symlink race problem</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>December 14, 2011</br>
+           </div>
+<p>
+The problems with symbolic link race conditions have existed for decades,
+been well understood in that time, and developers have been given clear
+guidelines on how to avoid them. Yet they still persist, with new
+vulnerabilities discovered regularly.  There is also a known way to avoid
+most of the problems by changing the kernel&mdash;something that has been
+done for many years in grsecurity and Openwall&mdash;but it has never made
+its way into the mainline.  While kernel hackers are understandably
+unenthusiastic about working around buggy user-space programs in the
+kernel, this particular problem is severe enough that it probably makes
+sense to do so.  It would seem that we are seeing some movement on that
+front. 
+</p>
+
+<p>
+The basic problem is a time-to-check-to-time-of-use (TOCTTOU) flaw.  Buggy
+applications will look for the existence and/or characteristics of
+temporary files before opening them.  An attacker can exploit the flaw by
+changing the file (often by making a symlink) in between the check and the
+<tt>open()</tt>.  If the program with the flaw has elevated privileges
+(e.g. setuid), and the attacker replaces the file with a symlink to a
+system file, serious problems can result. 
+
+<p>
+The 
+bug generally happens in shared, world-writable directories that have the "sticky" bit set
+(like <tt>/tmp</tt>).
+The sticky bit on a directory is set to prevent users from deleting other
+users' files.  So, the fix restricts the ability to follow symlinks in
+sticky directories. In particular, 
+a symlink is only followed if it is owned by the follower or if
+the directory and symlink have the same owner.  That solves much of the
+symlink race problem <i>without</i> breaking any known applications.
+
+<p>
+We <a href="/Articles/390323/">looked</a> at patches to restrict the
+following of symlinks in sticky directories in June 2010.  Since that time,
+there has been a two-pronged approach, championed by Kees Cook, to try to get the code into the
+mainline.  The first is the <a
+href="/Articles/464651/">Yama LSM</a>, which is meant to collect up
+extensions to the Linux discretionary access control (DAC) model.  But it
+runs afoul of the usual problem for specialized LSMs: the <a
+href="/Articles/393008/">inability to stack LSMs</a>.
+</p>
+
+<p>
+Cook and others would clearly prefer to see the symlink changes go into the
+core VFS 
+code, rather than via an LSM, but there has been a push by some to keep it
+out of the core.  There was discussion of Yama and its 
+symlink protections at the Linux Security
+Summit <a href="/Articles/458652/">LSM roundtable</a>, where the plan to
+push Yama as a DAC enhancement LSM was hatched.  That may well be a way
+forward, but Cook has also <a href="/Articles/470891/">posted</a> a patch
+set that would put the symlink restrictions into <tt>fs/namei.c</tt>.
+</p>
+
+<p>
+The latter patch attracted some interesting comments that would seem to
+indicate that Ingo Molnar and Linus Torvalds, at least, see value in
+closing the hole.  None of the VFS developers have weighed in on this
+iteration, but
+Cook notes that the patch reflects feedback from Al Viro, which could be
+seen as a sign
+that he's not <i>completely</i> opposed. <a
+href="/Articles/472141/">Molnar</a> was particularly unhappy 
+that the hole still exists:
+<div class="BigQuote">
+Ugh - and people continue to get exploited from a preventable, 
+fixable and already fixed VFS design flaw.
+</div>
+</p>
+
+<p>
+Molnar also had some questions about the implementation, including whether
+the <tt>PROTECTED_STICKY_SYMLINKS</tt> kernel configuration parameter
+should default to 'yes', but was overall very interested in seeing the
+patch move forward.  Torvalds had a <a href="/Articles/472144/">somewhat
+different take</a>, "<q>Ugh. I really dislike the
+implementation.</q>", but suggested a different mechanism to try to
+solve the underlying problem by using the permission bits on the symlink.
+His argument is that Cook's approach is not very "<q>polite</q>"
+because it is hidden away, so it turns into:
+<div class="BigQuote">
+some kind of hacky run-time random behavior
+depending on some invisible config option that people aren't even
+aware of.
+</div>
+</p>
+
+<p>
+As Cook <a href="/Articles/472146/">points out</a>, though, Torvalds's
+approach has its own set of "<q>weird hidden behaviors</q>".
+Torvalds admittedly had not thought his proposal through completely, but it
+does show an interest in seeing the problem solved.  From Cook's
+perspective, the changes he is proposing simply change the behavior of
+sticky directories with respect to symlinks, whereas Torvalds's would have
+wider-ranging effects on symlink creation.  Either might do the job, but
+Cook's solution does have an advantage in that the proposed changes have
+been shaken out for years in grsecurity and Openwall, as well as in Ubuntu
+more recently.
+</p>
+
+<p>
+Given that several high-profile kernel hackers seem to be in favor of
+fixing the problem&mdash;Ted Ts'o was also favorably disposed to a fix back
+in 2010&mdash;the winds may have shifted in favor of the core VFS
+approach.  If Viro and the other VFS developers aren't completely unhappy with
+it, we could see it in 3.4 or so.
+</p>
+
+<p>
+If that were to happen, there is another related patch that would
+presumably also be pushed for mainline inclusion: hard link restrictions.
+That, like the symlink change, currently lives in Yama, though the case can
+be made that it should also be done in the core VFS code.  That patch would
+disallow the creation of hard links to files that are inaccessible (neither
+readable nor writable) to the user
+making the link.  It also disallows hard links to setuid and setgid files.
+That would close some further holes in the symlink race 
+vulnerability, as well as fix some other application vulnerabilities.  
+
+<p>
+Should both the symlink and hard link restrictions make their way into the
+VFS core, that would only leave the <tt>ptrace()</tt> restrictions in
+Yama.  Those restrictions allow administrators to disallow a process from
+using <tt>ptrace()</tt> on anything other than its descendants (unless it
+has the <tt>CAP_SYS_PTRACE</tt> capability).  Currently, any process can trace any
+other running under the same UID, so a compromise in one running program
+could lead to disclosing credentials and other sensitive information from
+another running program.  There may also be other DAC
+enhancements that Cook or others are interested in adding to Yama in the
+future.
+</p>
+
+<p>
+One way or another, the problem is severe enough that there should, at
+least, be a way for distributors or administrators to thwart these common
+vulnerabilities. Whether the fix lives in VFS or an LSM, providing an
+option to turn off a whole class of application flaws&mdash;which can often
+lead to system compromise&mdash;seems worth doing.  Hopefully we are seeing
+movement in that direction.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Security_technologies">Security/Security technologies</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Linux_kernel">Linux kernel</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Race_conditions">Race conditions</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Vulnerabilities-Temporary_files">Vulnerabilities/Temporary files</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/472071/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor472259"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">'Drug cocktail' to fix /tmp bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2011 12:57 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/472259/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the fix makes it into the mainline, this is great news and long overdue.  By knocking out 25% of the vulnerabilities that crowd LWN's security section each week, it might even free up brainpower to look at other common bugs which might have an easier fix than "re-educate the whole world to do it correctly".  (For example, how much stuff would break if signed integer overflows in C code aborted the application, unless the programmer gives a hint to the compiler to do otherwise?)<br>
+<p>
+Another way to make /tmp more secure is for each user to have its own /tmp directory in its home directory.  I wonder if that will be the next fix to be deployed.  (Getting rid of symlink attacks is great, but if an application has insecure /tmp handling then it is still possible to DoS it by creating a file in /tmp at the wrong time.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/472259/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor472286"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">'Drug cocktail' to fix /tmp bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2011 15:39 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/472286/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can do 'every user has his own /tmp' with pam_namespace now. If you're lucky this might not even break GDM et al (thanks to the X11 stuff kept in /tmp), but I wouldn't be surprised if it did break it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/472286/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor472384"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">'Drug cocktail' to fix /tmp bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 15, 2011 23:51 UTC (Thu)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/472384/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; For example, how much stuff would break if signed integer overflows in C code aborted the application[...]</font><br>
+<p>
+the application? you wouldn't get that far if you enabled such a feature for the kernel itself ;). just try to compile it with clang's -fcatch-undefined-behavior and watch the fireworks...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/472384/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor472452"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">'Drug cocktail' to fix /tmp bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 16, 2011 13:33 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/472452/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hah. Forget the kernel: bugs are still being found in GCC itself where the compiler either contains examples of signed overflow, or introduces signed overflows during optimization. (The most recent example I'm aware of is PR51247, fixed just last month.)<br>
+<p>
+The signed overflow thing, like the aliasing thing, is a problem that will never go away: it will just slowly retreat into more and more obscure software, while common software that relies on it will just gain -fwrapv in appropriate places because fixing it is too pervasive (just as such software has already gained -fno-strict-overflow).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/472452/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor472562"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">'Drug cocktail' to fix /tmp bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 17, 2011 0:35 UTC (Sat)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/472562/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You're probably right--it will never go away. The easiest way to fix signed overflow is to not use signed integers. Yet people continue to use (int) and (long) reflexively. Java doesn't even have unsigned integers, just for purities sake. The C++ crowd still debates whether size_t is better than a signed integer. Never mind that in real-life signed arithmetic is rare. SLoC-for-SLoC, the vast majority of arithmetic is mundane management of data for which negative numbers are unnecessary and awkward, and where unsigned overflow is usually entirely and reliably benign. It's even often a negative feedback effect--by using modulo arithmetic you thwart someone trying to overflow your buffers by producing the opposite result. Finally, corruption isn't much of an issue because garbage in is garbage out; no software can fix that.<br>
+<p>
+Throwing exceptions on signed overflow will probably increase vulnerabilities. I don't think preventing a small number of privilege escalation attacks is worth the cost in dramatically increasing DoS attacks.<br>
+<p>
+The symlink issue is a little disconcerting. It'd probably take less time grepping through the entire Debian source archive for "/tmp" and "TMPDIR", blacklisting stupid apps, and replacing bad code with mkstemp(3) or tmpfile(3), than debating how to hack the kernel to paper over idiocy. <br>
+<p>
+Come to think of it, there is an operating system which takes exactly this approach--fixing classes of vulnerabilities by fixing the code. But the name escapes me at the moment ;)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/472562/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor472566"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">'Drug cocktail' to fix /tmp bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 17, 2011 1:01 UTC (Sat)
+                               by <b>kees</b> (subscriber, #27264)
+                              [<a href="/Articles/472566/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem is needing to continually scan all the software because /tmp junk _keeps_ getting added. :(<br>
+<p>
+And for "how to hack the kernel", there's not really much of a debate the way I see it: this has been solved for over a decade already. :P<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/472566/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor472569"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">'Drug cocktail' to fix /tmp bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 17, 2011 2:54 UTC (Sat)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/472569/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; by using modulo arithmetic you thwart someone trying to overflow your buffers by producing the opposite result</font><br>
+<p>
+I doubt that. The difference between signed and unsigned shows up mainly in comparisons. The result of an expression cast to unsigned (e.g. pointer arithmetic) is generally the same whether you use unsigned modulo arithmetic or two's complement. For example, without overflow detection,<br>
+<p>
+char *buffer;<br>
+uint32_t x = 4294967295; // 2**32 - 1<br>
+buffer[x];<br>
+<p>
+has exactly the same effect on 32-bit platforms as<br>
+<p>
+char *buffer;<br>
+int32_t x = -1;<br>
+buffer[x];<br>
+<p>
+The first version does at least have the marginal advantage that you only need to check the upper boundary, provided the lower boundary is zero.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/472569/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor472683"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">'Drug cocktail' to fix /tmp bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 18, 2011 17:12 UTC (Sun)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/472683/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Part of the problem is C's insane rules for silent conversion between signed and unsigned, so if your code is using unsigned int but a library uses signed ints, you must be very careful.<br>
+<p>
+Throwing exceptions (or just aborting) on signed overflow would increase DoS vulnerabilities in the short term.  The reason to suggest it is that it would convert subtle and perhaps unnoticed bugs into much more obvious bugs; also that 'fail safe' in the context of software usually means stop execution rather than doing something weird and continuing.<br>
+<p>
+I don't agree that fixing all of Debian is easier than fixing the kernel.  Too much new software is being written all the time with the same old vulnerabilities again and again (the LWN security section is witness to that).  The choice is either to fix the kernel or to genetically engineer a new super-race of programmers who are immune to mistakes, oversights, or the belief that because a program works when tested then it will still work in the presence of pathological conditions such as an attacker making races.<br>
+<p>
+As for OpenBSD, they sensibly take a belt-and-braces approach to most security issues.  For example if your programs do not have vulnerabilities, then PID randomization is not necessary, but they do it anyway.  By the same token, fixing every program in Debian is certainly a good idea but it should be as well as putting some defensive measure in the kernel, not a substitute.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/472683/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor472790"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">'Drug cocktail' to fix /tmp bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 19, 2011 13:54 UTC (Mon)
+                               by <b>incase</b> (guest, #37115)
+                              [<a href="/Articles/472790/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+@epa:<br>
+Actually, fixing all of Debian (I take that as a synonym for "fixing all the software you can find") still does make sense even if the Linux kernel "fixes" this issue: There are still heaps of other Unix systems that might be affected by the same insecure temporary file handling problem, there are lots of systems running older kernels but sometimes (manually compiled) newer applications,....<br>
+So in either case, I think the kernel should take measures appropriate to mitigate this attack vector, while applications should be fixed to use more secure access patterns to avoid this problem (both on Linux and on other potentially affected systems).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/472790/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor472922"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">'Drug cocktail' to fix /tmp bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 20, 2011 10:10 UTC (Tue)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/472922/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I thoroughly agree: fix the kernel *and* fix the applications.  That's what I intended to say in the earlier post.<br>
+<p>
+But even if for some reason you can't fix the applications, fix the kernel anyway!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/472922/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor473419"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the symlink race problem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 22, 2011 22:02 UTC (Thu)
+                               by <b>slashdot</b> (guest, #22014)
+                              [<a href="/Articles/473419/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Much better solution: per-user /tmp<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/473419/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2011, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

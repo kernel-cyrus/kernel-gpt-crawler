@@ -1,0 +1,452 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Threadable NAPI polling, softirqs, and proper fixes [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/687617/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/687184/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/687617/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Threadable NAPI polling, softirqs, and proper fixes</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 18, 2016</br>
+           </div>
+Sometimes, when trying to make the kernel work better for specific
+workloads, one runs into problems originating in genuinely old code.
+Delving into such code can be a daunting task — it has worked for many
+years, and tweaking it could have surprising consequences in distant parts
+of the kernel.  So it is not surprising that developers can be tempted
+to work around a problem in other ways.  Such a situation
+recently came up with regard to high-rate networking on small systems; a
+look at the problem and its resolution provides a good excuse to dig into
+an ancient kernel mechanism: software interrupts or "softirqs".
+<p>
+<h4>Software interrupts</h4>
+<p>
+Processing of hardware interrupts is considered to be one of the most
+urgent tasks for the kernel; when an interrupt is signaled, the system
+drops what it is doing and calls the interrupt handler.  Often, an
+interrupt will tell the system that there is more work — such as processing
+a completed I/O operation — to be done, but that work should not be done in
+the interrupt handler itself.  To handle such cases, the kernel provides a
+number of mechanisms for deferred execution; these include workqueues,
+tasklets, timers, and software interrupts.
+<p>
+Of these mechanisms, software interrupts must be about the oldest;
+<tt>kernel/softirq.c</tt> starts with a copyright statement from Linus
+dated 1992 (though, in truth, that comment may be the only thing that
+survives from the <a href="/Articles/687726/"><tt>kernel/softirq.c</tt></a>
+that appeared in the 1.2 release).  It is also a mechanism that many developers
+will be relatively 
+unfamiliar with; most will never interact directly with software
+interrupts.  But they play an important role in how many urgent tasks in
+the kernel are handled.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+Essentially, a software interrupt is meant to look like a hardware
+interrupt, except that it runs at a lower priority.  Software interrupts
+can execute asynchronously and are considered more important than most
+other things the kernel can do.  They are, in short, a way to say "do some
+work as soon as possible after we finish handling hardware interrupts."
+<p>
+All known softirqs are hard-coded in the kernel source; there is no
+mechanism to add them dynamically.  There are currently ten softirqs
+defined, though one of them is not used.  The ones that <i>are</i> used are for
+network processing, block request processing, block interrupt polling,
+read-copy-update processing, scheduler housekeeping, and tasklet processing
+— the tasklet mechanism is a sort of wrapper around the softirq layer.
+Each subsystem that uses softirqs registers a handler to be called when an
+interrupt is pending; signaling of software interrupts is done with a call
+to <tt>raise_softirq()</tt>.
+<p>
+There are a few places where software interrupt handlers actually get run,
+including immediately after a hardware interrupt handler completes.  So
+softirqs signaled from interrupt handlers will often be handled almost
+immediately.  Softirq processing can be disabled by kernel code (taking a
+spinlock will do it, for example); softirq handlers can be run once they
+are enabled 
+again (once the spinlock is released, for example).  That means that, in
+practice, there are many points throughout the 
+kernel where softirqs can execute.
+<p>
+One problem with the softirq mechanism is that it can create arbitrary
+latencies at almost any point in the kernel where softirq handlers can be
+run; there is often a <i>lot</i> of work that is done in those handlers.  Thus,
+developers working on the realtime patches have grumbled about softirqs for
+years and have <a href="/Articles/520076/">changed how they are
+processed</a> in realtime kernels.  In the mainline kernel, 
+this problem has been partially addressed by trying to limit the amount of
+time spent processing softirqs.  If any call to <tt>__do_softirq()</tt>
+(the function that actually calls softirq handlers) finds itself running
+for more than 2ms, processing will stop and the <tt>ksoftirqd</tt> kernel
+thread will be woken up to finish the job.  So, if the softirq load gets to
+high, it gets pushed into a thread where it has to compete with the rest of
+the work the system is doing.
+<p>
+For the most part, this mechanism works well enough that it has not been
+removed, even though a number of developers would like to see it go.  On
+the other hand, any attempt to add more softirq sources would almost
+certainly encounter strong pushback, which is why new ones are almost never
+added.  Anybody thinking about doing so will be directed toward workqueues,
+or, if nothing else will suffice, tasklets.
+<p>
+<h4>Softirqs and NAPI polling</h4>
+<p>
+The networking subsystem uses two software interrupts, one each for transmit
+and receive processing.  The receive softirq is where NAPI processing (the
+polling of interfaces for new packets) is done.  If there are a lot of
+packets to handle, this processing can take a long time.  As with the
+softirq subsystem itself, the networking stack imposes a limit on how much
+time it will spend accepting packets in the softirq handler.  That limit,
+though, is set to two jiffies — as much as 20ms, depending on the system's
+clock speed.  In other words, the networking code increases the maximum
+time spent continuously handling softirqs by as much as a factor of ten.
+<p>
+Of course, one wants the networking stack to have the CPU time it needs to
+deal with the flow of packets into the system.  But it is also necessary to
+leave sufficient time for user space to actually do something with those
+packets.  As Paolo Abeni reported in the introduction to his <a
+href="/Articles/686985/">threadable NAPI poll loop patch set</a>, that
+doesn't always happen:
+<p>
+<div class="BigQuote">
+	Under high network load, the softirq loop can take nearly 100% of a
+	given CPU, leaving very little time for use space processing. On
+	single core hosts, this means that the user space can nearly
+	starve. 
+</div>
+<p>
+His solution was to (at the system administrator's option) move NAPI
+processing out of softirqs entirely, and into its own dedicated kernel
+thread.  Even if no other configuration is done, this change allows the
+scheduler to balance NAPI processing against the needs of the other
+runnable threads on the system, giving user space a chance to run.  The
+results, Paolo said, are good:
+<p>
+<div class="BigQuote">
+	With the default scheduling policy, the starvation issue observed
+	on single vCPU guest under UDP flood is solved and the throughput
+	measured under heavy overload is quite stable around the peak
+	performance.
+</div>
+<p>
+Paolo's solution looks impressive, but it failed to impress the networking
+developers.  Eric Dumazet <a href="/Articles/687629/">rejected the
+patch</a>, saying:
+<p>
+<div class="BigQuote">
+	We already have ksoftirqd to normally cope with the case you are
+	describing.  If it is not working as intended, please identify the
+	bugs and fix them, instead of adding yet another tests in fast path
+	and extra complexity in the stack.
+</div>
+<p>
+Paolo was not pleased with this response, but he was able to come back with
+a bit of important information: why <tt>ksoftirqd</tt>, as it is
+implemented in current kernels, is not a sufficient
+solution to the problem.
+<p>
+It seems that <tt>ksoftirqd</tt> will process
+packets for the two jiffies allowed by the networking code, then yield so
+that user space can run; Paolo estimated that, on his system, about 640
+packets would be processed during this time.
+Once user space gets a chance to run, it will make a system call to
+retrieve a packet; the code implementing the system call will, at some
+point, find itself taking and releasing locks.  But the point where a lock
+is released is an opportunity for the kernel to do softirq processing, and
+that is exactly what happens: softirq processing is done in the calling
+process's context.  In Paolo's case, that in-context softirq processing
+would handle another 640 packets 
+before returning a single packet to user space — the kernel, in other
+words, was processing nearly 1,300 packets before letting user space have
+even one of them.  That is truly a system that is out of balance.
+<p>
+To Paolo, this behavior was a good reason to move NAPI processing into a
+more controllable context, but Eric's <a
+href="/Articles/687630/">response</a> was, simply: "<q>Looks you found
+the bug then. Have you tried to fix it?</q>".  After a bit, Eric came up
+with <a href="/Articles/687631/">a simple fix</a> of his own.  With the
+resulting 
+patch, waking up the <tt>ksoftirqd</tt> thread will set a per-CPU flag.
+Any code that would fire off softirq processing in process context first checks
+that flag; if it is set, the processing is skipped.  This has the effect of
+forcing all softirq processing over to <tt>ksoftirqd</tt> once it has been
+invoked.
+<p>
+Paolo <a href="/Articles/687633/">did some testing</a> and reported
+performance figures close to what were obtained with his patch.  Even so,
+he preferred his patch, but indicated acceptance that it was probably not
+going to be merged.  Eric's patch, after some further tweaking, looks
+likely to land in 4.7.
+<p>
+One of Paolo's reasons for taking the approach he did was to avoid any
+possible effects on other softirq users.  As Eric <a
+href="/Articles/687634/">put it</a>, this was a natural tendency:
+"<q>Right, we are networking guys, and we feel that messing with such
+core infra is not for us.</q>"  But the long-term maintainability of the
+kernel depends on fixing problems where they are found rather than adding
+new mechanisms to work around those problems.  In this case, a small
+problem would appear to have been correctly fixed.  The rather larger
+problem (as seen by some developers) represented by the simple existence of
+the softirq code remains untouched, though.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Interrupts-Software">Interrupts/Software</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#NAPI">NAPI</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/687617/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor688053"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Threadable NAPI polling, softirqs, and proper fixes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 19, 2016 14:31 UTC (Thu)
+                               by <b>stressinduktion</b> (subscriber, #46452)
+                              [<a href="/Articles/688053/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Probably due to lack of clarity in the cover letter, the scope of this<br>
+patches has been misread. They cover the softirq issue, which has been<br>
+the trigger for this work, but they have a wider scope.<br>
+<p>
+Processing the rx packets inside the ksoftirqd thread poses several<br>
+difficulties to the process scheduler to fairly balance the workload and<br>
+forbids the bottom layer of the network stack to use i.e. mutex. <br>
+<p>
+For example, in our experiments an hypervisor hosting VMs receiving a<br>
+lot of network traffic fit badly with the ksoftirqd design: the VMs and<br>
+vhost threads compete for the cpu time with ksoftirqd on each available<br>
+cores, and none of them is able to use 100% of single core, leading to<br>
+very unstable and suboptimal throughput.<br>
+<p>
+Running the rx process in threaded context allows the scheduler to<br>
+migrate the napi threads and let both vhost and the qemu process use<br>
+completely a core each, which gives relevant performance improvements.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/688053/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor688062"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Threadable NAPI polling, softirqs, and proper fixes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 19, 2016 15:13 UTC (Thu)
+                               by <b>fratti</b> (guest, #105722)
+                              [<a href="/Articles/688062/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder what effects these changes have on other parts of the kernel. While the networking code seems to have a "special place" in terms of its softirq usage compared to other subsystems, I can imagine the softirq changes also having an indirect effect on different subsystems through the tasklet mechanism. I wonder how many undiscovered performance bottlenecks or possible denial of service attacks have been resolved with this patch, as it appears to solve the general problem case of recursive kernel softirq processing caused by userspace trying to process data yielded from softirq processing.<br>
+<p>
+Can anyone tell me whether tasklets and such already had their own mitigations for this case? Alternatively, was this bug very specific to the way networking used softirqs?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/688062/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor688075"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Threadable NAPI polling, softirqs, and proper fixes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 19, 2016 15:58 UTC (Thu)
+                               by <b>pabeni</b> (guest, #107300)
+                              [<a href="/Articles/688075/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To give the proper credits, the napi threaded patches has been a joint work with Hannes Sowa.<br>
+<p>
+Paolo<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/688075/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor688146"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Threadable NAPI polling, softirqs, and proper fixes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 20, 2016 5:24 UTC (Fri)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/688146/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; that comment may be the only thing that survives from the kernel/softirq.c that appeared in the 1.2 release</font><br>
+<p>
+"git blame" says that it pretty much is, other than a couple of blank lines, one(!) include statement – and the opening and closing braces of __do_softirq().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/688146/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor688148"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Threadable NAPI polling, softirqs, and proper fixes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 20, 2016 5:29 UTC (Fri)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/688148/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The rather larger problem (as seen by some developers) represented by the simple existence of the softirq code remains untouched, though.</font><br>
+<p>
+Reduce the softirq handling time from two msec to zero (i.e., always schedule ksoftirqd and skip the localized processing).<br>
+Check if anything breaks.<br>
+Problem solved. (Didn't the RT guys do essentially that already?)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/688148/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

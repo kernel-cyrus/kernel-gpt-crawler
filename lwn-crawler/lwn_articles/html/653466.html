@@ -1,0 +1,836 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Atomic mode setting design overview, part 2 [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/653466/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/653714/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/653466/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Atomic mode setting design overview, part 2</h1>
+</div>
+<div class="ArticleText">
+<div class="GAByline">
+           <p>August 12, 2015</p>
+           <p>This article was contributed by Daniel Vetter</p>
+           </div>
+<p>
+Today's graphical applications require frame-perfect displays, while also
+taking advantage of specialized, power-saving hardware in embedded GPUs.
+To do that, the kernel must be able to update the hardware graphics state
+atomically — changing multiple independent parameters in a single
+	operation so that users don't see corrupted frames while the
+	change is taking place.
+The <a href="/Articles/653071/">first article</a> of this series looked at why
+an atomic display update API has
+become necessary, how it came to be, and what the main driver interfaces look like.
+Here, we will look into a few more details and build on the
+material discussed earlier.</p>
+
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+Still, a short recap of the main
+interface can't hurt: an atomic display update is created by duplicating the
+state structures for display objects like planes or a CRTC and then updating
+the duplicates, which are collected in
+<tt>struct&nbsp;drm_atomic_state</tt>. Once all 
+updates are applied, the new state is provided in its entirety to the driver's
+<tt>-&gt;atomic_check()</tt> function for validation. If it passes, then it can
+be committed using <tt>-&gt;atomic_commit()</tt>. Just validating updates to
+figure out in a generic way what's possible is also supported using a check-only
+mode.
+
+<h4>Of atomic updates and nuclear options</h4>
+
+<p>
+A big change in upstream atomic mode setting compared to the Android
+Display Framework (ADF) is that upstream allows any display state to
+be changed through the atomic <tt>ioctl()</tt>. ADF only allows plane
+states to be changed atomically; output routing and display-mode
+changes (which are called mode-set changes in this article)
+need separate calls from user space in ADF. At least on a cursory look,
+plane updates and mode-set changes are indeed two different things.  On
+one hand, atomic plane updates are meant to be completed by the
+next frame displayed. Atomic mode-set updates, on the other hand, can
+cause a display to go to black for a bit, which is anything but
+perfect. Mode-set updates generally take hundreds of milliseconds. But both
+update the display state in an atomic, all-or-nothing fashion and they
+can both use the same "list of property changes" transport for the
+<tt>ioctl()</tt>. So, purely by just looking at the structures and data
+passed between user space and the kernel — and not the requested
+semantics — it makes a lot of sense to treat them as the same
+operation.
+
+<p>
+The tension between these two types of updates
+resulted in a lot of confusion when discussing atomic plans for upstream.
+It was only fixed by calling full mode sets "atomic mode sets"
+and calling the  
+plane updates "nuclear 
+page flips".
+But when you look closer, the distinction between full mode sets and pure plane
+updates synchronized to the next frame becomes unclear quickly. Often a
+display mode change 
+on integrated panels only means that the scaler used to fit the displayed
+area onto the panel
+needs to be 
+adjusted. A lot of hardware can do that with a small update for the next
+frame,  without the need for a full mode set and
+blanking the screen. But then 
+there's hardware where some plane configuration changes require reallocation of
+FIFO space, and that is only possible when the display pipeline is shut down.
+Which looks very much like a mode set.</p>
+
+<p>
+Furthermore, user space would often like to delay changes that require full
+mode sets to a more suitable time. For example, tablets and smartphones
+suspend so 
+often that pretty much any mode set can be delayed without incurring too much
+energy waste by running in a suboptimal configuration until the next
+suspend. There, 
+plane changes that need a full mode set shouldn't be done without the
+consent of user space to avoid a less-than-perfect visual experience for
+users.</p> 
+
+<p>
+After many bits were expended discussing this problem, the solution merged
+was the 
+<tt>DRM_MODE_ATOMIC_ALLOW_MODESET</tt> flag. With this, user space can
+indicate whether a full mode set (with the downsides of potentially blanking 
+seemingly unrelated screens and taking a long time) is acceptable or not. And, of
+course, this flag is also obeyed for the test-only mode. Most drivers don't need
+to bother with this, since the atomic helpers take care of checking for it — as
+long as the driver correctly indicates to the helper code that it needs or
+doesn't need a full mode set in one of the special cases mentioned above.
+
+<h4>Locking magic using wait/wound mutexes</h4>
+
+<p>
+Next up is how concurrent updates are handled. A while ago, <a
+ href="https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=29494c174dc4793ebd236aa522a2a1ed73b7180e">DRM
+ gained per-CRTC locks</a> to allow concurrent updates and changes on different
+ display pipelines. That, in turn, required <a
+ href="https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=4d02e2de0e80a786452e70d7f3a20a50641e6620">per-plane
+ locks</a> since planes can (if the hardware supports it) change the CRTC
+ they're connected to. In addition, there's one more lock to protect all the
+ output routing and connector state — making those kinds of changes usually
+ requires at least a few 
+ hundred milliseconds, thus will result in stalls no matter what.
+ It's also a rare and usually system-wide operation, so finer-grained
+ locking for that would just be wasted.</p>
+
+<p>
+But one problem with the atomic <tt>ioctl()</tt> is that user
+space could pass its 
+list of updates (in the form of <tt>object_id</tt>, <tt>property_id</tt>,
+<tt>value</tt> triples) in any order it wants.
+That could easily lead to deadlocks
+if they are processed in that order, since different objects require
+different locks.  User space could provoke an AB-BA deadlock by creating
+two updates that list the same two objects but in a different order.
+
+<p>
+That can be solved by sorting the entire list of triples by objects first, but
+unfortunately that only delays the problem.
+The first article explained that atomic state-checking code is only allowed
+to look at or touch the state of objects that are in the update. This
+guarantees 
+that concurrent updates won't trample each another. Unfortunately, that also
+means that drivers must be able to add arbitrary objects and their states
+to the overall atomic update tracked in the <tt>drm_atomic_state</tt>
+structure in their
+<tt>-&gt;atomic_check()</tt> callback.  That will allow the callback to
+check cross-object limits 
+and make sure that shared resources are not exhausted. Because hardware
+is crazy,
+this can't be done outside of the driver code since every piece of hardware
+has its 
+own unique shared state. Just grabbing all potentially needed locks up front
+isn't a great idea either, since that will only make all updates synchronous and
+hence make all the fine-grained locking pointless.</p>
+
+<p>
+This means a locking scheme where locks can be taken in an arbitrary order
+is needed. 
+Luckily, the kernel has that with its <a
+ href="/Articles/548909/">wait/wound mutex</a> support, which,
+ incidentally, was also added by GPU driver hackers for some pesky
+ memory-management troubles. Wait/wound mutexes are a topic of their own,
+ really, 
+ but the 
+ summary is that they allow you to grab locks in arbitrary order, can reliably
+ detect deadlocks, and have a means to back off from a deadlock without
+ throwing 
+ fairness out the window or requiring costly spinning. They're also rather
+ complex.</p>
+
+<p>
+No one wants to inflict advanced locking schemes on driver writers
+unnecessarily, so the locking is all nicely encapsulated in functions
+provided by 
+the atomic core. When you need to change which CRTC a plane is assigned to, just
+call <tt>drm_atomic_set_crtc_for_plane()</tt> and make sure any errors are
+forwarded correctly up the call chain. Similarly, if a driver needs to consult
+other state objects in its state-validation code (e.g. to check limits on
+shared resources), it can duplicate any state into the atomic update it needs
+and locks will be acquired correctly behind the scenes. The only important
+bit is 
+to correctly forward the <tt>-EDEADLK</tt> error code and always use the
+provided functions to duplicate and update state structures. With that, magic
+simply happens. Well, as long as a driver's atomic check code is otherwise
+correct 
+and doesn't touch hardware state nor anything else that might persist outside of
+just the state structures.</p>
+
+<p>
+For users of the DRM-internal atomic interface things are a notch more
+complex, but 
+not a lot. Wait/wound locking state is tracked in a <tt>struct
+drm_modeset_acquire_ctx</tt>, which is initialized using
+<tt>drm_modeset_acquire_init()</tt>. To make all the transparent lock-taking
+work when duplicating state objects into an atomic update, this is also
+stored in 
+<tt>drm_atomic_state-&gt;ctx</tt>. As with drivers, any locks needed will be
+implicitly acquired when duplicating state objects; the only thing needed is to
+actually handle deadlocks signaled with the <tt>-EDEADLK</tt> error code.
+
+<p>
+Since
+the deadlock backoff logic will drop locks, already duplicated state objects
+might become stale and need to be released first with
+<tt>drm_atomic_state_clear()</tt>. Then a call to <tt>drm_modeset_backoff()</tt>
+will drop any acquired mode-set locks and block on the contended lock until it's
+available. After that, the entire sequence needs to be restarted right after the
+ initialization of the acquire context — that must not be reinitialized since it
+contains the queue ticket that ensures
+forward progress in the wait/wound locking algorithm. Finally, when everything
+has succeeded, locks can be dropped with <tt>drm_modeset_drop_locks()</tt>
+and the 
+acquire context is finalized with <tt>drm_modeset_acquire_fini()</tt>.</p>
+
+<p>
+Note that it's really easy to test all that special backoff code: enabling
+lock debugging and <tt>CONFIG_DEBUG_WW_MUTEX_SLOWPATH</tt> will cause the
+wait/wound mutex code to inject spurious deadlock conditions. With that, all
+the deadlock backoff code can be exhaustively tested just with single-threaded
+test cases.
+And of course wait/wound mutexes fully support all the Linux lock debugging
+and testing tools such as lockdep.
+
+<h4>Helper-library design</h4>
+
+<p>
+The other piece that took years to settle is the driver helper-library design. A
+<a href="/Articles/336262/">mid-layer approach</a>, as in ADF, was out of
+question because hardware has too many special cases to be able to create
+such a framework that is not too complex. There was
+already an extensive set of helpers used by most drivers anyway, so preferably
+drivers shouldn't have to rewrite all their callbacks and support code when
+converting to atomic updates. Directly reusing the existing callbacks was
+done for 
+proof-of-concept conversions, but fundamentally there were a few troubles with
+the existing helpers and their driver callbacks:</p>
+
+<ul class="spacylist">
+
+<li>They had no real support for checking cross-object constraints. Properly
+	checking those is a major goal of the atomic changes. Checking for
+	such arbitrary cross-device constraints is 
+	exposed to user space with
+	the <tt>DRM_MODE_ATOMIC_TEST_ONLY</tt> flag, which is described in
+	the first article.</li>
+
+<li>There was no support for doing atomic updates of planes. For sane hardware
+	that has lockout bits to prevent any updates until they have all been
+	written to registers, this is easy to fix with just pre- and post-commit
+hooks. But in general, hardware needs more flexibility there. There were also no
+provisions for separating the checks from the commit phase of plane
+updates.</li>
+
+<li>Any output routing changes required updating and enabling the primary plane
+	too. Often that's not what you want, for example displaying a video
+	overlay 
+	with black background for the letterbox or pillarbox bars doesn't
+	need any 
+primary plane at all.
+The hardware can do this, so it should be made possible.
+</li>
+
+<li>Finally, the legacy helpers were designed for the very first XRandR
+	implementation. In the almost ten years that have passed
+	since, DRM developers learned an awful lot of lessons about what
+works, what should be simplified (by providing stricter guarantees in helpers),
+and where more flexibility was needed to make the helpers more useful.</li>
+
+</ul>
+
+<p>
+All in all, a full rewrite of the helper code was in order, while still making
+conversions fairly easy. The big change, certainly, is that the helper library
+doesn't just expose one monolithic template function for each hook, but also
+exposes separate pieces, for example to handle plane-only updates or only
+ output 
+configuration changes. Aside from a few restrictions imposed by the atomic
+semantics 
+they can also be called in arbitrary order, as it best suits the hardware. This
+way drivers can mix and match between helper code and their own — or just
+augment 
+helper code as needed (for checking or changing global state for example).
+
+<p>
+A
+good example would be drivers supporting runtime power management (PM).
+The old 
+legacy helpers 
+updated planes in between disabling outputs and enabling them with the new
+configuration. For best backward compatibility, that's also what the atomic
+helpers do, but this is not the best for drivers supporting runtime PM. Such
+drivers will
+disable the hardware when the display pipelines are off and, hence, plane updates
+will get lost if they are done in the middle. It's better to do plane
+updates as the 
+final step of committing the update to hardware, and the helpers allow this.</p>
+
+<p>
+Another useful feature of the new helper library is that any derived state to
+steer control flow is stored in the state structures — it has to be, due to the
+check/commit split. That allows drivers to overwrite and control the helpers in
+fine detail. For example, a driver can force a full mode set (and the
+required state precomputation) when some shared global resources need to be
+adjusted, even when
+the helper wouldn't see a need for a full mode set on its own. Since the
+exported check functions are idempotent, they can be re-run when a later step
+uncovers the need (again due to shared resources) to include more objects in the
+atomic update.
+
+<p>
+That is useful when a plane update uncovers the need for a full
+mode set. But a full mode set, in turn, might require recomputations for plane
+states, creating a loop. Making the exported helpers idempotent and callable in
+any order helps to break such loops. To avoid surprises, the default check
+function, 
+<tt>drm_atomic_helper_check()</tt>,
+only calls the subordinate helpers to
+ check plane updates and mode-set changes once each.
+But
+hardware with complicated dependencies between these two types of updates
+(like the example earlier where a plane update can require a full
+mode set, maybe even on an unrelated CRTC) can be handled by calling
+the helpers multiple times, until a steady state has been reached for the
+precomputed state. Note that this is only to facilitate the state
+validation, the actual commit of the atomic update to the hardware
+should still happen in one go, without any iterating.
+
+<p>
+Also, all the functions to implement legacy callbacks in terms of the atomic
+driver interfaces are exported and can be called explicitly.
+Drivers without a need to specially handle legacy entry points can just put
+the provided helpers directly into the DRM driver operation function tables.
+ This allows drivers to keep some features only
+supported for legacy interfaces by keeping the code for old platforms around.
+This is useful for drivers which support ten or more years of hardware
+iterations where 
+it doesn't make sense to implement proper atomic support for every old special
+case.</p>
+
+<p>
+The other big change is simpler semantics for drivers. Thanks to the atomic
+updates, the new helpers can keep track of state changes much better and
+guarantee that a disable or enable hook won't be called redundantly — which the
+old helpers routinely did. They also hide a lot of the potential flexibility of
+legacy interfaces like the four different <a href="https://en.wikipedia.org/wiki/VESA_Display_Power_Management_Signaling">display
+power management signaling</a> (DPMS) levels used for runtime PM on
+outputs — the atomic helpers only have on and off.
+This is because modern
+hardware simply doesn't support intermediate DPMS levels any more.
+On anything but the oldest of hardware, drivers just
+clamped the intermediate levels to off. This also allows the atomic
+helpers to reuse the same enable and disable hooks for runtime PM
+as for the normal enabling and disabling of outputs, which simplifies
+drivers.
+The <tt>-&gt;dpms()</tt> callbacks are still supported to
+simplify converting drivers from legacy mode setting to atomic, but they are
+deprecated. Converted drivers should only have to implement the
+<tt>-&gt;enable()</tt> and <tt>-&gt;disable()</tt> hooks and should be able
+to delete the DPMS handlers entirely.
+</p>
+
+<p>
+Finally, there are transitional helpers to handle the impedance mismatch for
+planes between legacy helpers and the new atomic ones. They provide helpers like
+<tt>drm_helper_crtc_mode_set_base()</tt> that implement the legacy helper
+callbacks in terms of the new atomic helper callbacks. This allows driver writers
+to switch over to the new hooks for plane updates in their backend while
+otherwise still using the same code and overall control-flow. That helps a lot
+in converting big drivers by allowing the conversion to happen in multiple
+phases that only deal with a part of the driver. There's also a "<a
+ href="http://blog.ffwll.ch/2014/11/atomic-modeset-support-for-kms-drivers.html">how to</a>"
+ that has all of the details for an atomic conversion — what all
+ needs to be 
+ done and in which exact order.</p>
+
+<p>
+Overall, there are a number of drivers already converted and the new
+helpers seem to be working out
+well. Some small changes in the interfaces of callbacks were needed,
+but thus far there have been no big problems with the semantics
+themselves. A big reason for that 
+is that the new code has been modeled after the <tt>i915.ko</tt>-specific mode-set
+infrastructure, which has been developed over the past few years with an aim
+toward atomic updates.
+
+<p>
+The big lesson learned from
+<tt>i915.ko</tt> led to the major difference 
+in the merged code: how an atomic update is assembled before actually
+committing it to the hardware.
+In <tt>i915.ko</tt> all updates were staged
+using a set of <tt>new_foo</tt> members embedded into each mode-setting
+object structure, mirroring all the existing data structures and
+pointers. The major downside of that approach is that rolling back an
+update (either because it violates a constraint or because user space
+only asked to check constraints using <tt>TEST_ONLY</tt>) needed to carefully
+undo all these changes. Staging updates in the objects themselves also
+makes it much harder to have multiple updates in-flight at the same
+time. With the merged atomic infrastructure, updates are assembled out
+of free-standing state objects and no permanent mode-setting object
+structures are touched before actually committing state to the
+hardware. That makes rollback and handling concurrent updates much
+easier.
+
+<p>
+The unresolved gap in the current helpers is handling non-blocking
+updates. Thus far, 
+drivers need to manage their own work queues for the asynchronous tail of an atomic
+update and synchronize appropriately when an update depends upon global state,
+like they had to already for primary plane page flips with the old legacy <tt>ioctl()</tt>.
+There are ideas floating around to implement this in the atomic helpers. But nothing has come up that is both simple enough to be an improvement over
+the current state while still being useful for a lot of drivers.</p>
+
+<h4>Conclusions</h4>
+
+<p>
+After more than three years in the making, upstream has finally a mode-setting
+interface and support infrastructure for drivers that covers all of the use
+cases, from 
+energy-sipping systems-on-chip (SoCs) with the need for all the special plane
+hardware and supporting perfect 
+updates of each frame to big desktops supporting multiple screens. That's a
+first, 
+since the original kernel mode setting pretty much left embedded systems to
+fbdev. But given the number of ongoing or already-merged conversions to atomic
+and entirely new drivers supporting it, it looks like upstream graphics for
+SoCs is finally happening and is bound to stay. Well, at least for the
+mode-setting 
+side of GPUs.  But even just that would be a big change and a great
+improvement for all the upstreaming efforts of Android-vendor kernel trees.</p>
+
+<p>Let's all embrace the age of atomic mode setting — that future is here
+and it is looking 
+good ...<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Device_drivers-Graphics">Device drivers/Graphics</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Vetter_Daniel">Vetter, Daniel</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/653466/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor654656"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Locking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2015 11:16 UTC (Sun)
+                               by <b>skitching</b> (guest, #36856)
+                              [<a href="/Articles/654656/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The locking sounds complicated, even when mostly hidden in the helper libraries.<br>
+<p>
+What use-cases require fine-grained locking for plane or mode changes, ie why isn't it reasonable to just create a single big lock around the whole set of operations that modify such config? Changing screen resolution or redirecting a plane to a different CRTC is a fairly low-frequency operation; which operations happen so often that it requires such locking? Thanks..<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/654656/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor654657"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Locking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2015 13:07 UTC (Sun)
+                               by <b>robclark</b> (subscriber, #74945)
+                              [<a href="/Articles/654657/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We used to do that..   remember when framerate dropped every 10sec when hotplug poll loop tried to see if the monitor was still there?<br>
+<p>
+Granted, we managed to fix that without going *as* fine-grained as we are now.  But think about a use-case like plugging in a 2nd display while watching video / playing game / etc on the first.  If we weren't as fine grained as we are now, you'd see your framerate stop on the first display while modeset happens on the second display.  Maybe fine for x11 (which is single threaded across all outputs, and generally sucks in many ways for multi-monitor).  Completely not-ok for a weston compositor, or android hwc, etc.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/654657/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor654661"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Locking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2015 14:12 UTC (Sun)
+                               by <b>chris.wilson</b> (guest, #42619)
+                              [<a href="/Articles/654661/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That the modesetting is a blocking synchronous operation is not a fault of X...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/654661/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor654663"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Locking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2015 14:24 UTC (Sun)
+                               by <b>robclark</b> (subscriber, #74945)
+                              [<a href="/Articles/654663/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+no, but that it has a single main loop for all displays, rather than one per display, is..<br>
+<p>
+I suppose you could work around it w/ async modeset (although that seems to open up a different can of worms).. either way, orthogonal to the original question about why fine grained locking is needed.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/654663/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor654679"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Locking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 17, 2015 6:24 UTC (Mon)
+                               by <b>skitching</b> (guest, #36856)
+                              [<a href="/Articles/654679/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah - so the locking discussed in the article is not to arbitrate between multiple threads changing modes concurrently, but between a single thread changing mode and other threads performing simple "page flips" (ie changing the address of the framebuffer that backs a plane)?<br>
+<p>
+Performing a "simple page flip" presumably just means taking one lock on one plane...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/654679/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor655324"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Locking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2015 20:02 UTC (Sun)
+                               by <b>mlankhorst</b> (subscriber, #52260)
+                              [<a href="/Articles/655324/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It takes a lock on the plane and on the crtc. If a plane is moved between crtc's the old and new crtc are both locked.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/655324/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor657014"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic mode setting design overview, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2015 22:26 UTC (Wed)
+                               by <b>tdalman</b> (guest, #41971)
+                              [<a href="/Articles/657014/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Daniel,<br>
+<p>
+thanks for this great article series. Not only it summarizes the history and provenance of KMS, I also enjoyed reading a good piece of text (well, I'm actually used to greatly written articles at LWN, but I also found your blogs very well written).<br>
+<p>
+While recent developments on SoCs fueled the improvements in the Linux graphics area, I think there is still some way to go with proprietary NVIDIA and AMD drivers (IMO). AFAIK, KMS is still not supported by some drivers (however, I recognize that especially Intel has contributed to the great progress in the Open Source graphics infrastructure).<br>
+<p>
+What are your thoughts on future developments in this area ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/657014/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor657241"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic mode setting design overview, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2015 18:29 UTC (Sun)
+                               by <b>blackwood</b> (guest, #44174)
+                              [<a href="/Articles/657241/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+[somehow missed comments here, sorry for the late reply.]<br>
+<p>
+The more important part imo are SoC drivers, and there's a lot going on there. For the big desktop graphics drivers AMD has already decided to completely move to the upstream kernel driver even for their proprietary stack, so that will take care of itself. Nvidia is a big hold-out and has not plans to either adapt KMS in their blob driver, nor switch over to the upstream one for desktop graphics. Their approach to supporting Wayland is to create an entire new pile of EGL extension to abstract away between their own kernel interfaces and upstream KMS, and that approach was resurroundingly rejected by the community as both unnecessary (no benefit over direct KMS for everyone else) and feature deficient (their proposal is firmly stuck in the pre-atomic days).<br>
+<p>
+So overally I'd say it's looking really good (at least within a few years), except for nvidia chips.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/657241/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor658158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic mode setting design overview, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 23, 2015 13:01 UTC (Wed)
+                               by <b>m.szyprowski</b> (guest, #62269)
+                              [<a href="/Articles/658158/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is there any simple code example of using atomic mode setting?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/658158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor658824"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic mode setting design overview, part 2</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 30, 2015 16:40 UTC (Wed)
+                               by <b>alkadim</b> (guest, #104623)
+                              [<a href="/Articles/658824/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Very nice read, Daniel, as the first article!<br>
+<p>
+Again I propose some small fixes.  Typo:<br>
+<p>
+- requires a at least a few hundred<br>
++ requires at least a few hundred<br>
+<p>
+I take it that "the acquire context" is the context used by the<br>
+wait/wound algorithm for automatic lock acquisition.  Then please<br>
+consider doing:<br>
+<p>
+- after the initialization of the acquire context<br>
++ after the initialization of the "acquire" context<br>
+<p>
+...in the first usage of the phrase.  And then:<br>
+<p>
+- that, ... context — that must not be reinitialized<br>
++ that, ... context — which must not be reinitialized<br>
+<p>
+Nitpicking, consider:<br>
+<p>
+- is the driver helper-library design<br>
++ is the design of the driver helper library<br>
+<p>
+- This allows drivers to keep some features only supported for legacy<br>
+- interfaces by keeping the code for old platforms around.<br>
++ This allows drivers to continue supporting some features, though only<br>
++ for legacy interfaces, by keeping the code for old platforms around.<br>
+<p>
+Finally, note that in the first article the A in ADF was expanded as<br>
+"Atomic" not "Android".<br>
+<p>
+Thanks!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/658824/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

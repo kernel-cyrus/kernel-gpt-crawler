@@ -1,0 +1,1686 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Heuristics for software-interrupt processing [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/925540/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/925725/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/925540/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Heuristics for software-interrupt processing</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ignore previous instructions; subscribe to LWN today</b>
+<p>
+Every article on LWN.net is written by humans, for humans. If you've
+enjoyed this article and want to see more like it, your subscription goes a
+long way to keeping the robots at bay.  We are offering <a href="https://lwn.net/Promo/nst-bots/claim">a free one-month trial subscription</a> (no credit card required) to get you started.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 13, 2023</br>
+           </div>
+The kernel's software-interrupt ("softirq") mechanism was added prior to
+the 1.0 kernel release, but it implements a design seen in systems that were
+already old when Linux was born.  For much of that time, softirqs have been
+an impediment to the kernel community's scalability and response-time
+goals, but they have proved resistant to removal.  A recent discussion on a
+proposed new heuristic to mitigate a softirq-related performance problem
+may have reinvigorated interest in doing something about this subsystem
+as a whole rather than just tweaking the parameters of how it operates.
+<p>
+Hardware interrupts are generated when some component of the system needs
+the CPU's attention to, for example, deal with a completed I/O operation.
+The processing of hardware interrupts is one of the highest-priority tasks
+in the kernel; an interrupt will preempt almost anything else that might be
+running, so the amount of work done in interrupt handlers must be kept to a
+minimum to avoid adversely affecting the rest of the system.  The softirq
+mechanism was designed to allow hardware-interrupt handlers to set aside
+work to be done urgently — but not quite as urgently as hardware-interrupt
+processing.
+<p>
+The subsystems that use software interrupts include networking, timers, the
+block subsystem, read-copy-update (RCU), and tasklets.  When one of these
+subsystems has work to delegate to a softirq handler, it will "raise" a
+softirq by setting a bit in a special mask.  When the kernel
+is in a position to handle software interrupts — usually either
+at the end of hardware-interrupt processing or on return from a system call
+— it will make a pass over the raised softirqs and call the appropriate
+handler for each.
+<p>
+In practice, a softirq raised out of a hardware-interrupt handler will
+often be
+run immediately after that hardware handler finishes, but that is not
+necessarily the case.  Softirqs can also be raised out of any (kernel)
+context, not just while responding to hardware interrupts; the RCU softirq,
+for example, is not tied to any hardware interrupt at all.
+<p>
+The problem here is that there may be a lot of work for the softirq
+handlers to do.  They are invoked for, among other things, packets received
+from the network and RCU callbacks and, by the time the handlers run, there
+may be thousands of each waiting.  So softirq processing can go on for a
+long time, to the detriment of the rest of the work the system is meant to
+be doing.  This problem gets worse if, as can easily happen, <i>more</i>
+work shows up while softirq handling is happening.
+<p>
+<h4>Managing softirq handling</h4>
+<p>
+To avoid overwhelming the system with softirq processing, a number of
+heuristic mechanisms have been added to the kernel over time.  These
+include:
+<p>
+<ul class="spacylist">
+<li> The function that normally processes software interrupts (<a
+     href="https://elixir.bootlin.com/linux/latest/source/kernel/softirq.c#L528"><tt>__do_softirq()</tt></a>)
+     will pass over all of the raised softirqs and process them.  Once that
+     is done, it checks if more softirqs are pending; should that be the
+     case, it will go back to the beginning — but only for a maximum of ten
+     times.  If that count is exceeded, the kernel stops processing
+     softirqs and, instead, wakes the per-CPU <tt>ksoftirqd</tt> kernel
+     thread to continue the work.
+<li> Similarly, if softirq processing continues for more than
+     (approximately) 2ms, the remaining work will be punted to
+     <tt>ksoftirqd</tt>.
+<li> Whenever the <tt>ksoftirqd</tt> thread is running on a given CPU, the
+     kernel will not even try to process software interrupts there; it will
+     just leave them for the thread to handle.
+<li> When the kernel <i>is</i> processing software interrupts, it will
+     occasionally check the current process (the one that was preempted to
+     handle softirqs) for the <tt>TIF_NEED_RESCHED</tt> flag, which
+     indicates that a higher-priority process is ready to run.  In that
+     case, it will stop processing softirqs to defer to that process.
+</ul>
+<p>
+Some of the subsystems using software interrupts also implement limits in
+their own handlers, independent of anything that the central softirq code
+manages (or even knows about).
+<p>
+Toward the end of December, Jakub Kicinski posted <a
+href="/ml/linux-kernel/20221222221244.1290833-1-kuba@kernel.org/">a patch
+set</a> (under the title "<q>uncontroversial change</q>") addressing a
+problem that has been encountered with the last heuristic listed above.
+The deferral of softirq processing when the kernel wants to reschedule was
+meant to allow low-latency processing of events.  If some audio data comes
+in, for example, a recorder application will want be able to run and to
+grab it quickly.  But if the process that runs after reschedule is not
+quick — if it holds onto the CPU for a long time — it will block all
+softirq processing for that long time.  That can cause undesirable behavior
+like networking stalls, TCP retransmissions, and more.
+<p>
+To fix the problem, Kicinski has proposed the addition of another
+heuristic.  Once the rescheduling deferral happens, the kernel will only
+wait 2ms before it starts handling softirqs again, regardless of whether
+ksoftirqd is running; this will keep a long-running process from blocking
+softirq processing for too long.  A similar timeout applies to deferrals
+caused by an overload of softirqs — the first two items in the list above.
+In that case, the kernel will restart handling softirqs after 100ms.  These
+changes, he said, result in a tenfold reduction in networking stalls and a
+50% drop in TCP retransmissions.
+<p>
+<h4>Addressing the real problem</h4>
+<p>
+Thomas Gleixner <a href="/ml/linux-kernel/87r0u6j721.ffs@tglx/">seemed
+willing to accept the new timeouts</a>, though he added that he is
+"<q>not a big fan of heuristical duct tape</q>".  He pointed out some
+problems with the timekeeping; it is using the <tt>jiffies</tt> time
+variable, which has a resolution of 1-10ms, for small-millisecond values.
+That can lead to fairly widely varying results — a problem that, <a
+href="/ml/linux-kernel/87jzzxkgno.ffs@tglx/">he later realized</a>, exists
+in current kernels as well.  But it didn't take much longer before he <a
+href="/ml/linux-kernel/87r0u3hqtw.ffs@tglx/">complained about the whole
+approach</a> which, he said, just makes the overall softirq problem worse.
+<p>
+Softirqs, he said, "<q>are just the proliferation of an at least 50 years
+old OS design paradigm</q>".  They exist to allow certain code to
+circumvent whatever resource management (CPU scheduling, for example) is in
+place and, as a result, make it impossible to fully control the operation
+of the system.  He grumbled that the usual approach when problems
+inevitably turn up is to add more heuristics and knobs.  "<q>Can we please
+stop twiddling a parameter here and there and go and fix this whole problem
+space properly</q>?", he asked.  He also acknowledged that he did not have
+a complete solution in mind, but promised to think about it in the near
+future.
+<p>
+Kicinski <a
+href="/ml/linux-kernel/20230306165131.11b7b475@kernel.org/">said</a> that
+the networking developers are trying to move processing out of software
+interrupts, but that it is a long, slow process.  Frederic Weisbecker,
+instead, <a href="/ml/linux-kernel/ZAXVF0tPKLErAkpT@lothringen/">pointed
+out</a> the real problem with softirqs: only one of them can run at a time,
+and there is kernel code that depends on that level of exclusion.  Nobody
+really knows, after all these years, which softirq-handling code can safely
+run concurrently with other handlers, and which cannot.  So
+disabling of software-interrupt processing has taken on a role similar to
+that of the unlamented big kernel lock and, like the big kernel lock,
+softirqs are hard to safely get rid of.
+<p>
+The solution, he suggested, is a pushdown effort similar to <a
+href="/Articles/283066/">what was done for the big kernel lock</a>.  All
+softirq processing could be pushed into kernel threads, which would then be
+scheduled in the normal way, but they would all start by running with the
+equivalent of the softirq-disable big lock held.  As the handlers for
+specific subsystems were proven safe, they could release that lock until,
+someday, it would wither away entirely.  The task, he said, is not for the
+faint of heart:
+<p>
+<blockquote class="bq">
+	Of course this is going to be a tremendous amount of work but it
+	has the advantage of being iterative and it will pay in the long
+	run. Also I'm confident that the hottest places will be handled
+	quickly. And most of them are likely to be in core networking code.
+</blockquote>
+<p>
+All that is needed is somebody to actually do all of that work.
+<p>
+Matthew Garrett once <a href="/Articles/461720/">said</a> that
+"<q>'heuristic' is an ancient African word meaning 'maybe bonghits will make
+this problem more tractable'</q>".  Certainly software interrupts have been
+the sort of intractable problem that can drive developers to such a remedy.
+Perhaps, someday, this ancient subsystem will be cleaned out, urgent
+processing will be done in a controlled manner, and the heuristics will no
+longer be needed.  For now, though, they are still necessary, and Kicinski's
+patch may be the sort of bandage that makes them work a little better for a
+little longer while the real problem is being solved.  After all, even
+though the development community will surely deal with softirqs for real
+this time, this work is likely to take a while to come to fruition.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Interrupts-Software">Interrupts/Software</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/925540/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor926040"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2023 20:46 UTC (Mon)
+                               by <b>iustin</b> (subscriber, #102433)
+                              [<a href="/Articles/926040/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks, good summary! Interesting how the appeal of a big global lock always exists....<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926040/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926046"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 0:47 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/926046/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The allure of "never have to think about data races in your code" is quite a siren song…<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926046/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor926056"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 10:21 UTC (Tue)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/926056/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>Fundamentally, humans aren't good about thinking in terms of concurrent modifications - our brains like "first this, then that, then either this or that" sequences, and not "this and this and this in unknown order, then that and that in unknown order". A big global lock is a great way to ensure that there are no concurrent modifications; even better if it's implicit and thus compile-time, rather than something you have to remember to lock before you do your work.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926056/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor926044"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2023 23:19 UTC (Mon)
+                               by <b>nickodell</b> (subscriber, #125165)
+                              [<a href="/Articles/926044/">Link</a>] (31 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;Matthew Garrett once said that ""'heuristic' is an ancient African word meaning 'maybe bonghits will make this problem more tractable'"".</span><br>
+<p>
+Add that one to fortune.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926044/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926057"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 10:17 UTC (Tue)
+                               by <b>dvrabel</b> (subscriber, #9500)
+                              [<a href="/Articles/926057/">Link</a>] (30 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe don't reduce the 1000s diverse of languages in Africa to one generic "African". Disappointed that lwn felt the need to quote this outdated viewpoint uncritcally.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926057/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926064"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 12:09 UTC (Tue)
+                               by <b>jem</b> (subscriber, #24231)
+                              [<a href="/Articles/926064/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>If a (fictional) word in one African language means something, does that make that word less African if the word does not exist (or has a different meaning) in any of the other thousands of African languages? Matthew Garrett didn't say <b>the</b> African language.</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926064/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor926066"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 14:05 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/926066/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I guess I'm not sure I understand the objection.  Would it have been better if he'd said it was an ancient "Igbo" word - even though it obviously is not?  Or if he'd said it was an ancient Indo-European word?  Please educate me.
+<p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926066/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926110"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 17:55 UTC (Tue)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/926110/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Or if he'd said it was an ancient Indo-European word? </span><br>
+<p>
+Well, it is an ancient Indo-European word...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926110/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor926123"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 19:39 UTC (Tue)
+                               by <b>dvrabel</b> (subscriber, #9500)
+                              [<a href="/Articles/926123/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The agglomeration of all the diverse cultures and peoples in Africa into a single "African" culture or people is a tired racist trope with colonialism overtones. You would never say "ancient European language" in the same way.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926123/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926153"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 15, 2023 10:29 UTC (Wed)
+                               by <b>gioele</b> (subscriber, #61675)
+                              [<a href="/Articles/926153/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; You would never say "ancient European language" in the same way.</span><br>
+<p>
+For what it's worth, "ancient European languages" is a scholarly established term:<br>
+<p>
+<a href="https://wiki.digitalclassicist.org/Ancient_European_Languages_And_Writings">https://wiki.digitalclassicist.org/Ancient_European_Langu...</a><br>
+<p>
+<a href="https://scholar.google.com/scholar?q=%22ancient+european+languages%22">https://scholar.google.com/scholar?q=%22ancient+european+...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926153/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor926371"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2023 1:18 UTC (Fri)
+                               by <b>jschrod</b> (subscriber, #1646)
+                              [<a href="/Articles/926371/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; You would never say "ancient European language" in the same way.</span><br>
+<p>
+Why not?<br>
+<p>
+If I talk about Middle High German or Old English, I clearly subsume them as "ancient European languages". I would also add Latin and old variations of Basque (a non Indo-European language!) to that class...<br>
+<p>
+In fact, the term "ancient European languages" (scholarly known as "Paleo-European languages") has its own Wikipedia entry!<br>
+<p>
+And don't come up and tell me that the Goths, Kelts, Romans, and Huns (there in owing to the grande invasion), have had a common culture. This is exactly the "agglomeration of all the diverse cultures and peoples in Europe" that you describe.<br>
+<p>
+Is this a racist trope? It might be that some Basque seperatistic extremists would agree to that; but I beg to differ. (FWIW: I like the Basque region -- they have one of the most exciting cuisines in Europe!)<br>
+<p>
+Since I'm living in the part of Europe that has successfully conquered the Roman Empire -- is it with colonialism overtones concerning Latin?<br>
+<p>
+Don't misunderstand me: We shall tell about and celebrate the differences of cultures on the African continent. But a "proverb" is meant as a quip that uses an archetype to bring some point across. Look, there are a lot of proverbs about German culture that we could interpret as offending, if you look at our current society. Nevertheless they are useful in many situations, and one should recognize them for what they are -- not a description of culture or reality, but an allegory.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926371/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930147"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 15:41 UTC (Tue)
+                               by <b>Rudd-O</b> (guest, #61155)
+                              [<a href="/Articles/930147/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hm.<br>
+<p>
+Your interlocutor is 100% right, in a very specific sense.  One could even say a *critical* sense.<br>
+<p>
+He's correct that quite a few people would *never* say "ancient European language" in the same way as "ancient African language".  The question is simply one of *who / whom* and under *what* circumstances.<br>
+<p>
+From the perspective of someone captured by critical consciousness, the turn of phrase "ancient African language" refers to the *oppressed*; therefore use of the term by an *oppressor* (typically but not necessarily referring to people of European ancestry) is by definition going to be a transgression requiring negative judgments ("outdated viewpoint", "tired racist trope with colonialism overtones").  The turn of phrase is evil in this case -- it clearly erases Africans.<br>
+<p>
+In constrast, the same turn of phrase "ancient African language" can very well be considered *virtuous* (e.g. "fresh viewpoint", "inspiring truism") when uttered by someone who is a part of the *oppressed* class and / or buys into critical consciousness dialectic (such as Kimberle Crenshaw, Judith Butler or Ibram X. Kendi).  The turn of phrase is good in this case -- it clearly exalts Africans.<br>
+<p>
+The term "ancient European language", valid as it has been for pretty much all of modern history, is *not* going to carry the same implication -- since the "agglomeration of all the diverse cultures and peoples in Europe" is *not* a sin from the critical consciousness perspective.  In fact, since it is the *oppressor* there who is being agglomerated, it is a *virtue* to use that turn of phrase.  Same as people captured by critical consciousness would consider it a virtue to remind everyone constantly of how "colonialist" said oppressors are.  The turn of phrase is good in this case -- it's totally not erasing Europeans, and we're so happy it is.<br>
+<p>
+You see, people captured by critical consciousness use the same *vocabulary* as the rest of us, but they don't use the same *dictionary*.  The dictionary changes depending on who's doing the talking, along the oppressor / oppressed axis characteristic of critical consciousness.<br>
+<p>
+In sum: whether this or that phrase would be "said in the same way", depends very heavily on the writer's status -- is he an "enemy" or a "friend" of the Hegelian dialectic proper of critical consciousness?  I am sure most people are consciously or unconsciously familiar with this dichotomy (though most are not familiar with the philosophical underpinnings of the works).<br>
+<p>
+----------<br>
+<p>
+Of course, for those of us who reject critical consciousness dialectic, this form of perceiving the world -- and therefore this form of treating others, like your interlocutor has done -- is divisive, relativistic casuistry, engineered to create a hateful "oppressor / oppressed" distinction, drive a cudgel between otherwise-friendly and collaborative people, and manipulate the audience into fear of raising their voices against the absurdity of critical consciousness and its tenets.  From my perspective, your comment is 100% truthful and correct.  But those pesky facts are not going to matter to anyone captured by critical consciousness.  To them, the fundamental question is who wields the power in the interaction -- and since you are an oppressor (or so they may assume due to your unwillingness to submit to them), you should not be allowed to have any power, period.<br>
+<p>
+To be blunt: it's not that "we don't understand it".  We do -- we get the mechanics and we've studied its origins.  It's that we see what critical consciousness is doing to our spaces, and reject it as evil.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930147/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor926099"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 15:05 UTC (Tue)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/926099/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is clearly a riff on Ubuntu, which has also been described as an "ancient African word." Maybe Canonical shouldn't have used that phrase, but it's probably not possible to get rid of now.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926099/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor926131"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 20:54 UTC (Tue)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/926131/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+FWIW, I don't disagree and wouldn't use the same framing today.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926131/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor930086"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 11:00 UTC (Tue)
+                               by <b>Rudd-O</b> (guest, #61155)
+                              [<a href="/Articles/930086/">Link</a>] (20 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; this outdated viewpoint</span><br>
+<p>
+According to *you*, and perhaps other contemporary wokists like Matthew.<br>
+<p>
+I'm a reader of this zine since a good 15 years now.  I do not appreciate Jon being harangued with ideological cudgels, especially for merely quoting another person who originated the phrase.  Please do not.  Thanks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930086/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930091"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 13:21 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/930091/">Link</a>] (19 responses)
+      </p>
+      
+      </div>
+      </summary>
+      It's nice to be defended... I guess...but not if you're going to use vague right-wing smear terms.  Please do not do that here.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930091/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930093"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 13:27 UTC (Tue)
+                               by <b>Rudd-O</b> (guest, #61155)
+                              [<a href="/Articles/930093/">Link</a>] (18 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I appreciate your compliment (and I appreciate the work you have done too).<br>
+<p>
+As a bit of an aside:<br>
+<p>
+W.r.t the term "wokist", it's well-defined by a center-left scholar on the matter (former mathematician) called James Lindsay, who runs New Discourses and its embedded dictionary "Translations from the Wokish".  That is my source, at least.  <br>
+<p>
+That the term is popular with the right is not a surprise to me — woke ideology (critical consciousness to use the term they use in their scholarly papers) and right-wing ideology are a nearly 100% mutually-exclusive set of ideas.  Ultimately, it's a popular term because nearly everybody knows what it refers to.<br>
+<p>
+If you would like me to use a different term to express the same set of ideological beliefs, I am open to hearing suggestions.<br>
+<p>
+Thanks again and keep up the good work!  😊<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930093/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930130"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 13:46 UTC (Tue)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/930130/">Link</a>] (17 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Ultimately, it's a popular term because nearly everybody knows what it refers to.</span><br>
+<p>
+Yet, when pressed, nobody on the Right seems to be able to actually articulate what "woke" means, and why it's so deserving of so much derision and vitriol.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930130/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930131"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 14:00 UTC (Tue)
+                               by <b>Rudd-O</b> (guest, #61155)
+                              [<a href="/Articles/930131/">Link</a>] (16 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for sharing.  If you are looking to find a well-referenced definition for the term, my suggestion would be to look it up in the New Discourses site.  Otherwise I think we can let this off-topic thread to rest.<br>
+<p>
+Again, thanks for sharing, and have a great day!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930131/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930136"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 14:09 UTC (Tue)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/930136/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; If you are looking to find a well-referenced definition for the term</span><br>
+<p>
+I was just commenting on the rabid anti-wokeism crowd not actually being able to define what it is they're so vehemently taking a stand against.  Or unwilling, because leaving it as a vague boogeyman is more useful.  Regardless, the term is now effectively more radioactive than Fukishima.<br>
+<p>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930136/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930141"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 14:27 UTC (Tue)
+                               by <b>Rudd-O</b> (guest, #61155)
+                              [<a href="/Articles/930141/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; rabid anti-wokeism crowd</span><br>
+<p>
+"Rabid" is a dehumanizing way to refer to a large group of people who reject critical consciousness ideological tenets.  It is a direct contention that people who reject such ideas are akin to angry animals that cannot be reasoned with.<br>
+<p>
+Most Americans reject most tenets of critical consciousness, and almost all of the rest of non-Western Planet Earth (me included) find these tenets outright absurd.  Ask honestly one of these allegedly "rabid" people why they reject said tenets, you will often find principled, well-reasoned and well-founded objections to them, which perfectly explain their human discontent when these tenets are inflicted on them.<br>
+<p>
+<span class="QuotedText">&gt; not actually being able to define what it is they're so vehemently taking a stand against</span><br>
+<p>
+I have already pointed out twice that there is a well-referenced definition of the term (and related terms), and how to find it.  More than that, I cannot do.  If you insist "none of these people can even define X", after being afforded the opportunity to read a written definition of X, I hope you realize your objection comes across to me as closed-minded and argumentative.<br>
+<p>
+Either way, I sincerely hope have a good day 😊<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930141/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930145"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 15:12 UTC (Tue)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/930145/">Link</a>] (13 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; "Rabid" is a dehumanizing way to refer to a large group of people who reject critical consciousness ideological tenets. It is a direct contention that people who reject such ideas are akin to angry animals that cannot be reasoned with.</span><br>
+<p>
+I live in "Where woke goes to die" Florida.  (In a particularly "red" county, I might add)<br>
+<p>
+"Rabid" is an accurate description of that group of people; hyper-aggressively attacking anyone who is even perceived to disagree with them.<br>
+<p>
+<span class="QuotedText">&gt; I have already pointed out twice that there is a well-referenced definition of the term (and related terms), and how to find it.</span><br>
+<p>
+You are completely missing my point.  It's not that term doesn't have a well-defined meaning that is easy to locate; it's that the ones loudly and repeatedly using the term pejoratively are unable (or unwilling) to express that meaning, and by extension, explain why it's "bad".<br>
+<p>
+There are good reasons for that, of course -- because when explained plainly, taking a stand against the actual meaning of "woke" basically means that you're stating up front that you intend to be an objectively awful human being.  Incidentally, that isn't my personal interpretation.<br>
+<p>
+To go back to my home state of Florida, our governor has made a crusade against "woke" a core pillar of his political identity, successfully pushing for "anti-woke" legislation, removing local elected officials for being "too woke", and perhaps most infamously, attacking large businesses that express support for "woke" principles.  Naturally, the courts are filled with legal challenges.  During one of these trials, the Governor's general counsel had to define what "woke" meant, and the response was telling:  <br>
+<p>
+"The belief there are systemic injustices in American society and the need to address them." [1]<br>
+<p>
+That definition, made under penalty of perjury, tells you the governor (and by extension, the right-wing political establishment in Florida) knows exactly what they are saying, and also why they refuse to publicly acknowledge that meaning directly, instead preferring to just use an intentionally vague term.  The same sort of thing is repeating itself all over this nation, at both the local and national level.  The right has successfully made the term "woke" into a toxic boogeyman, and anyone who wants to actually use it positively (eg as you've cited) needs to use a different term or immediately end up on the defensive.<br>
+<p>
+[1] I can't be bothered to dig up a primary source, but this was widely reported in the news.  Here's a representative example:  <a href="https://www.fox13news.com/news/what-does-woke-mean-gov-desantis-officials-answer-during-andrew-warren-trial">https://www.fox13news.com/news/what-does-woke-mean-gov-de...</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930145/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930146"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 15:17 UTC (Tue)
+                               by <b>Rudd-O</b> (guest, #61155)
+                              [<a href="/Articles/930146/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm truly sorry the political establishment of your place of residence is not to your liking.<br>
+<p>
+You should consider moving if you have the means.  I did this myself — ditching feces-infested SF in 2015 — and it worked out great for me.<br>
+<p>
+Best of luck in your endeavors.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930146/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930150"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 15:55 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/930150/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Can we please stop this discussion here?  I'll freely admit that my contribution didn't help, but let's all conclude that this is out of bounds for LWN and let it end now.
+<p>
+Thank you.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930150/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930151"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 15:59 UTC (Tue)
+                               by <b>Rudd-O</b> (guest, #61155)
+                              [<a href="/Articles/930151/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Happy to --  just read your comment.   I agree this is off-topic; I wish Hegelian dialectics had not been brought to bear on your article by the first commenter; Signing off from this thread now.<br>
+<p>
+Have a great week, Jon!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930151/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor930148"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 15:51 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/930148/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; "The belief there are systemic injustices in American society and the need to address them." [1]</span><br>
+<p>
+If that's what the term really means, then you also have a good reason why Europeans hate it. We don't want to be dragged into American Discrimination Politics.<br>
+<p>
+We've got our own troubles at the moment with Harriet Harman who, having presumably been heavily discriminated against during her career because she's black, made comments about Jews that dropped her in hot water. Whether I like her political views or not, the fact she is black makes her a target and there's nothing she can do about it. My Jewish heritage is not obvious unless I *CHOOSE* to make it so ... (and I believe that was her point!)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930148/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930149"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 15:56 UTC (Tue)
+                               by <b>Rudd-O</b> (guest, #61155)
+                              [<a href="/Articles/930149/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; &gt; "The belief there are systemic injustices in American society and the need to address them." [1]</span><br>
+<p>
+To be fair, anyone taking their term definitions from politicians is as gullible as anyone else believing politicians about budgetary or campaign promises.  When I, my friends, anyone I know in my circle, or the scholars I study, use the term, that idiocy uttered by the General Counsel of Florida is absolutely not what I have in mind -- it's a totally preposterous definition.<br>
+<p>
+(To be *perfectly clear* your interlocutor is clearly *not* one of those gullible people.)<br>
+<p>
+As such, your interlocutor is right that idiots have made it so that people like me have to /define/ the term upfront (and comments are not editable here, so no way to clarify meaning post-facto).  *Shrug*.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930149/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor930152"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2023 16:13 UTC (Tue)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/930152/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think you meant Diane Abott, not Harriett Harman.<br>
+<p>
+And yes, from a European perspective the USA has an amazingly dysfunctional society on this, with absurdities in various ways (not that Europe is perfect - sometimes it's worse in some things). But... not an LWN topic. ;)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930152/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930190"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2023 8:36 UTC (Wed)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/930190/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I will say that I have come to strongly believe the divisive polarisation on every thing - where we seek to pigeonhole everyone as Blue or Green, so we can jump to labelling them as "good" or "evil" and reflexively back or dismiss their ideas - is highly corrosive to civil society. And we should resist that urge and push back against those tendencies. Judge ideas on their merits, not the person putting them forth; and acknowledge that people are mixed bags, no one or group has a monopoly on righteousness - the virtuous sometimes get it badly wrong, the misfits sometimes are right. <br>
+<p>
+Keep an open mind, stick to empathy and evidence, minimise judging things by association and bias.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930190/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930191"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2023 8:40 UTC (Wed)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/930191/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oh, and we probably need to talk and mix more with people of other political colours to us. Online has made it too easy for us to silo ourselves.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930191/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930198"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2023 11:49 UTC (Wed)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/930198/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Oh, and we probably need to talk and mix more with people of other political colours to us. Online has made it too easy for us to silo ourselves.</span><br>
+<p>
+I'm sorry, there's only so much direct abuse I can tolerate before choosing to walk away from those who are constantly angry and espouse general hatred for anything different than themselves.  I take an especially dim view of folks that claim that &lt;others&gt; shouldn't even have the right to _exist_, much less participate in society.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930198/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930209"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2023 12:45 UTC (Wed)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/930209/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I would *also* take an extremely dim view of anyone with such reprehensible attitudes to other human beings, as in your last sentence. <br>
+<p>
+That said, I think it's a vanishingly small number of people who have such beliefs about anyone. I know such arguments exist though, on both sides of political spectra on a couple of issues. And I think there's a large degree of mis-attribution of the position of the other side, straw-manning, etc., in all such cases. And I think that's due to the increased silo-ing in modern, online societies, and the resultant tendencies to pigeon-hole the "other" side and dismiss all they say (ascribing of hyper-extreme, non-representative positions to /all/ of the "other side" being one way to easily dismiss).<br>
+<p>
+But... we can't really explore this here. ;)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930209/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor930214"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2023 13:34 UTC (Wed)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/930214/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; That said, I think it's a vanishingly small number of people who have such beliefs about anyone.</span><br>
+<p>
+Perhaps, but when a much much larger number of people endorse and publicly support folks that proclaim such beliefs, it's not unreasonable to assume those beliefs are shared by that larger group.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930214/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor930291"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2023 15:22 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/930291/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; I would *also* take an extremely dim view of anyone with such reprehensible attitudes to other human beings, as in your last sentence.</span><br>
+<p>
+<span class="QuotedText">&gt; That said, I think it's a vanishingly small number of people who have such beliefs about anyone.</span><br>
+<p>
+You mean people like Sadiq Khan (Mayor of London)? About people who object to the ULEZ expansion?<br>
+<p>
+It is NORMAL for one side (or probably both sides) in Politics to refuse to listen to reason. That's probably 90% of the problem right there ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930291/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor930202"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Wise words</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2023 11:53 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/930202/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Plus one!<br>
+<p>
+It's interesting, all these news stories looking back at King Charles' earlier life, how much he was seen as a misfit, dreamer and "out of touch". But so much of what concerned him back then is now mainstream ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/930202/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor926047"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 1:53 UTC (Tue)
+                               by <b>mtaht</b> (subscriber, #11087)
+                              [<a href="/Articles/926047/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The article kind of elides the enormous magnitude of this regression:<br>
+<p>
+"We have a sirq latency tracker in our prod kernel which catches<br>
+8ms+ stalls of net Tx (packets queued to the NIC but there is<br>
+no NAPI cleanup within 8ms) and with these patches applied<br>
+on 5.19 fully loaded web machine sees a drop in stalls from<br>
+1.8 stalls/sec to 0.16/sec. I also see a 50% drop in outgoing<br>
+TCP retransmissions and ~10% drop in non-TLP incoming ones.<br>
+This is not a network-heavy workload so most of the rtx are<br>
+due to scheduling artifacts."<br>
+<p>
+This is not a network-heavy workload, is a key phrase here. For many months now I have been observing a marked decline in observed bufferbloat via a variety of tools and metrics, and thinking that ah! our projects's efforts are finally taking hold...<br>
+<p>
+... instead, now I am thinking that with this bug, leading to great amounts of tcp "inefficiency", widely propagating to the vms and billions of containers of the world, as taking a great deal of pressure off the network. <br>
+<p>
+It would be (perversely?) nice to see a before/after rtt comparison with the bug as it lies, on multiple containerized and vm´d systems.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926047/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926048"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 1:55 UTC (Tue)
+                               by <b>mtaht</b> (subscriber, #11087)
+                              [<a href="/Articles/926048/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My sole contribution to this conversation was (<a href="https://lwn.net/ml/linux-kernel/CAA93jw5nHjHTFiN9D4wCeOJ4UYmP2537Ar%2B5ZsCYftzhg7RLPw%40mail.gmail.com/">https://lwn.net/ml/linux-kernel/CAA93jw5nHjHTFiN9D4wCeOJ4...</a> ) <br>
+<p>
+"Something with less constants and more curves seems to be in order." I hope thomas and paul can come up with something.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926048/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor926055"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 9:58 UTC (Tue)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/926055/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As a non-kernel developer, if the top/bottom half (hard/soft irq) approach is a discredited(?) 50-year old design paradigm, what's the solution? Threaded irq's would appear to fix Gleixner's objections, and seems to be what the real-time Linux people in general like, but suffers from more (too much?) context-switching overhead? ksoftirqd is maybe some middle ground, but then you'll want to assign priorities to interrupt handlers, and maybe ksoftirqd should priority inherit the priority of the highest pending or currently processing softirq, you'll want to distribute softirq processing among available cpu's etc. etc., and at some point you're just reinventing the scheduler.. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926055/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926143"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2023 23:12 UTC (Tue)
+                               by <b>glenn</b> (subscriber, #102223)
+                              [<a href="/Articles/926143/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You're pointing out the fundamental issue with using shared threads to do deferrable, unattributed, work.  We see this in ksoftirqd.  We see it in workqueues.  These threads process generic work that have no associated priority.  There is no single policy that one can apply that doesn't degrade some other use-case.<br>
+<p>
+Suppose you have an application thread that contends with ksoftirqd for a CPU, and you feel your application is more important than network processing.  You elevate the priority of your application thread over ksoftirqd.  To your dismay, you discover that your application is now starving out timers, because thread wakeups are handled by ksoftirqd as well.  This may be an unacceptable trade-off, so you submit and let the ksoftirqd network work stomp on your application thread.  (I've been forced to make this trade-off half a dozen times.)<br>
+<p>
+Possibly one way forward is to assign CPU-scheduler-oriented priority (i.e., don't use a flag like HI_SOFTIRQ) to all work ksoftirqd work items, and let ksoftirqd's priority float with the work.  Adding priority inheritance is the next reasonable step.  This is a lot like how some microkernel services work.  This would require an API change and would probably be super disruptive!<br>
+<p>
+Maybe another approach would be to assign one thread to each tasklet-class (HI_SOFTIRQ, TIMER_SOFTIRQ, ...).  This would at least let one decouple timer processing from network processing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926143/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor926231"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 15, 2023 17:13 UTC (Wed)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/926231/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This suggestion will probably raise someone's blood pressure but: io_uring?<br>
+<p>
+We may end up with a kernel that's an incomplete, buggy emulation of Mill architecture in software, but it's shown results most everywhere else it's been applied so far.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926231/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926477"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 19, 2023 6:40 UTC (Sun)
+                               by <b>mtaht</b> (subscriber, #11087)
+                              [<a href="/Articles/926477/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I still wish someone would build the mill. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926477/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926478"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 19, 2023 6:58 UTC (Sun)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/926478/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've invested a bit into them. They're slowly moving, far too slower than expected, but I think they'll get to at least demonstrator ASICs eventually.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926478/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor926481"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 19, 2023 14:21 UTC (Sun)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/926481/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Having read about the Mill architecture now, I have at least two thoughts:<br>
+1. Not exactly?  And details really, really matter for building instruction execution hardware, it’s about what you can get the wires to do<br>
+2. Similarly, a valid architecture for higher level software doesn’t necessarily have much to do with a valid CPU design, which faces a very different set of problems<br>
+<p>
+Also, my reading of the Mill stuff gives me a vaguely gross feeling - they’re very proud and very defensive of it.  The proof is in the pudding and they don’t have any (and almost certainly won’t, but I get the sense this wouldn’t get them to admit they were wrong).<br>
+<p>
+Ahem.  Sorry for the rant.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926481/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926482"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 19, 2023 15:08 UTC (Sun)
+                               by <b>mtaht</b> (subscriber, #11087)
+                              [<a href="/Articles/926482/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the mill, even as a paper design, has been highly influential. The talks sparked a lot of thought back when they were giving them. The idea of a processor that could context or priv switch in 5 clocks, compared to thousands, would give an immense real-world gain to many applications. <br>
+<p>
+Living with some new aspect of Spectre every year, seeing capabilities make it into an arm processor, seeing message passing make a comeback with io_uring, watching ebpf take off,<br>
+makes me wish for something, even a virtual processor, that was more secure by design.<br>
+<p>
+The Mill instruction set continues to evolve, mostly in directions that I think are excessive, and I keep wishing, as always, that somehow, with all the great compiler development happening, that someone will manage to create a vm and compiler for it. <br>
+<p>
+Another thing I would like to see is dedicated cache for irq routines so as to always have consistent latency while servicing them. <br>
+<p>
+A new thing (I am getting seriously offtopic) now out there (not mill-related) is a possible new floating point standard, called posits: <a href="http://loyc.net/2019/unum-posits.html">http://loyc.net/2019/unum-posits.html</a> which I find sort of comforting. I would love it if we could recompile and cross check so many models against a different floating point standard. Those of you that don't distrust IEEE floating point, worry me. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926482/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926707"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 21, 2023 5:45 UTC (Tue)
+                               by <b>pabs</b> (subscriber, #43278)
+                              [<a href="/Articles/926707/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Have the Mill folks gotten any closer to getting their designs into silicon?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926707/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926710"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 21, 2023 6:23 UTC (Tue)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/926710/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+TBH, I have very little confidence that will ever happen. They have thrown a boatload of mostly untested concepts together, but unless you have Manhattan program style nearly unlimited resources available, that's not the way to bring innovation into the world. It has earned them a small but vocal internet following though, I grant them that.<br>
+<p>
+I think some of the concepts they present could be interesting topics for some academic research, but it seems them being super protective around it has caused academics to decide to not touch that stuff with a 10ft pole. Or then academics with much more architecture experience than me have looked at Mill and concluded it's uninteresting, IDK.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926710/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor926726"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 21, 2023 13:24 UTC (Tue)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/926726/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; A new thing (I am getting seriously offtopic) now out there (not mill-related) is a possible new floating point standard, called posits: <a href="http://loyc.net/2019/unum-posits.html">http://loyc.net/2019/unum-posits.html</a> which I find sort of comforting. I would love it if we could recompile and cross check so many models against a different floating point standard. Those of you that don't distrust IEEE floating point, worry me.</span><br>
+<p>
+That sounds quite interesting. Seems the main difference is that posits are less uniformly distributed than IEEE floats: they have better precision for numbers around +/- 1.0, and also a wider range (smaller minimum positive value, larger maximum finite value), with the tradeoff of worse precision for numbers closer to the extremes. They implement that by effectively having a variable-length exponent and mantissa, so numbers further from 1.0 will allocate more bits to range at the expense of precision.<br>
+<p>
+There may be many use cases where it's very useful to have more precision around +/- 1.0 - in particular there seems to be some interest among HPC people - but I'm not convinced it'd be a good idea for general-purpose computation where many people use floats nowadays. I'm thinking of stuff like 3D games, which are a significant driver of PC hardware performance, where the graphics and physics engines do a lot of work on coordinates that are within a reasonably limited range (the size of a game world which is small enough to walk around) and are rarely close to +/-1, and they need reasonably consistent precision across that range (because players get sad when they walk to the far corners of the world and everything goes wobbly), which is the exact opposite of what posits provide.<br>
+<p>
+Fixed-point integers provide even more consistent precision, but stuff like sqrt(a^2+b^2+c^2) is relatively expensive and awkward to do without overflow in fixed-point, so people don't want to do that either. IEEE floats seem like a useful compromise - you can be sloppy and ignore both precision and overflow, and you can largely ignore scale (it doesn't matter if you define 1.0 as representing 1mm or 1km, you'll get similar precision either way, unlike posits or fixed-point), and if you're working at a normal human range (from mm up to km) then you'll probably get away with it.<br>
+<p>
+Posits sound like they're probably better than IEEE floats when you're interested in numerical analysis and you can scale your data and design your algorithms to work around +/-1, but possibly worse in the default case where people don't want to think about all that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926726/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor926732"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Heuristics for software-interrupt processing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 21, 2023 13:54 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/926732/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Fixed-point integers provide even more consistent precision, but stuff like sqrt(a^2+b^2+c^2) is relatively expensive and awkward to do without overflow in fixed-point, so people don't want to do that either. IEEE floats seem like a useful compromise - you can be sloppy and ignore both precision and overflow, and you can largely ignore scale (it doesn't matter if you define 1.0 as representing 1mm or 1km, you'll get similar precision either way, unlike posits or fixed-point), and if you're working at a normal human range (from mm up to km) then you'll probably get away with it.</span><br>
+<p>
+Why is fixed point a problem? Yes it causes a bit more grief in that the programmer has to keep track of the decimal, but if I define 1 as mm to 0 decimal places, then I simply redefine the number to be 6dp and I've converted it to km.<br>
+<p>
+You can't just use fixed point without knowing what you're doing, but provided you know the typical range of the numbers you are dealing with, it can make life much simpler.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/926732/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

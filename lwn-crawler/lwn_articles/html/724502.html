@@ -1,0 +1,555 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Range reader/writer locks for the kernel [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/724502/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/724455/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/724502/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Range reader/writer locks for the kernel</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 5, 2017</br>
+           </div>
+The kernel uses a variety of lock types internally, but they all share one
+feature in common: they are a simple either/or proposition.  When a lock is
+obtained for a resource, the <i>entire</i> resource is locked, even if
+exclusive access is only needed to a part of that resource.  Many resources
+managed by the kernel are complex entities for which it may make sense to
+only lock a smaller part; files (consisting of a range of bytes) or a
+process's address space are examples of this type of resource.  For years,
+kernel developers have talked about adding "range locks" — locks that would
+only apply to a portion of a given resource — as a way of increasing
+concurrency.  Work has progressed in that
+area, and range locks may soon be added to the kernel's locking toolkit.
+<p>
+Jan Kara posted <a href="/Articles/535843/">a range-locking mechanism</a>
+in 2013, but that work stalled and never made it into the mainline.  More
+recently, Davidlohr Bueso has <a href="/Articles/722741/">picked up that
+work</a> and extended it.  The result is a new form of reader/writer lock —
+a lock, in other words, that distinguishes between read-only and write
+access to a resource.  Reader/writer locks can increase concurrency in
+settings where the protected resource is normally accessed by readers,
+since all readers can run simultaneously.  Whenever a writer comes along,
+though, it must have exclusive access to the resource.  Balancing access
+between readers and writers can be a tricky business where the wrong
+decisions can lead to starvation, unfairness, or poor concurrency.
+<p>
+Since range locks only cover part of a resource, there can be many of them
+covering separate parts of the resource as a whole.  The data structure
+that describes all of the known range locks, including those that are
+waiting for the needed range to become available, for a given resource is a
+"range lock tree", 
+represented by <tt>struct range_lock_tree</tt>.  This "tree" is the lock
+that protects the resource as a whole; it will be typically located in or
+near the relevant data structure where one would otherwise find a simpler
+lock.  Thus, a range-locking
+implementation will tend to start with something like:
+<p>
+<pre>
+    #include &lt;linux/range_lock.h&gt;
+
+    DEFINE_RANGE_LOCK_TREE(my_tree);
+</pre>
+
+<p>
+Given the <tt>range_lock_tree</tt> structure to protect the resource, a
+thread needing access to a portion of that resource will need to acquire a
+lock on the range of interest.
+A lock on a specific range (whether granted or not) is represented by
+<tt>struct range_lock</tt>.  It is possible to declare and initialize a
+range lock statically with either of:
+<p>
+<pre>
+    DEFINE_RANGE_LOCK(my_lock, start, end);
+    DEFINE_RANGE_LOCK_FULL(name);
+</pre>
+<p>
+The second variant above will describe a lock on the entire range.  It is
+also possible to initialize a <tt>range_lock</tt> structure at run time
+with either of:
+<p>
+<pre>
+    void range_lock_init(struct range_lock *lock, unsigned long start,
+    			 unsigned long end);
+    void range_lock_init_full(struct range_lock *lock);
+</pre>
+<p>
+Actually acquiring a range lock requires calling one of a large set of
+primitives.  In the simplest case, a call to <tt>range_read_lock()</tt>
+will acquire a read lock on the indicated range, blocking if necessary to
+wait for the range to become available:
+<p>
+<pre>
+    void range_read_lock(struct range_lock_tree *tree, struct range_lock *lock);
+</pre>
+<p>
+The lock for the entire resource is provided as <tt>tree</tt>, while
+<tt>lock</tt> describes the region that is to be locked.
+Like most sleeping lock primitives, <tt>read_range_lock()</tt> will go into
+a non-interruptible sleep if it must wait.  That behavior can be changed by
+calling one of the other locking functions:
+<p>
+<pre>
+    int range_read_lock_interruptible(struct range_lock_tree *tree,
+				      struct range_lock *lock);
+    int range_read_lock_killable(struct range_lock_tree *tree, struct range_lock *lock);
+    int range_read_trylock(struct range_lock_tree *tree, struct range_lock *lock);
+</pre>
+<p>
+In any case, a read lock that has been granted must eventually be released with:
+<p>
+<pre>
+    void range_read_unlock(struct range_lock_tree *tree, struct range_lock *lock);
+</pre>
+<p>
+If, instead, the range must be written to, a write lock should be obtained
+with one of:
+<p>
+<pre>
+    void range_write_lock(struct range_lock_tree *tree, struct range_lock *lock);
+    int range_write_lock_interruptible(struct range_lock_tree *tree,
+				       struct range_lock *lock);
+    int range_write_lock_killable(struct range_lock_tree *tree, struct range_lock *lock);
+    int range_write_trylock(struct range_lock_tree *tree, struct range_lock *lock);
+</pre>
+<p>
+A call to <tt>range_write_unlock()</tt> will release a write lock.  It is
+also possible to turn a write lock into a read lock with:
+<p>
+<pre>
+    void range_downgrade_write(struct range_lock_tree *tree, struct range_lock *lock);
+</pre>
+<p>
+The implementation does not give any particular priority to either readers
+or writers.  If a writer is waiting for a given range, a reader that
+arrives later requesting an intersecting range will wait behind the writer,
+even if other readers are active in that range at the time.  The result is,
+possibly, less concurrency than might otherwise be possible, but this
+approach also ensures that writers will not be starved for access.
+<p>
+This patch set has been through a few revisions and does not seem to be
+generating much more in the way of comments, so it might be about ready to
+go.  The first user is the Lustre filesystem, which is already using a
+variant of Kara's range-lock implementation internally to control access to
+ranges of files.  But there is <a
+href="/Articles/723648/">a potentially more interesting user</a> waiting on
+the wings: using range locks as a replacement for <tt>mmap_sem</tt>.
+<p>
+The reader/writer semaphore known as <tt>mmap_sem</tt> is one of the most
+intractable contention points in the memory-management subsystem.  It
+protects a process's memory map, including, to an extent, the page tables.
+Many performance-sensitive operations, such as handling page faults, must
+acquire <tt>mmap_sem</tt> with the result that, on many workloads,
+contention for <tt>mmap_sem</tt> is a significant performance bottleneck.
+
+Protecting a process's virtual address space would appear to be a good
+application for a range lock.  Most of the time, a change to the address
+space does not affect the entire space; it is, instead, focused on a
+particular set of addresses.  Using range locks would allow more operations
+on a given address space to proceed concurrently, reducing contention and
+improving performance.
+<p>
+The patch set (posted by Laurent Dufour) does not yet achieve that goal;
+instead, the entire range is locked every time.  Thus, with these patches,
+a range lock replaces <tt>mmap_sem</tt> without really changing how things
+work.  Restricting the change in this way allows the developers to be sure
+that the switch to a range lock has not introduced any bugs of its own.
+Once confidence in that change exists, developers will be able to
+start reducing the ranges to what is actually needed.
+<p>
+These changes will need to be made with care, especially since what is
+being protected by <tt>mmap_sem</tt> is not always clear.  But, given
+enough development cycles, the <tt>mmap_sem</tt> bottleneck should slowly
+dissolve away, leaving us with a faster, more concurrent memory-management
+subsystem.  Some improvements are worth waiting for.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-mmap_sem">Memory management/mmap_sem</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Range_locks">Range locks</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/724502/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor724647"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">32-bit systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 5, 2017 21:11 UTC (Mon)
+                               by <b>abatters</b> (<b>&#x272D; supporter &#x272D;</b>, #6932)
+                              [<a href="/Articles/724647/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The old version of range_lock_init() (in linux/drivers/staging/lustre/lustre/llite/range_lock.c) uses __u64 for the start/end offsets, but this generic version uses "unsigned long", which will limit its range to 4 GB on 32-bit systems.  That is fine for mmap(), but would limit its usefulness for "ranges of files", at least for byte-level granularity.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/724647/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor724655"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">32-bit systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2017 1:21 UTC (Tue)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/724655/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The Lustre developers (I'm one, but it wasn't me) pointed this out, actually...  A few weeks or maybe months ago now.  I'm surprised it hasn't been fixed!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/724655/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor724674"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">32-bit systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2017 15:01 UTC (Tue)
+                               by <b>ianmcc</b> (subscriber, #88379)
+                              [<a href="/Articles/724674/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+looks to be screaming out for template &lt;typename int_type&gt; ,,,,<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/724674/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor724679"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">32-bit systems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2017 15:27 UTC (Tue)
+                               by <b>davidlohr</b> (subscriber, #87713)
+                              [<a href="/Articles/724679/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I considered this, but ultimately decided it's not worth it just for lustre. A good example of templates is what interval trees do, and there it's most certainly worth the hassle. In any case lustre folks are well aware of the 32-bit situation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/724679/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor724742"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about update locks?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2017 22:14 UTC (Tue)
+                               by <b>saffroy</b> (guest, #43999)
+                              [<a href="/Articles/724742/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For some reason I'd expect that people would want an API for update locks before range locks. For a definition of update locks, see the "PW" lock mode in <a href="https://en.wikipedia.org/wiki/Distributed_lock_manager">https://en.wikipedia.org/wiki/Distributed_lock_manager</a>. <br>
+<p>
+Update locks are typically used in combination with "CR" (aka reader lock) and "EX" (exclusive lock) modes, with an API to atomically convert from update to exclusive. A great use case it when one wants to prepare some kind of structure update privately while letting readers work, and then convert to exclusive and atomically publish the update: this helps minimize the time during which the exclusive lock is held.<br>
+<p>
+Is that kind of lock API discussed?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/724742/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor724745"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about update locks?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2017 1:20 UTC (Wed)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/724745/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; A great use case it when one wants to prepare some kind of structure update privately while letting readers work, and then convert to exclusive and atomically publish the update:</font><br>
+<p>
+The normal approach to that use case in the kernel is to prepare the update, then grab the exclusive lock, then see if the structure has changed since you started preparing the update (e.g using a sequence counter).  If it has, bale out and start again.  If it hasn't, publish the update.<br>
+<p>
+I imagine that approach would not be ideal in the cluster context that DLM was designed for, as latencies would be higher etc.  In the kernel, it seems to work well.<br>
+<p>
+As a general rule, keeping the locks simple minimizes the time it takes to claim and release them.  Splitting locks (such as replacing a per-hash-table lock with lots of per-hash-chain locks) tends to be the better approach to scalability, rather than anything more complex that mutual-exclusion.<br>
+<p>
+Range locks are handling a fairly unique case.  Files are used in an enormous variety of ways - sometimes as a whole, sometimes as lots of individual records.  In some case the whole-file mmap_sem really is simplest and best.  Other times per-page locks are best.   But sometimes, taking mmap_sem will cause too much contention, while taking the page lock on every single page would take even longer... and some of the pages might not be allocated yet.<br>
+<p>
+So range locks are being added, not because it is a generally good idea, but because there is a specific use case (managing the internals of files) that seems to justify them.  Do you know of a specific in-kernel use case that would significantly benefit from upgradeable locks? (We already have downgradeable locks - see downgrade_write()).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/724745/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor725620"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about update locks?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 16, 2017 21:47 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/725620/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Update locks are typically used in combination with "CR" (aka reader lock) and "EX" (exclusive lock) modes, with an API to atomically convert from update to exclusive.</font><br>
+<p>
+When I wrote an accounts system, the OS allowed you to specify "many readers or one writer", "many readers and one writer", or "many readers and many writers". So all the accounts files were spec'd as "many readers and one writer".<br>
+<p>
+So when the user updated the system, the program ran in read-only mode until they hit "confirm", at which point it opened the ledger master files followed by the individual ledger files in read-write mode, and replayed the update for real. (It does help if you have a coherent overall design when you need to do locking :-)<br>
+<p>
+Range locks would be very useful for certain systems, though - relational databases spring to mind.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725620/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor725627"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about update locks?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2017 1:03 UTC (Sat)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/725627/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; So when the user updated the system, the program ran in read-only mode until they hit "confirm", at which point it opened the ledger master files followed by the individual ledger files in read-write mode, and replayed the update for real. </font><br>
+<p>
+So what happened when two instances of the program prepared conflicting updates? Obviously only one can replay its update at a time, but whichever program goes second won't be aware of the first update while preparing its changes. Does the update fail after it sees that the data changed, or does it simply overwrite the changes the first program did with its own changes based on obsolete data?<br>
+<p>
+This is, I believe, the problem that update locks are designed to solve. They indicate an intention to update the record in the future (after upgrading to an exclusive lock). Only one thread can prepare an update at a time. In the meantime, other threads can still read the data so long as they aren't preparing to make an update based on it. It's a similar concept to a reader/writer lock except that with an R/W lock there is no coherent way to atomically upgrade from a reader lock to a writer lock without the possibility of failure. (What would happen if multiple threads tried to upgrade? One would have to go first, and then the others would either fail to upgrade to a writer lock or see different data than was present before upgrading.) An update lock is like a "privileged" reader lock in the sense that there can be many readers, but only one of them (the updater) is able to upgrade to a writer lock.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725627/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor725628"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How about update locks?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 17, 2017 1:31 UTC (Sat)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/725628/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Range locks would be very useful for certain systems, though - relational databases spring to mind.</font><br>
+<p>
+Hence most databases having row-level locking.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/725628/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor724757"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Range reader/writer locks for the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2017 12:03 UTC (Wed)
+                               by <b>allenbh</b> (subscriber, #104242)
+                              [<a href="/Articles/724757/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+While the article mentions locking of different parts of the range, presumably by different threads, the article doesn't specifically mention locking different parts of the range at the same time by the same thread, and in that case any constraints for ordering of acquiring locks on the range.  I wonder if the implementation will do cycle detection at run time, or leave it up to users of the lock not to introduce cyclic deadlocks, or only allow locking one contiguous part of the range at a time.  I wonder how effective static analysis will be, and what kind of techniques might need to be added for static analysis to check the use of range locks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/724757/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2017, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

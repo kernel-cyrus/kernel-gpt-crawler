@@ -1,0 +1,770 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Shrinking shrinker locking overhead [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/944199/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/944437/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/944199/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Shrinking shrinker locking overhead</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Please consider subscribing to LWN</b>
+<p>
+Subscriptions are the lifeblood of LWN.net.  If you appreciate this
+content and would like to see more of it, your subscription will
+help to ensure that LWN continues to thrive.  Please visit
+<a href="/Promo/nst-nag1/subscribe">this page</a> to join up and keep LWN on
+the net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 15, 2023</br>
+           </div>
+Much of the kernel's performance is dependent on caching — keeping useful
+information around for future use to avoid the cost of looking it up again.
+The kernel aggressively caches pages of file data, directory entries,
+inodes, slab objects, and much more.  Without active measures, though,
+caches will tend to grow without bounds, leading to memory exhaustion.  The
+kernel's "shrinker" mechanism exists to be that active measure, but
+shrinkers have some performance difficulties of their own.  <a
+href="/ml/linux-mm/20230911094444.68966-1-zhengqi.arch@bytedance.com/">This
+patch series</a> from Qi Zheng seeks to address one of the worst of those
+by removing some locking overhead.
+<p>
+Kernel subsystems that maintain caches should register a shrinker that can
+be called when the kernel needs to free memory for other uses.  A shrinker
+is described by <a
+href="https://elixir.bootlin.com/linux/v6.5.2/source/include/linux/shrinker.h#L41"><tt>struct
+shrinker</tt></a>; among other things, it contains a pair of callbacks that
+the kernel can use to query how many cached objects could be freed, and to
+ask that they actually be freed.  Shrinkers can be asked to focus on a
+specific NUMA node or memory control group, but not all shrinkers implement
+that functionality.  Since shrinkers are called from the reclaim path when
+memory is tight, they should be quick and refrain from allocating memory
+themselves.
+<p>
+Shrinkers can be registered and deleted as the system runs, creating a
+concurrency problem: a shrinker should not be deleted while it is running,
+and the list of shrinkers must be changed carefully given that other CPUs
+may be traversing it at the same time.  In current kernels, the shrinker
+list is protected by a reader/writer semaphore (rwsem); traversing the list
+to run shrinkers requires read access, while changing the list requires
+exclusive write access.  This was meant to be a fast solution; frequent
+traversals of the list (reads) can run concurrently, while changes to the
+list that would require write access are relatively rare.
+<p>
+This rwsem, it turns out, can be a performance bottleneck on busy systems.
+It is a global lock, so frequent acquisitions and releases can create a lot
+of cache-line bouncing, slowing the system even if the lock itself is not
+contended.  Things can get worse if a shrinker runs (or is blocked) for a
+long time.  If a writer comes along, it will request a write lock, which
+will have to wait until all existing read locks are dropped; meanwhile, the
+write-lock request blocks any additional read locks from being granted.  In
+this situation, a long-running shrinker can clog up the works for some
+time.
+<p>
+Performance problems of this type come up often in the kernel, and the path
+to their solution is reasonably well-worn at this point; it almost
+inevitably involves using read-copy-update (RCU) to defer changes to
+existing structures until all users are gone.
+<p>
+In this case, the patch series starts by changing the shrinker registration
+interface so that all shrinkers are allocated dynamically — even those that
+are present from boot and cannot be removed.  This change allows all
+shrinkers to be treated uniformly, getting rid of special cases, and sets
+the stage for changing how shrinker registration is handled.  As seen in <a
+href="/ml/linux-mm/20230911094444.68966-2-zhengqi.arch@bytedance.com/">this
+patch</a>, a new shrinker instance is created with
+<tt>shrinker_alloc()</tt>, made active with <tt>shrinker_register()</tt>,
+and released with <tt>shrinker_free()</tt>.
+<p>
+There are a couple of implications here.  One, as noted in the cover
+letter, is that this change will break all out-of-tree modules that
+implement shrinkers; they will have to be converted to the new API or they
+will fail to load.  This is a deliberate change to ensure that, in kernels
+implementing the new mechanism, no old-style shrinkers are in use.  A more
+quiet change is that, while the existing <a
+href="https://elixir.bootlin.com/linux/v6.5.2/source/mm/vmscan.c#L765"><tt>register_shrinker()</tt></a>
+interface is exported to all modules, the new functions are exported as
+GPL-only.  As a result, proprietary kernel modules that implement
+shrinkers will not be fixable at all.
+<p>
+The bulk of this 45-part patch series is focused on converting all
+in-kernel shrinkers to the new API, after which the old one is <a
+href="/ml/linux-mm/20230911094444.68966-40-zhengqi.arch@bytedance.com/">deleted</a>.
+The real purpose of the patch set is only achieved in <a
+href="/ml/linux-mm/20230911094444.68966-43-zhengqi.arch@bytedance.com/">patch&nbsp;42</a>,
+where the lockless algorithm is introduced.  The <tt>shrinker</tt>
+structure gains three new fields: a reference count, a <a
+href="https://www.kernel.org/doc/html/latest/scheduler/completion.html">completion</a>
+to be used for removals, and an <tt>rcu_head</tt> structure.
+<p>
+When a shrinker is registered, its reference count is set to one, and it is
+added (in an RCU-safe manner) to the shrinker list; it is then available to
+be called when the memory-management subsystem needs to find some memory.
+The traversals of the shrinker list are performed with the RCU lock held,
+meaning that the entries in the list will not disappear at an inconvenient
+time.  To invoke a shrinker, the kernel will first attempt to increment its
+reference count; that attempt will only succeed if the count is already
+greater than zero.  The RCU lock will then be dropped, and the shrinker
+invoked.  Once its work is done, the RCU lock will be reacquired, and the
+reference count decremented.  Since the reclaim code held a reference, the
+shrinker will not have disappeared while the lock was dropped.
+<p>
+When the time comes to remove a shrinker, <tt>shrinker_free()</tt> will
+drop the reference acquired at registration time, then use the completion
+to wait until all other references (if any) are also dropped.  At this
+point, the fact that the reference count is zero means that shrinker will
+not acquire any more users, since an attempt to increment the reference
+count only succeeds if that count is greater than zero.  But there may
+still be threads traversing the shrinker list and seeing this shrinker's
+entry there, so its removal has to be handled with care.  That, of course,
+is what RCU is for; the entry is taken off the list, but then handed to RCU
+until a grace period passes, after which it is known that the
+<tt>shrinker</tt> structure can be safely freed.
+<p>
+With these changes made, the shrinker rwsem is no longer used during the
+invocation of shrinkers; it is only taken for write access when changes are
+being made to the shrinkers themselves.  The <a
+href="/ml/linux-mm/20230911094444.68966-46-zhengqi.arch@bytedance.com/">final
+patch in the series</a> turns the rwsem into a lower-overhead <a
+href="https://www.kernel.org/doc/html/latest/locking/mutex-design.html">mutex</a>,
+and the work is done.
+<p>
+This series is in its sixth revision, and the stream of comments appears to
+be slowing down.  Benchmark results show no regressions from this change,
+unlike previous attempts to address the locking bottleneck that created
+problems elsewhere.  Unless new problems turn up somewhere — always a
+possibility with this kind of low-level code — it looks like lockless
+shrinking may be reaching a point where it is ready for wider testing in
+linux-next.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Shrinkers">Memory management/Shrinkers</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Releases-6.7">Releases/6.7</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/944199/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor944585"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2023 18:29 UTC (Fri)
+                               by <b>calumapplepie</b> (guest, #143655)
+                              [<a href="/Articles/944585/">Link</a>] (12 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't think the shrinker API is appropriate for GPL-only marking; its a well-defined interface that doesn't really involve a lot of internal kernel mechanisms, and claiming that any users of a shrinker (ie, anyone who wants a cache that gets freed when memory is tight) are necessarily tightly integrated is a bit silly.<br>
+<p>
+In fact, I think exporting something similar to the shrinker API to userspace would make sense; either through the kernel, or via a daemon that looks at memory PSI info.  MADV_FREE is useful, but if you want to add a more complicated cache, it just isn't good enough.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944585/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor944587"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2023 18:44 UTC (Fri)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/944587/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Perhaps that's the way we are slowly moving; non-GPL modules being de facto banned but userspace and/or BPF getting so powerful that they're essentially becoming powerful enough to replace them.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944587/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor944589"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2023 20:29 UTC (Fri)
+                               by <b>ringerc</b> (subscriber, #3071)
+                              [<a href="/Articles/944589/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That'd be nice. Proprietary binary only modules cause me constant pain when supporting systems as part of my work.<br>
+<p>
+Especially those awful vendor endpoint security systems. They're uniformly terrible quality and they seem to be deliberately obfuscated. It can be hard to even be sure they're present initially, let alone figure out that some idiotic thing they're doing is breaking PostgreSQL.<br>
+<p>
+I'm pretty sure some of them have never heard fork() without exec(), or multiple processes opening and doing I/O to one file at the same time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944589/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor944590"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2023 20:34 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/944590/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I sincerely hope that we move towards a world where everything in the kernel is marked GPL-only. This kind of step, introducing a new interface and porting everything in-kernel to the new interface and removing the old interface, seems like a great way to do that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944590/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor944675"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 16, 2023 15:42 UTC (Sat)
+                               by <b>tux3</b> (subscriber, #101245)
+                              [<a href="/Articles/944675/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Could you say more about why?<br>
+<p>
+The effect seems to be the same as simply marking an existing interface GPL-only, except perhaps for having an opportunity to make the change. But if there is a good reason to mark everything GPL-only, it seems to me that we may as well find the reason and do it immediately.<br>
+<p>
+If it is worth doing, there is no reason to wait for an opportunity to bundle the change within a larger rework. That feels like a slightly underhanded way to avoid conflict, if that's the worry.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944675/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor944591"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2023 20:56 UTC (Fri)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/944591/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The GPL-only marking is not a legal marking.<br>
+It's a marking that the author does not want proprietary modules to use the interface.<br>
+It does not say anything about whether those modules could legally use the interface, if it wasn't technically restricted.<br>
+Therefore, all interfaces in the kernel could be marked GPL-only, if the authors decide to do so.<br>
+And that is perfectly fine.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944591/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor944593"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2023 21:04 UTC (Fri)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/944593/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  It does not say anything about whether those modules could legally use the interface, if it wasn't technically restricted.</span><br>
+<p>
+Huh, that makes me think... In the US, bypassing that "technical restriction" could be considered a DMCA violation, and subject to criminal penalties...<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944593/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor944595"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2023 21:09 UTC (Fri)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/944595/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Correct.<br>
+I wrote<br>
+<span class="QuotedText">&gt;if it wasn't technically restricted.</span><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944595/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor944606"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 16, 2023 4:50 UTC (Sat)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/944606/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not under 17 USC 1202:<br>
+<p>
+<span class="QuotedText">&gt; (3) As used in this subsection—</span><br>
+<span class="QuotedText">&gt; (A) to “circumvent a technological measure” means to descramble a scrambled work, to decrypt an encrypted work, or otherwise to avoid, bypass, remove, deactivate, or impair a technological measure, without the authority of the copyright owner; and</span><br>
+<span class="QuotedText">&gt; (B) a technological measure “effectively controls access to a work” if the measure, in the ordinary course of its operation, requires the application of information, or a process or a treatment, with the authority of the copyright owner, to gain access to the work.</span><br>
+<p>
+If you don't meet the test in (B), then it's not DRM and there's no 1202 liability. You don't need "the authority of the [kernel's] copyright owner" to mark your own module as GPL'd (and thereby gain access to GPL-only interfaces), so the GPL-only restriction does not effectively control access to the kernel within the meaning of 1202.<br>
+<p>
+1203 is more debatable:<br>
+<p>
+<span class="QuotedText">&gt; (a) False Copyright Management Information.—No person shall knowingly and with the intent to induce, enable, facilitate, or conceal infringement—</span><br>
+<span class="QuotedText">&gt; (1) provide copyright management information that is false, or</span><br>
+<span class="QuotedText">&gt; [...]</span><br>
+<span class="QuotedText">&gt; (c) Definition.—As used in this section, the term “copyright management information” means any of the following information [...], except that such term does not include any personally identifying information about a user [...]:</span><br>
+<span class="QuotedText">&gt; [...]</span><br>
+<span class="QuotedText">&gt; (6) Terms and conditions for use of the work.</span><br>
+<p>
+So you could argue that, by falsely marking your module as GPL'd, you're violating this law. OTOH, one could make exactly the same argument about the upstream GPL-only marker, as derivative works don't really follow bright line rules like that in the first place. I suspect a US court would at least seriously consider applying the equitable doctrine of unclean hands in such a scenario (i.e. you cannot violate the law, and then sue somebody else for violating the law, when your violation directly caused their violation).<br>
+<p>
+However, there is a far more straightforward defense: If you didn't have "the intent to induce, enable, facilitate, or conceal infringement" (because you honestly believe that your module is not a derivative work), then you don't violate (a) and therefore haven't broken the law at all.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944606/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor944672"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 16, 2023 12:32 UTC (Sat)
+                               by <b>IanKelling</b> (subscriber, #89418)
+                              [<a href="/Articles/944672/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; You don't need "the authority of the [kernel's] copyright owner" to mark your own module as GPL'd</span><br>
+<p>
+I'm not trying to argue that your larger point is wrong, but this particular sentence in isolation strikes me as very odd because copyright law say you certainly do need the authority of the [kernel's] copyright owner to do things like mark your own module as GPL'd. Perhaps for various reasons that is not the kind of authority it is talking about, including that permission was already irrevocably granted.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944672/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor945874"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 29, 2023 18:48 UTC (Fri)
+                               by <b>sammythesnake</b> (guest, #17693)
+                              [<a href="/Articles/945874/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; you certainly do need the authority of the [kernel's] copyright owner to do things like mark your own module as GPL'd.</span><br>
+<p>
+Howso? If the module isn't a derivative work of the kernel, then the copyright ownership of the kernel code is entirely irrelevant. The rights of an author do not extend to others' non-derivative works.<br>
+<p>
+Even if it were, the GPL explicitly disclaims any consideration of how the code is *used* (without distribution) so the copyright holders have already granted permission to lie to the API (to whatever extent that such permission is required , which is none at all in many jurisdictions, but YMMV)<br>
+<p>
+A kernel module (whether derived from kernel code or not) uses an API (which includes a flag indicating "this is GPL code") The API is described in various documentation that you can read without ever seeing the kernel code. If the module's authors never see the kernel code, then it can't be a derivative work of that kernel code.<br>
+<p>
+This is a really important fact of how the GPL and other licences (including proprietary ones) work. They can only grant permission to do things the author is entitled to withhold, not withdraw entitlement the user gets by default. Stuff like parody, journalism, fair use/fair dealing etc. give certain freedoms of use/reuse otherwise covered by copyright, but even those are exceptions for where there is a relevant copyright to consider. That isn't the case if the original work (in this case, we're talking about kernel code) isn't copied/modified/distributed/whatever.<br>
+<p>
+It's very important to remember that the *authors' opinion* of what counts as a derivative work is a distraction - that question is a matter for the legal system (i.e. copyright law, relevant judicial precedent and potentially the vagaries of any courts/juries that might get involved)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945874/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor944594"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2023 21:12 UTC (Fri)
+                               by <b>butlerm</b> (subscriber, #13312)
+                              [<a href="/Articles/944594/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The fact that you can mark interfaces as GPL only and that it is common to do so may grant an implied license for any non-GPL modules to use interfaces not marked as GPL only notwithstanding any other described restrictions in the GPL itself. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944594/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor944678"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 16, 2023 17:25 UTC (Sat)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/944678/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;The GPL-only marking is not a legal marking.</span><br>
+<p>
+<span class="QuotedText">&gt;It's a marking that the author does not want proprietary modules to use the interface.</span><br>
+<p>
+Actually, it's not. And this is part of the problem.<br>
+<p>
+The fanatics are going round marking OTHER PEOPLES' code as GPL-only, and in some cases the copyright holders have been screaming blue murder as a result.<br>
+<p>
+That is why this whole area is a minefield.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944678/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor944693"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 17, 2023 15:32 UTC (Sun)
+                               by <b>nelhage</b> (subscriber, #59579)
+                              [<a href="/Articles/944693/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Things can get worse if a shrinker runs (or is blocked) for a long time. If a writer comes along, it will request a write lock, which will have to wait until all existing read locks are dropped; meanwhile, the write-lock request blocks any additional read locks from being granted. In this situation, a long-running shrinker can clog up the works for some time.</span><br>
+<p>
+Man, I've forgotten how many times I have encountered some version of this problem. I saw it often enough to write a post discussing the problem and several concrete instances: <a href="https://blog.nelhage.com/post/rwlock-contention/">https://blog.nelhage.com/post/rwlock-contention/</a><br>
+<p>
+On the whole, I've come to believe that reader/writer locks are mostly attractive nuisances and that you should usually be looking for a better option if one is at all available.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944693/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor944695"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 17, 2023 17:28 UTC (Sun)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/944695/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Huh.  They seem like a cheap way to make potentially large improvements, with limitations of their own.  I’ve definitely seen where they made a big difference for minimal engineering effort.<br>
+<p>
+Their limitations don’t mean they weren’t an improvement on what was there before.  And those other options are almost inevitably a lot more work to implement…. So…<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944695/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor944696"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 17, 2023 17:54 UTC (Sun)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/944696/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You wrote a great article about the problem; thank you. More people need to be aware of it. I share your opinion that rwlocks are an attractive nuisance, whether they're fair or unfair.<br>
+<p>
+Your linked article about the mmap_sem is also spot on. <a href="https://www.tumblr.com/nelhagedebugsshit/140317144518/when-observing-your-database-stalls-it">https://www.tumblr.com/nelhagedebugsshit/140317144518/whe...</a><br>
+<p>
+In the past few months, we've landed changes to avoid using the mmap_sem for the majority of page faults. There is more work to do (in particular, reading /proc/PID/maps needs to use RCU instead of the rwsem), but even in its current form, we see improvement. v6.4 will avoid the mmap_sem for anon memory and v6.6 will avoid it for file-backed memory too (as long as we hit in the page cache).<br>
+<p>
+You can read about the scheme we're using right here on LWN: <a href="https://lwn.net/Articles/906852/">https://lwn.net/Articles/906852/</a><br>
+<p>
+Funnily, it's _more_ rwsems, but there should rarely be contention; you have to be doing a write operation that splits an existing VMA to have a reader block. eg an mprotect(). It's certainly not a traditional way to use an rwsem, but it felt better than open-coding a spinlock, a wait-queue and a "modification in progress" bit.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/944696/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor945431"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">R/W Locks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 24, 2023 23:45 UTC (Sun)
+                               by <b>kmeyer</b> (subscriber, #50720)
+                              [<a href="/Articles/945431/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; On the whole, I've come to believe that reader/writer locks are mostly attractive nuisances and that you should usually be looking for a better option if one is at all available.</span><br>
+<p>
+Yes, I've come to the same conclusion.  If a mutex isn't suitable in some situation, it's rare that a RW-lock is an improvement.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945431/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor945432"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Shrinking shrinker locking overhead</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 24, 2023 23:51 UTC (Sun)
+                               by <b>kmeyer</b> (subscriber, #50720)
+                              [<a href="/Articles/945432/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if there are any technical or political barriers to use of hazard pointers in Linux.  Certainly RCU use has some inertia.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945432/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

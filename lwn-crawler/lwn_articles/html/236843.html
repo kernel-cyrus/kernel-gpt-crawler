@@ -1,0 +1,730 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Fun with file descriptors [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/236843/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/236290/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/236843/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Fun with file descriptors</h1>
+<div class="Byline">[Posted June 4, 2007 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+<a href="http://lwn.net/Articles/236206/">Last week's article on
+syslets</a> briefly mentioned a problem with using file descriptors for
+low-level communications with the kernel.  There is a single namespace for
+file descriptors, combined with a strict rule for how those descriptors are
+allocated.  As long as the application is fully in charge of that space all
+works well, and the "lowest available descriptor" rule can be relied upon.
+As soon as hidden levels (the C library in particular) start using file
+descriptors for their own purposes, though, the potential for conflicts and
+confusion at the application level arises.  An application which makes a
+mistaken assumption about where a file descriptor will be allocated, or
+which indiscriminately "cleans up" open descriptors belonging to the
+libraries will break.  This problem is evidently real, to the point that
+the glibc goes out of its way to avoid using internal file descriptors for
+anything.
+<p>
+
+This issue is a problem for kernel developers.  They would rather not
+create new, file-descriptor-based services (completion events for
+syslet-based asynchronous I/O, for example) if glibc will not use those
+services.  So there has been a search for alternatives, most of which
+involve creating a separate space for "system" file descriptors.  Linus <a
+href="/Articles/236844/">suggested</a> one way of doing this:
+<p>
+<div class="BigQuote">
+	Which *could* be something as simple as saying "bit 30 in the file
+	descriptor specifies a separate fd space" along with some flags to
+	make open and friends return those separate fd's. That makes them
+	useless for "select()" (which assumes a flat address space, of
+	course), but would be useful for just about anything else.
+</div>
+<p>
+
+Davide Libenzi took this idea forward with <a
+href="http://lwn.net/Articles/236724/">a patch to create a non-sequential
+file descriptor area</a>.  The current kernel tracks file descriptors in a
+linear array - a technique which works well as long as the "lowest
+available descriptor" rule holds.  As soon as one starts setting high-order
+bits in file descriptor numbers, however, the linear array becomes rather
+less practical.  So Davide's patch creates a separate, linked-list data
+structure used for the non-sequential file descriptor range.  The <a
+href="http://lwn.net/Articles/236725/">second part of the patch set</a>
+then fixes up the <tt>dup2()</tt> system call to use the new file
+descriptor range.  The normal behavior of <tt>dup2()</tt> has not changed,
+but if the destination file descriptor is passed as
+<tt>FD_UNSEQ_ALLOC</tt>, a random file descriptor will be allocated from
+the non-sequential area.  A specific file descriptor in that area can be
+requested by passing a number higher than <tt>FD_UNSEQ_BASE</tt>.
+<p>
+
+This approach has the advantage of not requiring any new system calls or
+changing the default user-space binary interface at all.  But <a
+href="/Articles/236847/">according to Ulrich Drepper</a>, that attribute is
+not an advantage at all.  Since using this capability requires application
+changes in any case, Ulrich would rather just see a new system call
+created; he proposes:
+<p>
+<pre>
+    int nonseqfd(int fd, int flags);
+</pre>
+<p>
+This system call would duplicate the open file descriptor <tt>fd</tt> into
+the non-sequential space, optionally closing <tt>fd</tt> in the process.
+The <tt>flags</tt> parameter would allow other attributes of the new file
+descriptor to be controlled.  Of particular interest is whether that
+descriptor shows up in the <tt>/proc/<i>pid</i>/fd</tt> directory.  The
+optimal way of closing all open file descriptors, apparently, is to read
+that directory to see which descriptors are currently open.  Keeping
+special descriptors out of that directory (perhaps shifting them to a
+parallel <tt>private-fd</tt> directory) will prevent well-meaning
+applications from closing the library's file descriptors.
+<p>
+
+It has been suggested that the <tt>open()</tt> system call should get a
+flag which would cause it to select a non-sequential file descriptor from
+the outset, eliminating the need for a separate call to
+<tt>nonseqfd()</tt>.  There are, however, a number of system calls which
+create file descriptors but which have no flags parameter and which, thus,
+will never be able to return non-sequential file descriptors;
+<tt>socket()</tt> is a classic example.  So there will still be a need for
+a system call which can duplicate a file descriptor into the new space.  
+<p>
+
+Ulrich has  requested that <i>all</i> file descriptors in the
+non-sequential space be allocated randomly.  He would rather not ever see a
+situation where application developers think they can rely on any specific
+allocation behavior when using that space.  There have also been
+suggestions that the non-sequential space could be useful for for
+high-performance applications which hold large numbers of file descriptors
+open - web servers, for example.  Such applications usually have no use for
+the "lowest available descriptor" guarantee and would happily do without
+the overhead of implementing that guarantee.  Davide's current
+implementation does not appear to have been written with thousands of
+non-sequential file descriptors in mind, though.
+<p>
+
+On another front, Ulrich has been working on a race condition which comes
+up with certain types of applications.  It is possible to request that a
+file descriptor be automatically closed if the process performs an
+<tt>exec()</tt>; the <tt>fcntl()</tt> system call is used for this
+purpose.  The problem is that there is some time between when the file
+descriptor is created (with an <tt>open()</tt> call, perhaps) and the
+subsequent <tt>fcntl()</tt> call.  If another thread forks and runs a new
+program between those two calls, its copy of the new file descriptor will
+not have the close-on-exec flag set and will thus remain open.
+<p>
+Solving that problem generally will take some work, but fixing the
+<tt>open</tt> case is relatively easy.  Ulrich is <a
+href="http://lwn.net/Articles/236486/">proposing</a> a new
+<tt>O_CLOEXEC</tt> flag for this purpose.  There does not appear to be much
+opposition to this idea, so the new flag might well make an appearance in
+2.6.23.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#File_descriptors">File descriptors</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#System_calls">System calls</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/236843/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor237212"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2007 4:42 UTC (Thu)
+                               by <b>felixfix</b> (subscriber, #242)
+                              [<a href="/Articles/237212/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Hmmm ... It's been a while since I wrote threaded socket code, so I may be barking up a non-existent tree.  But if a new open() flag to create a non-sequential fd is not welcome because socket(), for instance, does not have these flags, why is a new O_CLOEXEC flag acceptable?  Is it the case that no socket fd will ever be closed upon exec?  Or is it because exec is (still?) a no-no in threaded programs?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237212/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor238162"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 14, 2007 7:51 UTC (Thu)
+                               by <b>slamb</b> (guest, #1070)
+                              [<a href="/Articles/238162/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      I'm not sure about a "no-no", but exec*() is generally preceded by fork(), and I'm told a fork() in large threaded 
+programs can be extremely slow. Apache uses an <a rel="nofollow" 
+href="http://httpd.apache.org/docs/2.0/mod/mod_cgid.html">external forking server</a> for this reason. Other 
+caveats include that in the fork()ed child process, it is as if all other threads suddenly died, and they still hold 
+whatever mutexes they were holding. So any resources the child requires (before calling exec*()) need a <a rel="nofollow" 
+href="http://www.opengroup.org/onlinepubs/009695399/functions/pthread_atfork.html">pthread_atfork(3)</a> 
+handler or similar.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/238162/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor237214"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2007 5:48 UTC (Thu)
+                               by <b>daney</b> (guest, #24551)
+                              [<a href="/Articles/237214/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      The O_CLOEXEC for open(2) is a good start, but it is not sufficient.
+We need coverage for accept(2) also.  I am not sure if there are other
+ways of creating file descriptors, but unless you plug them all, you
+have to assume that the race condition will occur and take
+precautions.  If you have to take these precautions, then fixing only
+a portion of the causes (fixing open(2)) is not all that useful.
+
+<p>
+Another nasty race condition that I have considered is:
+<pre>
+Thread 1                Thread 2               Thread 3
+---------------------------------------------------------------
+load fd from memory     load fd from memory
+                        close fd
+                                               obtain same fd from open
+use fd on wrong file
+
+</pre>
+If Thread 3 did not reuse the fd there would not be a problem.
+<p>
+I am glad that people are starting to address these issues.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237214/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor237265"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2007 11:52 UTC (Thu)
+                               by <b>HenrikH</b> (subscriber, #31152)
+                              [<a href="/Articles/237265/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      But this should be controlled by the application using mutexes to lock the access to the fd and you probably have some struct holding the fd that will also be freed upon the "close fd" so that thread #1 no longer can access the same fd after it is closed by thread #2.<br>
+<p>
+That said however, it would be nice to avoid the reuse of the fd as it is now.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237265/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor237334"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2007 16:41 UTC (Thu)
+                               by <b>daney</b> (guest, #24551)
+                              [<a href="/Articles/237334/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      The problem being is that if you use a mutex to protect a blocking read, you can not interrupt it by closing the file descriptor as the thread calling close would block on the mutex.<br>
+<p>
+There are ways to work around the current state of things, but the problem is that they are often complex and easy to get wrong.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237334/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor237854"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 12, 2007 15:23 UTC (Tue)
+                               by <b>shane</b> (subscriber, #3335)
+                              [<a href="/Articles/237854/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <i>The problem being is that if you use a mutex to protect a blocking 
+read, you can not interrupt it by closing the file descriptor as the 
+thread calling close would block on the mutex.</i>
+<p>
+Yes, this is a tricky problem.
+<p>
+You can create a file descriptor that you can "wake" the blocking thread 
+and then use <tt>select()</tt> or <tt>poll()</tt>. You can use a pipe for 
+this (of course you have to be careful to handle closing the pipe then).
+<p>
+You can also use a condition variable for the reader, and a separate 
+thread checking for input that signals the reader. A 3rd thread should be 
+able to close the file descriptor, which should then return <tt>EBADF</tt> 
+from it's <tt>select()</tt> or <tt>poll()</tt>. (I think...)
+<p>
+Sharing file descriptors between threads is indeed a pain in the ass 
+though. Correct threaded programming is fairly difficult, it makes one 
+wonder if maybe good old event-driven programming wasn't really the answer 
+all along!
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237854/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor288141"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 1, 2008 21:21 UTC (Tue)
+                               by <b>dankamongmen</b> (subscriber, #35141)
+                              [<a href="/Articles/288141/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+I'm being brutally bent over by the lack of an accept(2) solution right now (I'm docing the
+changes as they come along, btw; see:
+<a href="http://dank.qemfd.net/dankwiki/index.php/Linux_APIs#File_descriptors">http://dank.qemfd.net/dankwiki/index.php/Linux_APIs#File_...</a>). It seems setsockopt(2)
+could be easily enough overloaded for this purpose...argh!
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/288141/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor237285"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2007 14:24 UTC (Thu)
+                               by <b>RobSeace</b> (subscriber, #4435)
+                              [<a href="/Articles/237285/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; This problem is evidently real, to the point that the glibc goes out of</font><br>
+<font class="QuotedText">&gt; its way to avoid using internal file descriptors for anything.</font><br>
+<p>
+Um, except that it DOES use internal FDs for lots of stuff...  How do you think syslog() is implemented?  It needs a Unix domain socket FD to talk to syslogd...  (Plus, it might open another FD for the console to blast messages there...)  How do you think the DNS resolver works?  It needs sockets to talk to DNS servers...  Plus, there are countless opens of various "/proc" files and other regular files going on all the time...  Granted, usually just very temporary, and closed soon after, but if we're worrying about multi-threaded code, that could still cause problems if they brokenly assume no one will be messing with the FDs...  And, that's just libc; lots of other libs also open private FDs for their own use...  Got an X app?  You've got at least one hidden FD for talking to the X server...  There are surely many other examples, as well...  It's a fairly common practice, not something strange and unheard of...  I just don't get why there needs to be a big deal made about it, and the sudden desire to cater to obviously and perversely broken apps...  Continuing to enable these broken apps to function is not helping the situation any; the correct thing to do is fix the broken apps, not enable their broken behavior...  Because, they're STILL going to break eventually, when they use some OTHER lib someday which uses FDs behind its back...<br>
+<p>
+That said, I'm not really opposed to the idea of a separate FD space...  I just don't see where its all that necessary...  Anyone got an example of such a real-world broken app??  (And, if so, why the *bleep* isn't it fixed yet??)<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237285/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor237396"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2007 0:33 UTC (Fri)
+                               by <b>bronson</b> (subscriber, #4806)
+                              [<a href="/Articles/237396/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      If file descriptors were safe by default (close-on-exec), then I agree, let glibc scatter FDs everywhere.  In my case, though, it's a bit more difficult.  I'm writing a test harness that starts as root, does some non-trivial processing (including a lot of forking), then eventually drops perms and execs a potentially hostile, user-supplied executable.  (by hostile, I mean the way any executable in ~/bin on a multi-user system is potentially hostile)<br>
+<p>
+Well, I definitely I run through the entire FD space to make sure ALL FDs that I don't know about are closed.  If glibc opens an FD to some sensitive resource while I'm running as root, and that FD remains open when I drop perms and exec, that user's executable gets free reign over some potentially sensitive system resource.<br>
+<p>
+I'll admit that I haven't thought about this too deeply (it's just a one-off hack)...  Is there any better solution than running through and closing anything I don't know about?  I've found the occasional lurking fd (a file leaked earlier in the process, a forgotten syslog, etc) so my solution, while damned ugly, has probably saved me once or twice.<br>
+<p>
+Why oh why can't FDs be safe by default?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237396/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor237409"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2007 4:09 UTC (Fri)
+                               by <b>daney</b> (guest, #24551)
+                              [<a href="/Articles/237409/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; Why oh why can't FDs be safe by default?</font><br>
+<p>
+Probably because POSIX defines how they work.  Being compatible with legacy systems has its price.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237409/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor237410"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2007 7:16 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/237410/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      What about a thread-specific default set of FD flags?<br>
+<p>
+Using something like this, we wouldn't need to modify any existing APIs.<br>
+<p>
+/* Internal glibc function */<br>
+A: old_fd_flags = kernel_default_fd_flags(FD_CLOEXEC | FD_RANDFD);<br>
+B: event_fd = super_duper_event_polling_mechanism_fd();<br>
+C: kernel_default_fd_flags(old_fd_flags);<br>
+<p>
+Since the state is thread-specific, we don't need to worry about cross-thread synchronization. It wouldn't be inherited across exec, fork or clone, since it's intended for purely local options. I can't think of a situation where one would want to create a new thread and atomically give it a default set of FD flags.<br>
+<p>
+It's race-free as well. If a fork happens between A and B, nothing unusual happens; the child process doesn't inherit the thread setting flags. If a fork happens after B, event_fd is closed when the child exec()s.<br>
+<p>
+It's adheres to POSIX as long as the application doesn't touch kernel_default_fd_flags itself, and as long as any libraries restore flags after they're done with them.<br>
+<p>
+Why not add an FD_CLOFORK owhile we're at it? That's a lot closer to what you'd want for a piece of code that allocated an internal file descriptor. Granted, multithreaded programs shouldn't fork except to then exec.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237410/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor237422"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2007 10:34 UTC (Fri)
+                               by <b>RobSeace</b> (subscriber, #4435)
+                              [<a href="/Articles/237422/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I understand your concerns, but as far as I can see, a separate FD space doesn't do anything to help with your problems at all...  The FDs would still be there, but merely outside the normal range...  (And, if they were in a separate "/proc" location, you might not even know where they were to legitimately be able to close them prior to your exec*()...  Unless glibc had diligently and properly set CLOEXEC for them all...  But, if it did that anyway, it wouldn't matter if they were in the separate space or not, for your purposes...)  Now, the automatic CLOEXEC stuff would help you, and I have no problems with that notion at all...  The only thing I find a bit strange is the supposed need for this separate FD space, because there are supposedly apps that don't operate properly when glibc (or whoever) creates an FD of its own, which I find absurd...  If such an app really exists, I'd like to know about it, for no other reason than to know whose code to avoid in the future...<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237422/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor237639"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 11, 2007 9:33 UTC (Mon)
+                               by <b>nlucas</b> (guest, #33793)
+                              [<a href="/Articles/237639/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      According to the text, the problem is with applications assuming the "lowest available descriptor" guarantee, which seems to be a POSIX thing, so can't be changed in the generic case.<br>
+<p>
+An example where it can be an issue would be for an application to allocate several file descriptors in a loop, mixed with the usual mix of libc functions, and then assume the &lt;max&gt; parameter for select (which, by the way, is a brain-dead parameter) as the first file descriptor plus the number of file descriptors created.<br>
+<p>
+This seems to be a POSIX accepted behaviour, even if the code seems a bit fishy (not very good for later maintenance), so must be supported either by the kernel or by libc.<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237639/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor237640"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 11, 2007 10:32 UTC (Mon)
+                               by <b>RobSeace</b> (subscriber, #4435)
+                              [<a href="/Articles/237640/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      No, the only thing guaranteed is that any particular call that creates a new FD will return the lowest numbered FD currently available...  That's it...  It doesn't guarantee that nothing else outside the app code will use up any FDs...  And, no sane code would EVER make such a brain-dead assumption...  Because, any programmer worth a damn KNOWS for a fact that LOTS of library code DOES indeed open up lots of FDs of its own for various uses...  So, unless you have complete control over the code, and aren't making any library function calls, you better make NO assumptions over what particular FD number you are going to get assigned at any particular time...  You can be guaranteed it's the lowest currently available number, but that doesn't mean a whole lot if you don't know all of the currently open FDs...<br>
+<p>
+For instance, this common behavior is fairly reasonable:<br>
+<p>
+close (0);<br>
+open ("/dev/null", O_RDONLY);<br>
+<p>
+Assuming that the open() will get FD# 0...  That's reasonable enough, because it's hard to imagine the need for either close() or open() to create a persistent extra FD of its own for some use behind your back, and this sort of behavior has historically always worked...  But, if you add any other lib function calls between the close() and the open(), you're just asking for trouble, and you can't be too surprised when it doesn't work anymore...  (Plus, if you really wanted to write good code, you'd instead use dup2() or freopen() or something, to guarantee assignment of the desired FD#...)<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237640/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor237649"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 11, 2007 12:29 UTC (Mon)
+                               by <b>nlucas</b> (guest, #33793)
+                              [<a href="/Articles/237649/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Fair enough. To me, even the lowest number fd guarantee is strange, so I though it was some POSIX weirdness (along with other weird behaviours for compatibility sake).<br>
+<p>
+Anyway, even the { close(0);open(...); } is strange, as it doesn't take into account multithreading, so I wouldn't ever do anything like that, even in single threaded applications (I never know when a piece of code that seems trivial will be latter "copy/pasted" to a multithreaded application).<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237649/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor238165"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 14, 2007 7:58 UTC (Thu)
+                               by <b>slamb</b> (guest, #1070)
+                              [<a href="/Articles/238165/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>Avoiding code which is broken if copy'n'pasted into the wrong context is a hopeless job - the 
+best you can do is state your code's assumptions, and whoever adds code (whether pasted or not) 
+must take responsibility for it.</p>
+
+<p>Anyway, I can't really imagine when you'd ever want to replace stdin/stdout/stderr while 
+multiple threads are going, so I don't know why someone would paste this there.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/238165/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor249960"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 15, 2007 6:40 UTC (Sat)
+                               by <b>schabi</b> (guest, #14079)
+                              [<a href="/Articles/249960/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      You wrote:
+<blockquote><pre>
+For instance, this common behavior is fairly reasonable:
+
+close (0);
+open ("/dev/null", O_RDONLY);
+</pre></blockquote>
+
+This one is broken as sonn as threads are involved - typical race condition, another thread could do anything between close(0) and open().
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/249960/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor237491"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fun with file descriptors</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2007 18:55 UTC (Fri)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/237491/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      If you run the proprietary nvidia driver, each GL app will open /dev/nvidiactl at least once and /dev/nvidia0 at least twice. Oh well.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/237491/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2007, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

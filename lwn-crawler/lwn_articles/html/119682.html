@@ -1,0 +1,343 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The evolution of pipe buffers [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/119682/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/119063/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/119682/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The evolution of pipe buffers</h1>
+<div class="Byline">[Posted January 18, 2005 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+<a href="http://lwn.net/Articles/118750/">Last week</a>, this page looked
+at the new circular buffer structure used to implement Unix pipes in
+2.6.11-rc1, and noted that the plan was to evolve that structure into
+something more general.  Since then, Linus has taken a couple more steps;
+it must be time to catch up.
+<p>
+
+One change which has already been merged is the addition of a set of
+operations for pipe buffers:
+<p>
+<pre>
+    struct pipe_buf_operations {
+	int can_merge;
+	void *(*map)(struct file *, struct pipe_inode_info *, 
+                     struct pipe_buffer *);
+	void (*unmap)(struct pipe_inode_info *, struct pipe_buffer *);
+	void (*release)(struct pipe_inode_info *, struct pipe_buffer *);
+    };
+</pre>
+<p>
+
+The <tt>can_merge</tt> flag addresses one of the issues raised last week:
+coalescing of writes into existing pages in the buffer.  If
+<tt>can_merge</tt> is non-zero, coalescing will be performed.  Otherwise,
+each write to a pipe buffer will result in the creation of a new circular
+buffer entry, and, by default, the allocation of a new page.
+
+<p>
+
+The <tt>map()</tt> and <tt>unmap()</tt> methods are charged with
+controlling the visibility of pipe buffer pages in the kernel's virtual
+address space.  The default <tt>map()</tt> operations for buffers
+implementing Unix pipes is quite simple:
+<p>
+<pre>
+    static void *anon_pipe_buf_map(struct file *file, 
+                                   struct pipe_inode_info *info, 
+                                   struct pipe_buffer *buf)
+    {
+            return kmap(buf->page);
+    }
+</pre>
+<p>
+
+Since the mapping operation has been abstracted out, there are now fewer
+assumptions regarding how data is really stored within a pipe buffer.  This
+opens the door to different pipe implementations, such as pipes which
+implement a direct window into device memory.
+<p>
+The <tt>release()</tt> method should clean things up when the pipe buffer
+is no longer needed.
+<p>
+
+Linus has also created <a href="/Articles/119680/">an initial
+implementation of a <tt>splice()</tt> system call</a>, though this work is
+clearly not ready for merging at this point.  This system call looks like:
+<p>
+<pre>
+    long sys_splice(int fdin, int fdout, size_t len, unsigned long flags);
+</pre>
+<p>
+
+<tt>fdin</tt> and <tt>fdout</tt> are two file descriptors; a call to
+<tt>sys_splice()</tt> will result in <tt>len</tt> bytes being copied from
+<tt>fdin</tt> to <tt>fdout</tt>, one of which is expected to be a pipe.
+The <tt>flags</tt> argument is not currently used by the sample
+implementation.
+
+<p>
+To make <tt>sys_splice()</tt> work, Linus added two new methods to the
+ever-expanding <tt>file_operations</tt> structure:
+<p>
+<pre>
+    ssize_t (*splice_write)(struct inode *in_pipe, struct file *out, 
+                            size_t len, unsigned long flags);
+    ssize_t (*splice_read)(struct file *in, struct inode *out_pipe, 
+                           size_t len, unsigned long flags);
+</pre>
+<p>
+The patch includes a generic <tt>splice_read()</tt> implementation suitable
+for filesystem-backed file descriptors.  It simply populates the page cache
+with some pages from the file, then loads those pages into the pipe buffer
+represented by <tt>out_pipe</tt>.  Like ordinary <tt>read()</tt> and
+<tt>write()</tt> methods, the splice variants can transfer fewer bytes than
+requested.  Linus's version will stop at the maximum capacity of a pipe
+buffer - 16 pages, currently.
+<p>
+
+As Linus acknowledges, there are a number of shortcomings to the current
+implementation - it is incomplete, the interfaces are ugly, and it will
+oops the system if anything goes wrong.  It is, however, an indication of
+where he expects this work will lead.  Stay tuned.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Circular_buffers">Circular buffers</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Pipes">Pipes</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#splice">splice()</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/119682/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor119918"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">the realities of splice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2005 4:17 UTC (Thu)
+                               by <b>bronson</b> (subscriber, #4806)
+                              [<a href="/Articles/119918/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      The code we saw last week was sleek and pretty.  This week, in making it more useful, it appears to have grown all sorts of hair.  It will be interesting to see how well it can be cleaned back up.<br>
+<p>
+Is splice only intended for pipes?  I hope that eventually I could splice, say, a file to a socket (a la sendfile), socket to a socket, etc.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/119918/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor119923"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">the realities of splice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2005 4:40 UTC (Thu)
+                               by <b>bradfitz</b> (subscriber, #4378)
+                              [<a href="/Articles/119923/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <i>I hope that eventually I could splice, say, a file to a socket (a la sendfile), socket to a socket, etc.</i><br />
+<br />
+That's the plan, as I've been reading it.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/119923/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor119926"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">the realities of splice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2005 5:13 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/119926/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      from his posts in the 19th it will remain pipe &lt;-&gt; other <br>
+<p>
+so you can do file -&gt; pipe -&gt; socket but not file -&gt; socket<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/119926/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor120020"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">the realities of splice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 20, 2005 14:29 UTC (Thu)
+                               by <b>alangley</b> (guest, #23266)
+                              [<a href="/Articles/120020/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Actually, you have to wonder why it's a new syscall at all. The interface is almost exactly the same as sendfile, so why has Linus added another syscall at all?<br>
+<p>
+(and the outfd, infd arguments are round the wrong way at the moment)<br>
+<p>
+AGL<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/120020/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor203856"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">the realities of splice</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2006 15:19 UTC (Wed)
+                               by <b>Niam</b> (guest, #41009)
+                              [<a href="/Articles/203856/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      So I don't understand qhat is this new syscall for!!<br>
+Sendfile is seems much better, 'cos it can manipulate with any fd...<br>
+<p>
+Only a "plus" - it's faster[but it works with pipes!!!].<br>
+It seems to me that better to modify sendfile call for pipes mode.<br>
+<p>
+Now, if I write new progrom I should write<br>
+#ifdef __splice<br>
+   splice(..)<br>
+#elif __tee<br>
+   tee(...)<br>
+#else<br>
+   sendfile(..)<br>
+#endif<br>
+<p>
+I can't see what are them really for...<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/203856/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2005, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

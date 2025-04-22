@@ -1,0 +1,815 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Initializing the entropy pool using RDRAND and friends [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/760584/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/760293/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/760584/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Initializing the entropy pool using RDRAND and friends</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>July 24, 2018</br>
+           </div>
+<p>
+Random number generation in the kernel has garnered a lot of attention over
+the years.  The tensions between the need for cryptographic-strength random
+numbers versus getting strong random numbers more quickly—along with the need
+to avoid regressions—has led to something of a patchwork of APIs.  While it
+is widely agreed that waiting for a properly initialized random number
+generator (RNG) before producing random numbers is the proper course,
+opinions differ on what "properly" means exactly.  Beyond that, waiting,
+especially early in the boot process, can be problematic as well.  One
+solution would be to trust the RNG instructions provided by most modern
+processors, but that comes with worries of its own.
+</p>
+
+<p>
+Theodore Ts'o <a href="/Articles/760121/">posted a patch</a> on
+July&nbsp;17 to add a kernel configuration option that would explicitly
+trust the CPU vendor's hardware RNG (e.g. the <a
+href="https://en.wikipedia.org/wiki/RdRand"><tt>RDRAND</tt> instruction</a> 
+for x86).  Kernels built with <tt>RANDOM_TRUST_CPU</tt> will immediately
+initialize the random number pool using the architecture's facility,
+without waiting for enough entropy to accumulate from other sources;  this
+means that the <a
+href="http://man7.org/linux/man-pages/man2/getrandom.2.html"><tt>getrandom()</tt> 
+system call</a> will not block.  Waiting for systems to gather enough
+entropy <a href="/Articles/693189/">has been a problem in the past</a>,
+especially for virtual machines and 
+embedded systems where such entropy can be difficult to find.
+</p>
+
+<p>
+Currently, the kernel uses CPU-provided random number instructions as part
+of the process of mixing data into the entropy pool, without
+crediting any entropy to it; the patch would go further than that.  Instead
+of waiting for enough entropy to be gathered at boot time, it would simply
+initialize the pool from the output of <tt>RDRAND</tt> (or other similar
+instructions).  As Ts'o put it in the patch: "<q>I'm not sure Linux
+distro's will thank us for this.  The problem is  
+ trusting the CPU [manufacturer] can be an emotional / political issue.</q>"
+</p>
+
+<p>
+There are <a
+href="http://comments.gmane.org/gmane.comp.security.cryptography.randombit/4689">some</a>
+who would rather these hardware RNG instructions not be used 
+<i>at all</i> for kernel random numbers.  But blocking in
+<tt>getrandom()</tt> can lead to user space being unable to get random
+numbers as quickly as needed.  By providing a configuration option, the
+kernel developers neatly avoid making a decision on whether to trust these
+hardware RNG instructions, but that leaves the decision to the
+distributions:
+<div class="BigQuote">
+Even if I were convinced that Intel hadn't backdoored RDRAND (or an
+ NSA agent backdoored RDRAND for them) such that the NSA had a NOBUS
+ (nobody but us) capability to crack RDRAND generated numbers, if we
+ made a change to unconditionally trust RDRAND, then I didn't want the
+ upstream kernel developers to have to answer the question, "why are
+ you willing to trust Intel, but you aren't willing to trust a company
+ owned and controlled by a PLA [People's Liberation Army] general?"  (Or a
+ company owned and 
+ controlled by one of Putin's Oligarchs, if that makes you feel
+ better.)
+<p>
+ With this patch, we don't put ourselves in this position --- but we
+ do put the Linux distro's in this position [instead].  The upside is it
+ gives the choice to each person building their own Linux kernel to
+ decide whether trusting RDRAND is worth it to avoid hangs due to
+ userspace trying to get cryptographic-grade entropy early in the boot
+ process.
+</div>
+</p>
+
+<p>
+Sandy Harris <a href="/Articles/760614/">wondered</a> if there should be a
+value associated with the option, which would say how many bits of entropy
+the user 
+thinks should be credited per 32-bit value from the hardware RNG.  But
+Ts'o <a href="/Articles/760615/">pointed out</a> that his patch (which has
+a code diff roughly the same size as the text for its configuration option)
+does not 
+mess with the entropy estimation.  In any case, he is skeptical that kind
+of knob would truly be useful:
+<div class="BigQuote">
+In practice I doubt most people would be able to deal with a numerical
+dial, and I'm trying to [encourage] people to use getrandom(2).  I view
+/dev/random as a legacy interface, and for most people a CRNG
+[Cryptographic-strength RNG] is quite 
+sufficient.  For those people who are super paranoid and want a "true
+random number generator" (and the meaning of that is hazy) because a
+CRNG  is Not Enough, my recommendation these
+days is that they get 
+something like an open hardware RNG solution, such as <a
+href="https://altusmetrum.org/ChaosKey/">ChaosKey</a> from 
+Altus Metrum.
+</div>
+</p>
+
+<p>
+Other external hardware RNG devices were also mentioned as possibilities in
+the thread.  
+</p>
+
+<p>
+In case distributors choose to enable this in their kernels,  Yann Droneaud <a
+href="/Articles/760617/">would like to see</a> a kernel command-line option
+to disable it.  That would likely make it easier for distributions to build
+kernels with it enabled since their users would have a way to override it
+without 
+building their own kernel.  Ts'o did not reply to that particular request
+directly, but his patch is meant as an RFC, so perhaps we will see that in
+the next version.  In response to Droneaud, he did elaborate, including
+some thoughts on threat models: 
+<div class="BigQuote">
+ The trust model that we're
+using is this.  The presumption is that (at least for US-based CPU
+[manufacturers]) the amount of effort needed to add a [blatant] backdoor
+to, say, the instruction scheduler and register management file is
+such that it couldn't be done by a single engineer, or even a very
+small set of engineers.  Enough people would need to know about it, or
+would be able to figure out something untowards was happening, or it
+would be obvious through various regression tests, that it would be
+obvious if there was a generic back door in the CPU itself.  This is a
+good thing, because ultimately we *have* to trust the general purpose
+CPU.  If the CPU is actively conspiring against you, there really is
+no hope.
+<p>
+However, the RDRAND unit is a small, self-contained thing, which is
+*documented* to use an AES whitener (e.g., it does an AES encryption
+as its last step).  So presumably, a change to make the RDRAND unit
+effectively be:
+<pre>
+	AES_ENCRYPT(NSA_KEY, COUNTER++)
+</pre>
+Is much easier to hide or introduce.
+</div>
+</p>
+
+<p>
+Laura Abbott was <a href="/Articles/760621/">set to test</a> the patch on a
+Fedora Rawhide kernel, but found that the hang at boot time waiting for
+random numbers had been fixed some other way.  But she did think the option
+was a 
+good idea:
+<div class="BigQuote">
+That said, I do think this is a beneficial option to have available
+because it actually fixes the underlying problem instead of hoping
+nobody else decides to block early in the bootup process.
+</div>
+</p>
+
+<p>
+It is a simple change, though likely somewhat controversial—for
+distributions anyway.  Another approach might be to simply change the
+kernel to always 
+allow boot-time selection of whether to trust the CPU's hardware RNG.
+Defaulting that to "do not trust" would effectively leave things as they
+are today, but give users a way to decide for themselves—and take
+distributions off the hot seat if one truly exists.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Random_numbers">Random numbers</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Random_number_generation">Security/Random number generation</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Linux_kernel-Random_number_generation">Linux kernel/Random number generation</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Random_number_generation">Random number generation</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/760584/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor760701"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2018 18:44 UTC (Tue)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/760701/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Along the same lines, it'd be interesting to see a patch that makes getrandom into a VDSO call that can optionally just call RDRAND *directly* and never even enter the kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760701/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor760723"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 7:14 UTC (Wed)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/760723/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+RDRAND does not seem to be privileged. You can just use it in your application.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760723/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor760726"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 7:35 UTC (Wed)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/760726/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It isn't, but it'd be nice to have a compatible solution that works on systems with or without it, and just uses it for acceleration if available.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760726/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor760732"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 8:18 UTC (Wed)
+                               by <b>gioele</b> (subscriber, #61675)
+                              [<a href="/Articles/760732/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; RDRAND does not seem to be privileged. You can just use it in your application.</font><br>
+<p>
+It's not that easy. An application that uses the output of RDRAND without mixing it with other sources of randomness is insecure.<br>
+<p>
+<a href="https://www.freebsd.org/news/status/report-2013-09-devsummit.html#Security">https://www.freebsd.org/news/status/report-2013-09-devsum...</a><br>
+<a href="https://news.ycombinator.com/item?id=6336505">https://news.ycombinator.com/item?id=6336505</a> (tytso)<br>
+<a href="http://comments.gmane.org/gmane.comp.security.cryptography.randombit/4689">http://comments.gmane.org/gmane.comp.security.cryptograph...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760732/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor760746"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 11:58 UTC (Wed)
+                               by <b>azumanga</b> (subscriber, #90158)
+                              [<a href="/Articles/760746/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+None of the comments you link to seem to back up your claim. A bunch of people seem to be paranoid that Intel might be willing to throw away all good will they will ever have, to introduce a back door that will be found one day, in RDRAND. That seems like extreme paranoia to me, against the genuine problem of many machines today not producing good enough random numbers at startup.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760746/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor760755"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 13:23 UTC (Wed)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/760755/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's also a significant difference between "insecure" and "secure if (and only if) you trust Intel". Even if you don't trust Intel, you shouldn't ignore that distinction.<br>
+<p>
+And if you don't trust Intel, XORing the output of RDRAND with other random data won't save you. <a href="https://www.alchemistowl.org/pocorgtfo/pocorgtfo03.pdf">https://www.alchemistowl.org/pocorgtfo/pocorgtfo03.pdf</a> (warning: large PDF) chapter 6 shows how a CPU (or CPU emulator in their case) could backdoor /dev/urandom by making RDRAND detect the data that the kernel is going to XOR it with, then have RDRAND return that data XOR some target string, so the final output from /dev/urandom is simply that target string. And of course a CPU backdoor could do the same even to code that *doesn't* use RDRAND, with just a little more effort to detect where to insert its malicious behaviour. You can't get away from the need to trust your hardware.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760755/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor760760"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 14:05 UTC (Wed)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/760760/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>Of course, as Ted T'so has already said, there are degrees of trust in Intel. Changing the AES whitener in RDRAND to be non-random is plausibly simple enough that you only need to compromise one to five individuals (as the final behaviour is not "weird" - it's expected behaviour that happens to be compromised) in order to have control of RDRAND's output; changing the CPU to detect the kernel data as per the "PoC || GTFO" paper requires you to comprise dozens to hundreds of individuals, so that the "weird" behaviour is not noticed during validation.
+<p>So, you can trust that a mass compromise of Intel is not going to happen, while still being concerned that two or three individuals are working against you.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760760/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor760826"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 17:27 UTC (Wed)
+                               by <b>felixfix</b> (subscriber, #242)
+                              [<a href="/Articles/760826/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Was it Ritchie, Thompson, Kernigan, or someone else who posited a C compiler which recognized when it was compiling itself and inserted the self-recognition code along with backdoor code?<br>
+<p>
+At some point you either seal yourself inside a room with no outside contact, or you start taking risks that have very little probability of ever happening.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760826/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor760831"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 18:17 UTC (Wed)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/760831/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That was Reflections on Trusting Trust by Ken Thompson.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760831/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor761101"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Reflections on Trusting Trust</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2018 14:55 UTC (Fri)
+                               by <b>david.a.wheeler</b> (subscriber, #72896)
+                              [<a href="/Articles/761101/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Reflections on trusting trust" by Ken Thompson, Communications of the ACM CACM Homepage, Volume 27 Issue 8, Aug 1984, Pages 761-763.  This is the first published demonstration of the attack (the attack itself was identified in an earlier Multics paper). Copies of Thompson's paper are available at:<br>
+<a href="https://dl.acm.org/citation.cfm?id=358210">https://dl.acm.org/citation.cfm?id=358210</a><br>
+<a href="https://web.archive.org/web/20150309043401/cm.bell-labs.com/who/ken/trust.html">https://web.archive.org/web/20150309043401/cm.bell-labs.c...</a><br>
+<a href="https://www.ece.cmu.edu/~ganger/712.fall02/papers/p761-thompson.pdf">https://www.ece.cmu.edu/~ganger/712.fall02/papers/p761-th...</a><br>
+<p>
+However, it is *NOT* turtles all the way down.  My PhD dissertation is on a countermesaure called "Diverse Double-Compiling" (DDC).  More info available here: <a href="https://www.dwheeler.com/trusting-trust/">https://www.dwheeler.com/trusting-trust/</a><br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/761101/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor760715"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2018 21:54 UTC (Tue)
+                               by <b>judas_iscariote</b> (guest, #47386)
+                              [<a href="/Articles/760715/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A kernel parameter that allows me to not even start /sbin/init until the rng is seeded or one that does what ted's  RANDOM_TRUST_CPU is enough for me. a kernel configuration option unfortunately is useless for people that do not build their own kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760715/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor760719"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 0:35 UTC (Wed)
+                               by <b>xtifr</b> (guest, #143)
+                              [<a href="/Articles/760719/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, count me as another vote for runtime/boottime selection, rather than compile time. The distros will thank you, the *users* will thank you--just about everyone except the person who actually has to write the code will thank you. :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760719/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor760725"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 7:27 UTC (Wed)
+                               by <b>simcop2387</b> (subscriber, #101710)
+                              [<a href="/Articles/760725/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The only problem with this is that it means that it could be changed by an evil maid.  I think it should be a choice, forced permanent into the kernel (on or off) or as a kernel command line parameter if you've got a way to trust the bootloader (though if you don't trust the bootloader....)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760725/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor760730"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 8:00 UTC (Wed)
+                               by <b>nilsmeyer</b> (guest, #122604)
+                              [<a href="/Articles/760730/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One could add a compile-time option to ignore the kernel command line option ;) Isn't it conceivable though that the evil maid just replaces your kernel? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760730/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor760751"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 13:18 UTC (Wed)
+                               by <b>mjthayer</b> (guest, #39183)
+                              [<a href="/Articles/760751/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; One could add a compile-time option to ignore the kernel command line option ;) Isn't it conceivable though that the evil maid just replaces your kernel?</font><br>
+<p>
+Perhaps some clever person can find a way to tie the desired state of the option to kernel lockdown.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760751/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor760733"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 8:50 UTC (Wed)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/760733/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, the kernel PRNG doesn't just forward the hardware RNG to userspace, it's hashed. Since AFAIK nobody has ever found a repeated kernel RNG stream, there's no wall clock inside the CPU, and the hash function hasn't been compromised (otherwise we'd be in deep shit anyway), frankly I fail to see what the paranoia is all about.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760733/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor760994"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2018 19:21 UTC (Thu)
+                               by <b>Otus</b> (subscriber, #67685)
+                              [<a href="/Articles/760994/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; the hash function hasn't been compromised (otherwise we'd be in deep shit anyway)</font><br>
+<p>
+SHA1 *has* been compromised. Just not in a way that would help attack its use here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760994/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor761560"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2018 4:50 UTC (Thu)
+                               by <b>njs</b> (guest, #40338)
+                              [<a href="/Articles/761560/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If there were, say, 2**64 different possible RDRAND streams, then that'd be large enough that people would be unlikely to notice a duplicate without extensive effort, but still entirely possible for someone like the NSA to precompute all the hashed getrandom() output streams.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/761560/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor760756"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2018 13:55 UTC (Wed)
+                               by <b>naptastic</b> (guest, #60139)
+                              [<a href="/Articles/760756/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From the linked email by Eugen Leitl:<br>
+<p>
+<font class="QuotedText">&gt; Linus decided to include a patch from Intel to allow their unauditable RdRand to bypass the entropy pool over my strenuous objections.</font><br>
+<p>
+I want to make sure I understand the implications of this correctly.<br>
+<p>
+What are the circumstances (if any) in which Intel's RNG will be passed back to userspace unaltered? Is there a way I can make sure my system _always_ combines multiple sources of entropy? Is there a way I can completely remove RdRand from the equation? I'm not saying I necessarily want to, I'm just trying to make sure my understanding is correct.<br>
+<p>
+Thanks!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/760756/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor761111"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Initializing the entropy pool using RDRAND and friends</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2018 15:48 UTC (Fri)
+                               by <b>imMute</b> (guest, #96323)
+                              [<a href="/Articles/761111/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From the article:<br>
+<p>
+<font class="QuotedText">&gt;There are some who would rather these hardware RNG instructions not be used at all for kernel random numbers.</font><br>
+<p>
+From the linked email:<br>
+<p>
+<font class="QuotedText">&gt;It's worth noting that the maintainer of record (me) for the Linux RNG quit the project about two years ago precisely because Linus decided to include a patch from Intel to allow their unauditable RdRand to bypass the entropy pool over my strenuous objections.</font><br>
+<p>
+The LWN article implies that someone is objecting to using RDRAND at all (even if mixed in with other sources).  The linked complaint is about using *only* RDRAND ("allow ... RdRand to bypass the entropy pool").  Seems a bit disingenuous for LWN to word it the way they did...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/761111/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,829 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The TCP SACK panic [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/791409/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/791091/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/791409/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The TCP SACK panic</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>June 19, 2019</br>
+           </div>
+<p>
+<a
+href="https://en.wikipedia.org/wiki/Transmission_Control_Protocol#Selective_acknowledgments">Selective
+acknowledgment</a> (SACK) is a technique used by TCP to help alleviate
+congestion 
+that can arise due to the retransmission of dropped packets.  It allows
+the endpoints to describe which pieces of the data they have received,
+so that only the missing pieces need to be retransmitted.  However, a bug
+was recently found in the Linux implementation of SACK that allows remote
+attackers to panic the system by sending crafted SACK information.
+</p>
+
+<p>
+Data sent via TCP is broken up into multiple segments based on the maximum
+segment size (MSS) specified by the other endpoint—or some other network
+hardware in the path it traversed.  Those segments are
+transmitted to that endpoint, which acknowledges that it has received
+them.  Originally, those acknowledgments (ACKs) could only indicate
+that it had received segments up to the first gap; so if one early
+segment was lost (e.g. dropped due to congestion), the endpoint could only
+ACK those up to the lost one.  The originating endpoint would have to
+retransmit many segments that had actually been received in order to ensure
+the data gets there; the status of the later segments is unknown,
+so they have to be resent.
+</p>
+
+<p>
+In simplified form, sender A might send segments 20-50, with segments 23 and 37
+getting dropped along the way.  Receiver B can only ACK segments 20-22, so
+A must send 23-50 again.  As might be guessed, if the link is congested
+such that segments are being dropped, sending a bunch of potentially
+redundant traffic is not going to help things.
+</p>
+
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+Selective acknowledgment was created as a mechanism to eliminate the
+redundant traffic.  It came about in 1996 from <a
+href="https://tools.ietf.org/html/rfc2018">RFC&nbsp;2018</a>.  The idea is
+that receiver B can ACK 20-22, 24-36, and 38-50 so that A need only resend
+23 and 37.  It seems like common sense at some level; if someone read off a
+string of 30 words and you missed the third, you wouldn't ask them to
+repeat the list starting at the third word.
+</p>
+
+<p>
+In order to keep track of all of that, the network subsystem has some
+bookkeeping to do.  It is in this record keeping that the bug was found.
+</p>
+
+<p>
+The <a
+href="https://elixir.bootlin.com/linux/v5.1.12/source/include/linux/skbuff.h#L616"><tt>struct
+sk_buff</tt></a> (typically called an SKB) is a kernel data structure that
+is used to hold network data of various sorts, including for transmit
+queues, receive queues, SACK queues, and more.  For reference, networking
+maintainer David 
+Miller has a <a href="http://vger.kernel.org/~davem/skb_data.html">nice
+overview</a> (if somewhat dated) of how SKBs are used in the kernel.  Part
+of the bookkeeping 
+for TCP is to keep track of the 32KB (64KB on PowerPC) fragments that the
+TCP data stream has been broken up into;  it is in the interaction between
+fragments and SACK where the kernel went astray. 
+</p>
+
+<p>
+The <a
+href="https://elixir.bootlin.com/linux/v5.1.12/source/include/net/tcp.h#L797"><tt>struct
+tcp_skb_cb</tt></a> is a control buffer that tracks various things about a
+TCP packet, including the number of segments/fragments it has been broken
+up into.  It does so
+for the general segmentation offload (GSO) feature, which moves the
+segmentation of the packets as low as it can in the network stack,
+including possibly offloading it to the network hardware.  The number of
+segments is stored in the <tt>tcp_gso_segs</tt> field, which
+is a two-byte 
+unsigned integer.  That works fine as long as the number of
+segments doesn't go beyond 64K.
+</p>
+
+<p>
+But that is just what can happen when SACK has been agreed upon by the
+endpoints, which is done when the connection is established.  An attacker
+can use a small MSS value
+(perhaps the minimum of 48 bytes, which
+only leaves eight bytes for actual user data) and cause an overflow of
+<tt>tcp_gso_segs</tt> by carefully choosing which segments to
+acknowledge.  Multiple SKBs will be coalesced by the kernel in order to
+more efficiently 
+process blocks of unacknowledged segments, but doing so could overflow
+<tt>tcp_gso_segs</tt>. 
+</p>
+
+<p>
+That overflow would cause a <a
+href="https://elixir.bootlin.com/linux/v5.1/source/net/ipv4/tcp_input.c#L1299"><tt>BUG_ON()</tt> 
+in <tt>tcp_shifted_skb()</tt></a> to be hit, leading to a kernel panic.
+This was the most serious of four SACK-related bugs <a
+href="https://github.com/Netflix/security-bulletins/blob/master/advisories/third-party/2019-001.md">found
+by Jonathan Looney at Netflix</a>.  Two other Linux bugs were reported,
+both leading to a SACK slowdown or excessive resource use, which could also lead
+to a denial of 
+service. There is also a SACK slowness problem that Looney identified in
+FreeBSD&nbsp;12 when using the RACK TCP stack.  Netflix <a
+href="https://reviews.freebsd.org/D15525">contributed</a> RACK to FreeBSD
+just over a year ago.
+</p>
+
+<p>
+The SACK panic has been designated as <a
+href="https://nvd.nist.gov/vuln/detail/CVE-2019-11477">CVE-2019-11477</a>;
+it is clearly the most severe of the Linux problems.  <a
+href="https://nvd.nist.gov/vuln/detail/CVE-2019-11478">CVE-2019-11478</a>
+is another denial of service; by crafting a sequence of SACKs, an attacker
+can cause fragmentation of the TCP transmission queue, leading to higher
+resource use.  <a
+href="https://nvd.nist.gov/vuln/detail/CVE-2019-11479">CVE-2019-11479</a>
+points out that the MSS for Linux is set to 48, which means that a much larger
+amount of CPU, memory, and bandwidth could be consumed in sending
+relatively small amounts of user data.  The fix for that is to give the
+administrator a sysctl knob to set the minimum value for MSS that the
+kernel will accept; it is left at
+48 by 
+default for 
+compatibility, but it can now be easily changed.
+</p>
+
+<p>
+The problems have been addressed; the Netflix report has links to the
+individual patches.  Those patches were released as part of the <a
+href="/Articles/791289/">5.1.11, 4.19.52, 4.14.127, 4.9.182, and 4.4.182
+stable updates</a> that were made on June&nbsp;17, the same day as the
+embargo was lifted.  Distribution kernels have largely been updated at this
+point, so those who can upgrade should probably do so.
+</p>
+
+<p>
+There are various mitigations for the problems for those unable to update
+on the spur of the moment.  Restricting
+the MSS to a reasonable value <a
+href="https://github.com/Netflix/security-bulletins/blob/master/advisories/third-party/2019-001/block-low-mss/iptables.txt">using iptables</a> or via <a
+href="https://github.com/Netflix/security-bulletins/blob/master/advisories/third-party/2019-001/block-low-mss/README.md">other
+means</a> will thwart these attacks, but those mitigations also require
+disabling MTU 
+probing by setting the
+<tt>net.ipv4.tcp_mtu_probing</tt> sysctl to 0 for CVE-2019-11477 and
+CVE-2019-11478.  Either of those CVEs can instead be thwarted by turning
+off SACK 
+by setting <tt>/proc/sys/net/ipv4/tcp_sack</tt> to 0.  To avoid
+CVE-2019-11479, administrators
+simply need to filter out MSS values that are too low using one of the
+methods listed by Netflix.
+</p>
+
+<p>
+The Red Hat <a
+href="https://access.redhat.com/security/vulnerabilities/tcpsack">vulnerability
+report</a> has lots of useful details, as does the Netflix report mentioned
+above.  A remote-control kernel crash is obviously a fairly nasty surprise
+with potentially wide-ranging impact.  It is only the endpoints of a
+connection that are affected, however, which limits the damage somewhat.
+At least the servers and desktops <i>can</i> be updated, which may not be
+true of all the gear our traffic visits on the way to its destination.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Networking-Security">Networking/Security</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Vulnerabilities">Security/Vulnerabilities</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Linux_kernel-Networking">Linux kernel/Networking</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Networking-Vulnerabilities">Networking/Vulnerabilities</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/791409/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor791516"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2019 22:28 UTC (Wed)
+                               by <b>gus3</b> (guest, #61103)
+                              [<a href="/Articles/791516/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder what this means for embedded space, specifically Android. Especially since a watchdog-timer reboot counts as a type of DOS.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791516/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor791517"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2019 22:40 UTC (Wed)
+                               by <b>Darakian</b> (guest, #96997)
+                              [<a href="/Articles/791517/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Part of the bookkeeping for TCP is to keep track of the 32KB (64KB on PowerPC) </font><br>
+<p>
+Why is there an arch specific difference in the TCP fragment buffer size?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791517/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor791521"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2019 23:28 UTC (Wed)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/791521/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If I remember correctly, this size is the greater of 32 KiB and one page, and some PowerPC configurations have a page size of 64 KiB.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791521/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor791518"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2019 23:11 UTC (Wed)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/791518/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What was the fix for the panic? The article clearly laid out why the current code doesn't work, but I haven't seen what the new kernel does differently, and it seems like the LWN article would be a good place to record the post-fix behavior.<br>
+<p>
+As a less critical improvement, it would be great to eliminate BUG_ON from the networking subsystem. At worst, it should be possible to drop packets or close connections or bring down an interface, rather than dropping all the packets, closing all the connections, and bringing down all the interfaces, along with filesystems and userspace.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791518/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor791519"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2019 23:12 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/791519/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is actually debatable. A server that cleanly reboots on a BUG might be better than an inaccessible server (SSH also depends on the network).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791519/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor791522"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2019 23:41 UTC (Wed)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/791522/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; What was the fix for the panic? The article clearly laid out why the current code doesn't work, but I haven't seen what the new kernel does differently, and it seems like the LWN article would be a good place to record the post-fix behavior.</font><br>
+<p>
+The fix was to avoid coalescing queued skbs if this would cause the segment counter to overflow.<br>
+<p>
+<font class="QuotedText">&gt; As a less critical improvement, it would be great to eliminate BUG_ON from the networking subsystem. At worst, it should be possible to drop packets or close connections or bring down an interface, </font><br>
+<p>
+BUG_ON means the programmer didn't think this error was possible (but wasn't sure) and doesn't know how to handle it. If the cause was a buffer overflow, for example, trying to clean up can make things worse.<br>
+<p>
+<font class="QuotedText">&gt; rather than dropping all the packets, closing all the connections, and bringing down all the interfaces, along with filesystems and userspace.</font><br>
+<p>
+In this case, sure, now we know how this goes wrong, it would obviously be better to kill the connection, but that probably wasn't so clear when the assertion was added.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791522/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor791526"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2019 2:09 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/791526/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm really curious how Netflix happened across these vulnerabilities. Did they hit them in practice, did they find them through security testing, did they have some particular reason to be staring at this code...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791526/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor791529"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2019 4:26 UTC (Thu)
+                               by <b>mtaht</b> (subscriber, #11087)
+                              [<a href="/Articles/791529/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ironically I had been pushing for a couple years now that we start exploring reducing the mss when under extreme congestion and cwnd = 2. ( <a href="https://www.bufferbloat.net/projects/ecn-sane/wiki/">https://www.bufferbloat.net/projects/ecn-sane/wiki/</a> ) <br>
+<p>
+Oops. Looks like someone else found a use for the idea.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791529/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor791537"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2019 8:46 UTC (Thu)
+                               by <b>Lennie</b> (subscriber, #49641)
+                              [<a href="/Articles/791537/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Notice how the security reports say FreeBSD and Linux:<br>
+<p>
+<a href="https://github.com/Netflix/security-bulletins/blob/master/advisories/third-party/2019-001.md">https://github.com/Netflix/security-bulletins/blob/master...</a><br>
+<p>
+But FreeBSD did not release any security updates, how is that possible ?<br>
+<p>
+Turns out it is the FreeBSD 12 using the RACK TCP Stack:<br>
+<p>
+<a href="http://freebsd.1045724.x6.nabble.com/TCP-RACK-performance-td6281105.html">http://freebsd.1045724.x6.nabble.com/TCP-RACK-performance...</a><br>
+<p>
+The RACK TCP Stack was created by Netflix for their FreeBSD based CDN applience:<br>
+<p>
+<a href="https://openconnect.netflix.com/en/appliances/">https://openconnect.netflix.com/en/appliances/</a><br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791537/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor792970"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2019 17:48 UTC (Sun)
+                               by <b>kmeyer</b> (subscriber, #50720)
+                              [<a href="/Articles/792970/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Looney works on FreeBSD networking at Netflix and was probably testing his own code against Linux.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/792970/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor791548"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2019 12:45 UTC (Thu)
+                               by <b>sam13</b> (subscriber, #113386)
+                              [<a href="/Articles/791548/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What's not clear to me is whether the overflow only occurs if segmentation offloading is enabled. According to Red Hat's advisory [1] this seems to be the case:<br>
+<p>
+<font class="QuotedText">&gt; When Segmentation offload is on and SACK mechanism is also enabled, due to packet loss and selective retransmission of some packets, SKB could end up holding multiple packets, counted by ‘tcp_gso_segs’.</font><br>
+<p>
+But neither Red Hat's nor this article mention disabling segmentation offloading as a mitigation. Hence I assume that the problematic "tcp_gso_segs" field can overflow even if segmentation offloading is disabled?<br>
+<p>
+[1] <a href="https://access.redhat.com/security/vulnerabilities/tcpsack">https://access.redhat.com/security/vulnerabilities/tcpsack</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791548/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor791783"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 23, 2019 8:32 UTC (Sun)
+                               by <b>richard_weinberger</b> (subscriber, #38938)
+                              [<a href="/Articles/791783/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+AFAICT, without offloading (GSO/GRO) the BUG_ON() cannot be triggered.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791783/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor791935"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 24, 2019 18:47 UTC (Mon)
+                               by <b>richard_weinberger</b> (subscriber, #38938)
+                              [<a href="/Articles/791935/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+BTW: This is only true for older kernels.<br>
+<p>
+commit 0a6b2a1dc2a2105f178255fe495eb914b09cb37a<br>
+Author: Eric Dumazet &lt;edumazet@google.com&gt;<br>
+Date:   Mon Feb 19 11:56:47 2018 -0800<br>
+<p>
+    tcp: switch to GSO being always on<br>
+<p>
+...changed the game.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791935/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor794749"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2019 14:28 UTC (Sat)
+                               by <b>hbkmustang</b> (guest, #133442)
+                              [<a href="/Articles/794749/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So, what do you think now - if GSO turning off it will solve the problem (in linux ethtool -k ...) ?<br>
+Or there is only right way to defend from this problem - turning off sack in /proc ?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/794749/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor791611"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2019 23:28 UTC (Thu)
+                               by <b>dgc</b> (subscriber, #6611)
+                              [<a href="/Articles/791611/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The old is new again. :/<br>
+<p>
+I remember back in late 2002 when a bug report for an Irix NFS server performance issue was nailed down to a serious SACK problem due to really small MSS windows being sent from a buggy NFS client implementation.<br>
+<p>
+The phrase "SACK panic" triggered my memory immediately because we used that phrase to describe what the reproducer we wrote did to the kernel. The Irix security patch release notes from early 2003 says it all:<br>
+<p>
+"* Denial of Service attack involving clients sending packets with very small MSS values"<br>
+<p>
+<a href="http://www.xatrix.org/news/irix-ip-denial-of-service-fixes-and-tunings-2662/">http://www.xatrix.org/news/irix-ip-denial-of-service-fixe...</a><br>
+<p>
+That patch fixed a set of problems very similar to those being reported here....<br>
+<p>
+-Dave.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791611/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor791625"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2019 10:01 UTC (Fri)
+                               by <b>bjartur</b> (guest, #67801)
+                              [<a href="/Articles/791625/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Do you think Linux should be tested against more Irix vulnerabilities?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791625/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor791730"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2019 2:57 UTC (Sat)
+                               by <b>dgc</b> (subscriber, #6611)
+                              [<a href="/Articles/791730/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Do you think Linux should be tested against more Irix vulnerabilities?</font><br>
+<p>
+Actually the point I was making really has nothing to do with Irix - it was just the example that illustrated my point. i.e. that the OS networking community knew about these problems 15 years ago but that knowledge seems to have been lost and so we have repeated past mistakes....<br>
+<p>
+Which raises some interesting questions: where did that institutional knowledge go? Have all the network engineers of the time (like me) moved on to other things and so that knowledge has been (effectively) lost? How do we prevent the same flaw from being re-introduced and re-discovered in another 15 years?<br>
+<p>
+So, as much as you probably were poking fun at Irix with your comment, I'll point out that regression test suites are actually very good for retaining knowledge of flaws like this over the long term. i.e. new developers learn about them when their changes cause unexpected failures of tests that have been around for 15+ years....<br>
+<p>
+-Dave.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791730/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor791733"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2019 4:07 UTC (Sat)
+                               by <b>k8to</b> (guest, #15413)
+                              [<a href="/Articles/791733/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I dunno. My experience is that most software companies repeat the same mistakes every year.<br>
+<p>
+Having to wait a decade to introduce the same errors sounds relatively spotless. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791733/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor791622"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The TCP SACK panic</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2019 8:36 UTC (Fri)
+                               by <b>XTerminator</b> (subscriber, #59581)
+                              [<a href="/Articles/791622/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Is there any proof of concept code we can use to check vulnerability status and effectiveness of remedies?
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/791622/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2019, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

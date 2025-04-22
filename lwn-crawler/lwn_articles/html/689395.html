@@ -1,0 +1,371 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>System calls for memory protection keys [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/689395/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/688696/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/689395/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>System calls for memory protection keys</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 2, 2016</br>
+           </div>
+"Memory protection keys" are an Intel processor feature that is making its
+first appearance in Skylake server CPUs.  They are a user-controllable,
+coarse-grained protection mechanism, allowing a program to deny certain
+types of access to ranges of memory.  LWN last <a
+href="/Articles/667156/">looked at kernel support</a> for memory protection
+keys (or "pkeys") at the end of 2015.  The system-call interface is now
+deemed to be in its final form, and there is a push to stage it for merging
+during the 4.8 development cycle.  So the time seems right for a look at
+how this feature will be used on Linux systems.
+<p>
+A pkey is a four-bit value (in the current Intel implementation) that can
+be stored in the page-table entry for each page in a process's address
+space.  Pages can thus be arbitrarily assigned to one of sixteen key
+values; each address space has its own set of keys.  For each of those
+keys, the process can configure the CPU
+to deny either write operations or all access entirely.  Pkeys will override the
+regular protections assigned to each page but, since they can only deny
+operations, their effect will always be to restrict access more strictly
+than the page protections do.  There are a number of intended use cases,
+including the implementation of execute-only memory or the protection of
+sensitive data (cryptographic keys, for example) when it is not in active
+use.
+<p>
+Most pkey operations are unprivileged and thus could be left to user space
+to handle without kernel involvement; the one exception is storing the key
+values in the page-table entries.  There is value in having the kernel take
+an overall role in coordinating the use of pkeys, though, so that library
+code can use them without interfering with the rest 
+of the application.  The kernel can also make good use of pkeys if it knows
+it has exclusive access to them.  To make all this possible, <a
+href="/Articles/689178/">five system 
+calls</a> have been defined for working with pkeys in applications.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+<h4>The proposed pkey API</h4>
+<p>
+To avoid conflicts over the use of any specific key, pkeys should be
+allocated prior to use.  The allocation system calls are:
+<p>
+<pre>
+    int pkey_alloc(unsigned long flags, unsigned long initial_rights);
+    int pkey_free(int key);
+</pre>
+<p>
+A new protection key may be obtained with <tt>pkey_alloc()</tt>.  In the
+current implementation, the <tt>flags</tt> argument must be zero, while
+<tt>initial_rights</tt> is a bitmask setting the key's initial access
+restrictions.  The available access bits are <tt>PKEY_DISABLE_WRITE</tt>
+(disabling write access) or <tt>PKEY_DISABLE_ACCESS</tt> (which disables
+all access).  It is worth noting that these flags refer to <i>data</i>
+accesses; memory with a <tt>PKEY_DISABLE_ACCESS</tt> pkey can still be read
+by the processor for execute access.
+<p>
+The return value from <tt>pkey_alloc()</tt> is an integer index indicating
+which key was allocated, or <tt>ENOSPC</tt> if no keys are available.  Keys
+which are no longer in use may be freed with <tt>pkey_free()</tt>.  Freeing
+a key does not, however, remove that key value from page-table entries or
+remove any restrictions that had been applied to that key.  So surprising
+things could happen if an application frees a key that is still applied to
+pages within its address space and the key is later reallocated to
+another use.
+<p>
+The assigning of keys to pages is done with a new variant of the
+<tt>mprotect()</tt> system call:
+<p>
+<pre>
+    int pkey_mprotect(void *start, size_t len, int prot, int pkey);
+</pre>
+<p>
+This call behaves like <tt>mprotect()</tt> in that it will set the
+(regular) protection bits described by <tt>prot</tt> on the pages
+containing <tt>len</tt> bytes beginning at <tt>start</tt>.  It will also
+assign the given <tt>pkey</tt> (which must have been allocated with
+<tt>pkey_alloc()</tt>) to those pages.  A call to
+<tt>pkey_mprotect()</tt> will succeed on systems that do not support pkeys,
+but only if <tt>pkey</tt> is passed as zero.  
+<p>
+If an application wants to ensure that a given memory range will never be
+accessible without the desired pkey restrictions, it can create that range
+by passing <tt>PROT_NONE</tt> to <tt>mmap()</tt>, making the memory
+initially inaccessible.  A subsequent <tt>pkey_mprotect()</tt> call will
+then atomically change the protections and assign the pkey, ensuring that
+there is never a window where the restrictions are not as desired.
+<p>
+An application can query the current restrictions associated with a pkey
+using the 
+<tt>RDPKRU</tt> instruction, and change them with <tt>WRPKRU</tt>, so there
+is not strictly a need for the kernel to support these operations.  The
+kernel provides a couple of system calls for manipulating pkey restrictions
+anyway: 
+<p>
+<pre>
+    unsigned long pkey_get(int pkey);
+    int pkey_set(int pkey, unsigned long access_rights);
+</pre>
+<p>
+These functions eliminate the need to use special assembly instructions in
+application code; they can also verify that the given <tt>pkey</tt> has
+been allocated.
+<p>
+<h4>Execute-only interactions</h4>
+<p>
+There can be some security benefits from designating memory that
+contains code 
+as execute-only, so that its contents cannot be read for other purposes.
+As it happens, though, setting the page protections to <tt>PROT_EXEC</tt>
+does not have that effect — the affected pages are still readable.  So, on
+current processors, true execute-only protections are not easily
+achievable.  But, as 
+mentioned above, the <tt>PKEY_DISABLE_ACCESS</tt> restriction does not 
+block execute access.  It can thus be used, in conjunction with
+<tt>PROT_EXEC</tt>, to create execute-only memory ranges.
+<p>
+While the system-call API is still out-of-tree, the core support for pkeys
+has been in the mainline kernel since the 4.6 release.  If the kernel sees
+an <tt>mprotect()</tt> call setting <tt>PROT_EXEC</tt> permissions on a
+range of memory, it will automatically use a pkey to create true
+execute-only permissions.  This is one of the reasons why it is useful to
+have the kernel in control of key allocation.
+<p>
+There is an interesting question that comes up, though: what if a process
+sets a pkey of its own with <tt>pkey_mprotect()</tt>, then uses a regular
+<tt>mprotect()</tt> call to set the page permissions to <tt>PROT_EXEC</tt>?
+In this case, the kernel could either change the restrictions for the
+assigned pkey, or it could change the affected pages to use its own
+reserved pkey.  Either approach could lead to results that the application
+developer finds surprising.
+<p>
+To avoid such surprises, one pkey (number zero) has been set aside as the
+default key for all pages.  This key will never be allocated with
+<tt>pkey_alloc()</tt>, and its restrictions cannot be changed with
+<tt>pkey_set()</tt>.  As of 4.8 (assuming these patches are merged), the
+kernel will only assign the execute-only pkey to pages that are currently
+controlled by the default key.
+<p>
+The memory protection keys patches have been circulating for some time, and
+have evolved considerably in response to reviewer comments.  At this point,
+they would appear to have reached a stable point where the developers who
+are paying attention are happy with them.  So the chances are good that the
+4.8 kernel will include these system calls making the full functionality
+available to applications.  How soon the requisite hardware will be widely
+available is yet to be seen, though.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_protection_keys">Memory protection keys</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/689395/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor689672"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System calls for memory protection keys</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2016 10:36 UTC (Fri)
+                               by <b>alonz</b> (subscriber, #815)
+                              [<a href="/Articles/689672/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; If the kernel sees an mprotect() call setting PROT_EXEC permissions on a range of memory, it will automatically use a pkey to create true execute-only permissions.</font>
+<p>
+I wonder&mdash;since WRPKRU is an unprivileged instruction, userspace could turn this PROT_EXEC mapping back into R+X without the kernel knowing, no? Or does the kernel somehow enforce rules on PKRU?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/689672/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor689781"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System calls for memory protection keys</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2016 21:00 UTC (Fri)
+                               by <b>hansendc</b> (subscriber, #7363)
+                              [<a href="/Articles/689781/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, userspace could turn the PROT_EXEC mapping back into R+X without the kernel knowing.  The kernel couldn't practically do anything about it until the application enters the kernel again, where it could notice and kill the app or penalize it otherwise.<br>
+<p>
+The kernel doesn't bother to do this checking because it is just one of a long list of things that applications can do to shoot themselves in the foot.  It's certainly not a foolproof security mechanism, but I hope it adds a useful layer to the security onion.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/689781/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor689788"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System calls for memory protection keys</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2016 22:21 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/689788/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the system doesn't support pkeys, does the alloc call return an errno, or zero? Might make code easier to write if it returns zero, since pkey_mprotect succeeds if the okey is zero ...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/689788/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor690080"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">System calls for memory protection keys</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 6, 2016 21:57 UTC (Mon)
+                               by <b>hansendc</b> (subscriber, #7363)
+                              [<a href="/Articles/690080/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That would make sense, if it weren't for pkey_get()/pkey_set().  You would expect that if you can do:<br>
+<p>
+  foo = pkey_alloc();<br>
+<p>
+that you can also do:<br>
+<p>
+  pkey_set(foo, PKEY_DISABLE_WRITE);<br>
+<p>
+But on a system without pkeys, that wouldn't be possible.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/690080/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2016, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

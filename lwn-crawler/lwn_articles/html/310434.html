@@ -1,0 +1,495 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Tracking down a &quot;runaway loop&quot; [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/310434/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/309666/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/310434/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Tracking down a &quot;runaway loop&quot;</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jake Edge</b><br>December 10, 2008</br>
+           </div>
+<p>
+The Linux boot process, at least as provided by distributions,
+depends on help from user space, with 
+drivers being loaded as required from the initial filesystem (initramfs/initrd).
+Loading drivers requires using tools built into initramfs and
+if those tools break, the kernel won't boot.  But when a working kernel
+configuration and initramfs are used with a new kernel, the result
+is expected to be a kernel that successfully boots.  When that doesn't
+happen, bugs are filed regarding kernel regressions but, as a recent
+example shows, the actual problem may be elsewhere.
+</p>
+
+<p>
+The original <a href="/Articles/310472/">report</a> was made in late
+October, but no progress was made until Evgeniy Polyakov <a
+href="/Articles/310473/">saw it again</a> in early December.  The symptom
+was a kernel that hangs after printing:
+<pre>
+    request_module: runaway loop modprobe char-major-5-1
+</pre>
+four times on the console.  Since nothing in the user space (initramfs)
+or kernel configuration had changed, it seemed to clearly point to
+something in the 
+kernel itself.
+</p>
+
+<p>
+It turns out that the "runaway loop" message is meant to indicate that the
+<tt>request_module()</tt> function has been invoked recursively.  So in an
+effort to load the driver for the character device with major/minor numbers
+5/1&mdash;which corresponds to
+<tt>/dev/console</tt>&mdash;<tt>request_module()</tt> was invoked again.
+The code in <tt>kernel/kmod.c</tt>:  
+<pre>
+        if (atomic_read(&amp;kmod_concurrent) > max_modprobes) {
+                /* We may be blaming an innocent here, but unlikely */
+                if (kmod_loop_msg++ < 5)
+                        printk(KERN_ERR
+                               "request_module: runaway loop modprobe %s\n",
+                               module_name);
+                atomic_dec(&amp;kmod_concurrent);
+                return -ENOMEM;
+        }
+</pre>
+only allows that message to be printed four times, but the invoker should
+recognize the <tt>ENOMEM</tt> and handle it appropriately.  
+</p>
+
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p> The root cause was that something in the kernel was trying to access
+<tt>/dev/console</tt> before that device was registered in the kernel.
+This led the kernel to try and load a module to handle
+<tt>/dev/console</tt>, which will fail.  Because of the failure, something
+in the user space 
+<tt>modprobe</tt> then tries to access <tt>/dev/console</tt>, presumably to
+output an error message, which repeats the kernel module loading process.
+And so on.
+After that recurses enough to exceed the <tt>max_modprobes</tt> limit,
+<tt>request_module()</tt> will produce the runaway loop message and return
+<tt>ENOMEM</tt> which <i>should</i> put a stop to the whole process.  </p>
+
+<p>
+In an acrimonious thread&mdash;and <a
+href="http://bugzilla.kernel.org/show_bug.cgi?id=12153">kernel bug
+report</a>&mdash;Alan Cox, Kay Sievers, and Polyakov tried to 
+determine where the problem came from and what to do about it.  It didn't
+help matters that they were using different distribution's initramfs
+so that they saw different behavior.  Polyakov/Sievers were using Debian
+user space while Cox was using Fedora.  Something in the Debian version was
+continuing to try to open <tt>/dev/console</tt> even after getting
+<tt>ENOMEM</tt>.  This leads to an infinite loop, thus a kernel hang.
+</p>
+
+<p>
+Sievers eventually <a
+href="/Articles/310489/">tracked it to the kernel cryptographic API</a>:
+<div class="BigQuote">
+It is caused by:
+  "modprobe cryptomgr" called from swapper[1]
+<p>
+This modprobe process does try to log an error, accesses /dev/console,
+which is not initialized in the kernel at that time, and the kernel
+module loader tries the load a module to support dev_t 5:1, which
+again runs modprobe, and ...
+<p>
+Setting CONFIG_CRYPTO_MANAGER=y makes it disappear.
+</div>
+</p>
+
+<p>
+It turns out that the crypto layer attempts to load the cryptomgr module as
+part of its algorithm testing infrastructure.  If cryptomgr fails to load,
+the algorithm registration code can continue without it.  It is optional,
+but <tt>modprobe</tt> wants to put out a message when it fails to load it,
+which leads to the runaway loop.  As Herbert Xu <a
+href="/Articles/310492/">points out</a>, though, the problem is not
+crypto-specific at all:
+<div class="BigQuote">
+In any case the loop itself does not involve any crypto components
+so I don't think making changes in the crypto layer is going to
+make this go away forever as anyone calling request_module early
+enough will get into this loop.
+</div>
+</p>
+
+<p>
+It is this potential pitfall that Sievers and Polyakov would like to see
+removed.  In 
+general, user-space programs are not required to be concerned with the
+availability of <tt>/dev/console</tt>&mdash;except when they are run from
+early kernel initialization.  But Cox points out that user-space helpers must
+concern themselves 
+with avoiding loops because there are multiple possible ways to cause that
+to happen.
+As an example, he notes that if UNIX-domain sockets (AF_UNIX) are in a
+module and <tt>syslog()</tt> is called before the module is loaded, a
+similar loop will occur. 
+</p>
+
+<p>
+In an effort to "step back" from the arguments that were going back and
+forth, Ted Ts'o <a href="/Articles/310523/">offers his analysis</a> of the
+problem along with a suggested course of action:
+<div class="BigQuote">
+There is a dispute about whether it is looping forever, or whether it
+should be getting caught by kernel/kmod.c's modprobe recursion
+detector.  Alan has checked the recursion detector and reports that it
+works just fine; Evgeniy and Kay are claiming that it in fact loops
+forever, and the recursion detector is not working.
+<p>
+[...] So I would think the best thing to do is to figure out what Debian's
+initrd is doing that is evading the recursion detection.  Fixing that
+is going to make things much more robust.
+</div>
+</p>
+
+<p>
+Clearly the recursion detector is working to some extent, or the runaway
+loop messages would not be seen, but on Debian, at least, that detection
+doesn't stop the problem.  Ts'o's theory is that something outside of
+directly invoked helper is actually the culprit: "<q>I'm guessing why
+it isn't working given Debian's initrd setup is that whatever is
+ultimately opening /dev/console isn't being called until after the
+helper script has exited.</q>"  That seems worth tracking down as Ts'o
+points out in a <a href="/Articles/310524/">later message</a>:
+<div class="BigQuote">
+It would be good to make sure we understand what
+the root causes for while the modprobe recursion detector is
+apparently not triggering, since it could be that Debian's initrd
+might cause some other uncaught recursion loop if we don't drive this
+problem determination to root cause.
+</div>
+</p>
+
+<p>
+The exact cause of the problem and why Debian and Fedora behave differently
+is still not known.  Digging into Debian's initrd to figure that out, as
+Ts'o suggests, is clearly the right starting point.  That answer will
+likely lead to sensible fixes, either in user space or the
+kernel&mdash;possibly both.
+Bickering about where and how to fix the problem before it is fully
+understood seems counter-productive at best.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Bootstrap_process">Bootstrap process</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Modules">Modules</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/310434/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor310758"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Notification of a &quot;runaway&quot; other than /dev/console</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 11, 2008 3:14 UTC (Thu)
+                               by <b>pr1268</b> (subscriber, #24648)
+                              [<a href="/Articles/310758/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>How about playing the Bon Jovi song &quot;<a title="Runaway" href="http://en.wikipedia.org/wiki/Runaway_(Bon_Jovi_song)">Runaway</a>&quot; if /dev/console isn't available?  Just a thought...</p>
+
+<p>Don't mind me, I'm just in a silly mood tonight for some odd reason... ;)</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/310758/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor310819"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Notification of a &quot;runaway&quot; other than /dev/console</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 11, 2008 10:54 UTC (Thu)
+                               by <b>tyhik</b> (guest, #14747)
+                              [<a href="/Articles/310819/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In such a miserable "runaway" situation hearing that great Runaway song would be a big relief, I am sure. Be it played back even through /dev/console if nothing else works.<br>
+<p>
+Mind me neither.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/310819/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor310827"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Notification of a &quot;runaway&quot; other than /dev/console</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 11, 2008 11:30 UTC (Thu)
+                               by <b>zdzichu</b> (subscriber, #17118)
+                              [<a href="/Articles/310827/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Developers are on track for this: <a href="http://kernelslacker.livejournal.com/132712.html">http://kernelslacker.livejournal.com/132712.html</a><br>
+:-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/310827/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor310826"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Differences between distribution initramfs scripts can cause interesting problems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 11, 2008 11:31 UTC (Thu)
+                               by <b>njd27</b> (subscriber, #5770)
+                              [<a href="/Articles/310826/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What is needed is a reference set of scripts, as described in this article:<br>
+<p>
+<a href="http://lwn.net/Articles/298593/">http://lwn.net/Articles/298593/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/310826/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor311035"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Differences between distribution initramfs scripts can cause interesting problems</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 12, 2008 6:11 UTC (Fri)
+                               by <b>bronson</b> (subscriber, #4806)
+                              [<a href="/Articles/311035/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, that's true!  We could use more bickering.  :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/311035/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor422099"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Tracking down a &quot;runaway loop&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2011 19:54 UTC (Fri)
+                               by <b>daniel</b> (guest, #3181)
+                              [<a href="/Articles/422099/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Bickering about where and how to fix the problem before it is fully understood seems counter-productive at best."<br>
+<p>
+Hi Jon,<br>
+<p>
+This problem still exists more than two years out.  In all probability the bickering approach would have been more productive.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/422099/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor446090"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Tracking down a &quot;runaway loop&quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2011 17:32 UTC (Fri)
+                               by <b>cfriedt</b> (guest, #75420)
+                              [<a href="/Articles/446090/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just in case somebody runs into a similar error like the one Vim[1] (&amp; more recently I) ran into<br>
+<p>
+request_module: runaway loop modprobe char-major-0-20481<br>
+<p>
+This is actually the same problem as the missing '/dev/console' but the device files get mangled somehow on the nfs server system.<br>
+<p>
+Note that /dev/console is normally (maj,min) 5,1, but in this case, the kernel is pressed to search for 0,20481 which is notably outside the usual numeric range for device nodes.<br>
+<p>
+I discovered this problem while using VMWare to run a Linux instance with an NFS root hosted from Mac OS X, while Vim discovered this problem doing the same but while running Windows. <br>
+<p>
+It turns out that, if you run 'mknod -m 600 console c 5 1; mknod -m 666 null c 1 3', and then read the result back from within the VMWare instance of Linux, it's identified as follows:<br>
+<p>
+# ls -la console null<br>
+crw------- 1 root root 0, 20481 Jun  3  2011 console<br>
+crw-rw-rw- 1 root root 0,  4099 Jun  3  2011 null<br>
+<p>
+The solution: don't use mknod on Mac OS X or cygwin ;-) <br>
+<p>
+In my case I created these critical device nodes on the NFS root from within the VMWare Linux instance with the use of a livecd iso, as a last resort.<br>
+<p>
+In case anyone is interested, after re-creating the 'correct' device nodes using the VMWare Linux instance, the respective files on the nfs root (Mac OS X) show up as follows:<br>
+<p>
+$ ls -la console null<br>
+crw------- 1 root wheel 0, 1281 Jun  3 13:27 console<br>
+crw-rw-rw- 1 root wheel 0,  259 Jun  3 13:28 null<br>
+<p>
+Note: I'm using NFSv2 due to some brokenness with the Mac OS X NFS server implementation.<br>
+<p>
+[1] <a rel="nofollow" href="http://www.mail-archive.com/davinci-linux-open-source@linux.davincidsp.com/msg04798.html">http://www.mail-archive.com/davinci-linux-open-source@lin...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/446090/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2008, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

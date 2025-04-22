@@ -1,0 +1,2671 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The two sides of reflink() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/331808/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/330908/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/331808/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The two sides of reflink()</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 5, 2009</br>
+           </div>
+One of the discussions your editor missed at the recent Linux Storage and
+Filesystem workshop covered the proposed <tt>reflink()</tt> system call.
+Fortunately, the filesystem developers have now filled in the relevant
+information with a detailed email exchange, complete with patches.  We now
+have a <a 
+href="http://lwn.net/Articles/331576/">proposed system call</a> which has created
+more open questions than answers.  The creation of a new core system call
+requires a lot of thought, so a close look at these questions would seem to
+be called for.
+<p>
+
+The proposed system calls are pretty simple:
+<p>
+<pre>
+    int reflink(const char *oldname, const char *newname);
+
+    int reflinkat(int old_dir_fd, const char *oldname,
+                  int new_dir_fd, const char *newname, int flags);
+</pre>
+<p>
+These system calls function much like <tt>link()</tt> and <tt>linkat()</tt>
+but with an important exception: rather than create a new link pointing to
+an existing inode, they create a new inode which happens to share the same
+disk blocks as the existing file.  So, at the conclusion of a
+<tt>reflink()</tt> call, <tt>newname</tt> looks very much like a copy of
+<tt>oldname</tt>, but the actual data blocks have not been duplicated.  The
+files are copy-on-write, though, meaning that a write to either file will cause
+some or all of the blocks to be duplicated.  A change to one of the files
+will thus not be visible in the other file.  In a sense, a <tt>reflink()</tt>
+call behaves like a low-cost file copy operation, though how copy-like it will be
+remains to be seen.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+
+The first question to arise was: does the kernel really need to provide
+both the <tt>reflink()</tt> and <tt>reflinkat()</tt> system calls?  Most of
+the other *<tt>at()</tt> calls are paired with the non-at versions because
+the latter came first.  Since Unix-like systems have had <tt>link()</tt>
+for a long time, it cannot be removed without breaking applications.  So
+<tt>linkat()</tt> had to go in as a separate call.  But 
+<tt>reflink()</tt> is new, so it can just as easily be implemented in the C
+library as a wrapper around <tt>reflinkat()</tt>.  That is how things
+will probably be done in the end.
+<p>
+The deeper discussion, though, reveals that there are two fundamentally
+different views of how this system call should work.  Joel Becker, who
+posted the <tt>reflink()</tt> patch, sees it as a new variant of the
+<tt>link()</tt> system call.  Others, though, would like it to behave more
+like a file copy operation.  If you see <tt>reflink()</tt> as being a type
+of <tt>link()</tt>, then certain implications emerge:
+<p>
+<ul>
+<li> The reflink-as-link view requires that the new file have (to the
+     greatest extent possible) the same metadata as the old one; in
+     particular, it must have (at the end of the <tt>reflink()</tt> system
+     call) the same owner, just like hard links do.
+<p>
+<li> Creating low-level snapshots of filesystems (or portions thereof) is 
+     straightforward and easy.  Reflinked files look just like the
+     originals; in particular, they have (mostly) the same metadata and can
+     share the same security context.
+<p>
+<li> Disk quotas are a problem.  Should a reflinked file count against the
+     owner's disk quota, even though little or no extra storage is actually
+     used?  If so, the system must take extra steps to keep users from
+     creating a reflink to a file they do not own; otherwise one user could
+     exhaust another user's quota.  If, instead, storage is charged against
+     the quota of the user who created the reflink, complicated structures
+     will be needed to track usage associated with files owned by others.
+<p>
+<li> What happens if the new file's metadata - permissions or owner - are
+     changed?  In some scenarios, depending on the underlying filesystem
+     implementation, it seems that a metadata change could
+     require a copy-on-write of the whole file.  That would turn a command
+     like <tt>chmod</tt> into a rather heavy-weight operation.  
+</ul>
+<p>
+On the other hand, if a reflink is like making a copy, the situation
+changes somewhat:
+<p>
+<ul>
+<li> Security becomes a rather more complicated affair.  Making a hard link 
+     doesn't require messing with SELinux security contexts, but a
+     reflink-as-copy would require that.  Permission checks (again,
+     including security module checks) would have to become more
+     elaborate; it would have to be clear that the user making the reflink
+     had read access to the file.
+<p>
+<li> The quota problem goes away.  If a reflink is essentially a copy, then
+     the resulting link should be owned by the user who creates it, rather
+     than the owner of the original file.  The only course which makes
+     sense is to charge both users for the full size of the file.  There
+     are no concerns about one user exhausting another's disk quota, and
+     there are no real difficulties with keeping disk usage information
+     current. 
+<p>
+<li> Metadata changes are handled naturally, since the files are completely
+     separate from each other.
+<p>
+<li> Reflinks are no longer true snapshots; they will not work to represent
+     the state of the filesystem at a given time.  For a user whose real
+     interest is low-level snapshotting, reflink-as-copy will not work.
+</ul>
+<p>
+
+On the other hand, reflink-as-copy could be used in a lot of other
+interesting situations; the <tt>cp</tt> command could create reflinks by
+default when the destination file is on the same filesystem.  That would
+turn "<tt>cp&nbsp;-r</tt>" into a fast and efficient operation.  They could
+also be used to share files between virtualized guests.  
+
+
+<p>
+What it comes down to is that there are real uses for both the
+reflink-as-link and reflink-as-copy modes of operation.  So the right
+solution may well be to implement both modes.  The <tt>flags</tt> parameter
+to <tt>reflinkat()</tt> can be used to distinguish between the two.
+Implementing both behaviors will complicate the implementation somewhat,
+and it muddies up what is otherwise a conceptually clean system call.  But
+that's what happens, sometimes, when designs encounter the real world.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems">Filesystems</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#reflink">reflink()</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#System_calls">System calls</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/331808/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor331877"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2009 21:12 UTC (Tue)
+                               by <b>flewellyn</b> (subscriber, #5047)
+                              [<a href="/Articles/331877/">Link</a>] (16 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm a little fuzzy on what benefit such a system call has in the first place.  Has this been covered previously?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331877/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331879"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2009 21:21 UTC (Tue)
+                               by <b>martinfick</b> (subscriber, #4455)
+                              [<a href="/Articles/331879/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Copy on write has huge benefits in space savings, not just in disk space, but more importantly in memory, particularly for virtualized systems.  For example, the vserver project already implements a solution to this which allows many virtual servers to share the same files securely.  This means that if you have 1000 servers running the same copy of apache, not only can you have only one copy on disk, but the kernel will also only keep one copy in memory (of the shared stuff like program text, of course).  While you could achieve a similar sharing with hard links, this would be less secure since a breach in one system would allow the file to be modified in all the other systems.  With COW, this is avoided.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331879/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331882"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2009 21:29 UTC (Tue)
+                               by <b>flewellyn</b> (subscriber, #5047)
+                              [<a href="/Articles/331882/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I see.  That IS beneficial.  Thanks very much.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331882/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor332011"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 14:25 UTC (Wed)
+                               by <b>wilreichert</b> (guest, #17680)
+                              [<a href="/Articles/332011/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How is this different from deduplication at the filesystem level?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332011/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332026"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 15:09 UTC (Wed)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/332026/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+it sounds like it's one mechanism to use for deduplication.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332026/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor332076"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 17:03 UTC (Wed)
+                               by <b>elanthis</b> (guest, #6227)
+                              [<a href="/Articles/332076/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To the filesystem, a cp isn't a copy -- it's one process reading from one file and writing to another.  Figuring out that that is supposed to be a copy is very non-trivial and expensive, especially when taking into account metadata operations which aren't part of the regular file stream.  I'm not sure it's even plausible to do without a second pass, e.g. a "combine files" daemon, which would still just be extra overhead.<br>
+<p>
+If on the other hand cp says "this is a copy" to the kernel then the filesystem can just do the right thing.  Of course, other applications will need to be modified to take advantage of the new feature, but such is the truth of most progress.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332076/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor332398"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 7, 2009 21:03 UTC (Thu)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/332398/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      For shared stuff like program text, all servers could use the same
+binaries (through mount, mount -t bind, or hard links), so that's not
+a good justification for reflinks, either (and if you don't trust the
+other servers not to write to the file, why would you trust them with
+access to the device at all?).  Writable files that would mostly or
+completely be the same on both VMs would be a better example, but no
+concrete example comes to my mind.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332398/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332401"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 7, 2009 21:13 UTC (Thu)
+                               by <b>martinfick</b> (subscriber, #4455)
+                              [<a href="/Articles/332401/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+  "why would you trust them with access to the device at all?"<br>
+<p>
+You don't, usually the host system mounts a portion of the filesystem into a separate chroot for each guest server.  The guests typically then have a limited root capability that does not included making device nodes so they really do not have access to the device, only the filesystem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332401/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332704"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2009 18:42 UTC (Sun)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/332704/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>The guests typically then have a limited root capability
+that does not included making device nodes so they really do not have
+access to the device, only the filesystem.</blockquote>
+
+With the limits on the root capabilities, the binaries can surely be
+made read-only even for the guest roots, so no reflinks are needed for
+the binaries.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332704/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332706"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2009 19:09 UTC (Sun)
+                               by <b>martinfick</b> (subscriber, #4455)
+                              [<a href="/Articles/332706/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <i>
+<ul>
+The guests typically then have a limited root capability that does not 
+included making device nodes so they really do not have access to the 
+device, only the filesystem.
+</ul>
+ With the limits on the root capabilities, the binaries can surely be made 
+read-only even for the guest roots, so no reflinks are needed for the 
+binaries. 
+</i>
+
+<p>
+Sure, but if you make the binaries read only you no longer have 
+independent guest systems that can be administered without knowledge of 
+the host or other guests.  In other words, if I now want to upgrade the 
+apache server in one guest, I can't since the binary is read only to my 
+guest root user.  With COW, no problem, as a guest admin I do not even 
+know that my apache binary is shared with others.  It is only relevant to 
+the host (the host unifies the various guest binaries, not the guest).
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332706/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor332010"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 14:33 UTC (Wed)
+                               by <b>MarkWilliamson</b> (guest, #30166)
+                              [<a href="/Articles/332010/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Some more possible uses:<br>
+<p>
+Those folks who are fortunate enough to have their home directory on a netapp filer<br>
+have for years been able to "cd ~/.snapshot/" and find a special directory of<br>
+historical versions of their files.  These are stored efficiently because of the nature of<br>
+the WAFL filesystem.  With reflink, it would be possible to create a lightweight<br>
+version of historical snapshotting: you'd have a daemon run every night (for<br>
+instance) and recursively reflink the current state of all your files into a directory<br>
+tree at ~/.old-versions/&lt;date&gt;/ - then, if you ever needed to go back to an old<br>
+version of a file you could just look in there.<br>
+<p>
+With reflinks this would be very fast and would not use up loads of disk space<br>
+(though there would still be quota concerns).  It would make time-machine or Netapp<br>
+.snapshot-like functionality easy to implement efficiently on single disk systems. <br>
+Probably the most quoted reference for stuff like this is the Elephant research<br>
+filesystem, about which there are a number of decent research papers.<br>
+<p>
+Another use that I've seen mentioned is the ability to make checkouts / clones in<br>
+moderen version control systems go faster and be more lightweight in terms of disk<br>
+storage - for instance, cloning a git repository could transparently share all the<br>
+underlying data (including the working directory!) using reflinks.  Similar tricks being<br>
+possible for the other VCSes.<br>
+<p>
+Finally, you could probably have a daemon that rummages around the system, finds<br>
+identical files and unifies them on disk using reflink in order to save space.<br>
+<p>
+Loads of cool stuff :-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332010/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332016"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 14:34 UTC (Wed)
+                               by <b>MarkWilliamson</b> (guest, #30166)
+                              [<a href="/Articles/332016/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ugh, what happened to my line endings? :-(  Maybe my browser did something evil ...<br>
+somehow.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332016/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor332064"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 16:38 UTC (Wed)
+                               by <b>cdarroch</b> (subscriber, #26812)
+                              [<a href="/Articles/332064/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes -- that .snapshot directory is incredibly convenient.  Deleted a file by accident?  No problem; there's an hourly backup in .snapshot.  Rogue program deleted 1 TB of data overnight?  Just reach into .snapshot and pull it all out again.  Having equivalent functionality on non-NetApp hardware would awfully nice.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332064/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332078"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 16:59 UTC (Wed)
+                               by <b>MarkWilliamson</b> (guest, #30166)
+                              [<a href="/Articles/332078/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed.<br>
+<p>
+rdiff-backup (<a href="http://www.gnu.org/savannah-checkouts/non-gnu/rdiff-backup/">http://www.gnu.org/savannah-checkouts/non-gnu/rdiff-backup/</a>) gives<br>
+somewhat similar snapshotting convenience but you have to interact with it through a<br>
+command line app.  Also, it does use up extra space (although if you're backing up to<br>
+another machine / another drive for redundancy then that's just fine!).<br>
+<p>
+archfs (<a href="http://code.google.com/p/archfs/">http://code.google.com/p/archfs/</a>) provides a Fuse interface to browse rdiff-backup<br>
+repositories.  Last time I tried it it wasn't really suitable for large repositories but this may<br>
+have been fixed since then.  rdiff-backup's page on related info has some other solutions:<br>
+<a href="http://www.gnu.org/savannah-checkouts/non-gnu/rdiff-backup/related.html">http://www.gnu.org/savannah-checkouts/non-gnu/rdiff-backu...</a><br>
+<p>
+.snapshot is a very nice user interface to have to old revisions.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332078/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332630"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 9, 2009 5:07 UTC (Sat)
+                               by <b>TRS-80</b> (guest, #1804)
+                              [<a href="/Articles/332630/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <a href="http://www.rdiffweb.org/">rdiffWeb</a> is a nice web interface to rdiff-backup. At work we're using rdiff-backup for weekly snapshots to complement our nightly amanda tape, a 1TB drive lasted us a year.
+<p>
+Line endings - make sure you select HTML not plain text, as the latter doesn't do wrapping for some reason.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332630/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor332720"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2009 0:21 UTC (Mon)
+                               by <b>vonbrand</b> (subscriber, #4458)
+                              [<a href="/Articles/332720/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+Please don't.
+<p>
+I suffered through DOS's "you can undelete files whenever you fatfingered DEL". Most of the time it worked, but Murphy's Law ensured that when you <em>really</em> needed to get something back, it would usually be gone for good.
+Unix' idea of "<code>rm</code> is final" is harsh, but you learn not to misplace stuff in the first place. Makes for a better experience in the long run.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332720/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332722"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2009 1:10 UTC (Mon)
+                               by <b>MarkWilliamson</b> (guest, #30166)
+                              [<a href="/Articles/332722/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Netapp's .snapshot and the similar functionality reflinks can provide will give you semantics similar to a backup (a version of the file from a particular point in time, which will stay there until your backup regime removes it as too old).  So it's a big improvement on DOS's "maybe you'll be able to grab the data back before the space is recycled by the filesystem".  So it should at least have reliable, predictable semantics for things like accidental deletion.<br>
+<p>
+Although in practice it's going to get used to undo rm occasionally, it seems to me only sensible to have something like this available so I'm able to roll back important documents and settings to previous states if I make the wrong modification, or if some program barfs over everything and corrupts things.<br>
+<p>
+Users will probably have to be repeatedly reminded that, yes, they do need an independent backup on another disk somewhere because reflinks won't save you if your computer explodes.  But most folks don't do proper backups *anyhow*, so I doubt it'll make that aspect of user behaviour much worse!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332722/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor331886"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2009 21:43 UTC (Tue)
+                               by <b>JoeBuck</b> (subscriber, #2330)
+                              [<a href="/Articles/331886/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Since the other "at" calls ("linkat", etc.) are shared with Solaris, I hope that there will be discussions with Solaris and BSD people about these calls, to help people write portable software going forward.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331886/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor331890"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2009 21:47 UTC (Tue)
+                               by <b>martinfick</b> (subscriber, #4455)
+                              [<a href="/Articles/331890/">Link</a>] (18 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wouldn't such a modification be filesystem specific?  Would this require all supported linux filesystems to be patched?  What happens when say an EXT3 partition with files like this is used on a kernel which does not support this and one of the copies is written to?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331890/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331925"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2009 23:21 UTC (Tue)
+                               by <b>adj</b> (subscriber, #7401)
+                              [<a href="/Articles/331925/">Link</a>] (17 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not having read the patch (or any relevant standard document lately), but getting back ENOSYS in errno seems like a reasonable result.  But I'm probably wrong.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331925/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331930"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2009 23:31 UTC (Tue)
+                               by <b>martinfick</b> (subscriber, #4455)
+                              [<a href="/Articles/331930/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Uh, perhaps you are thinking that I asked what would happen if attempting to use reflink() on an unsupported FS or a kernel which does not support it.  I was asking what would happen if someone tried to modify a file with a kernel that does not understand this block sharing (assuming it was created by one that does)?  Would it end up simply overwritting the blocks on disk that belong to both copies effectively making it not COW, but just a plain hard link?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331930/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331933"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 0:05 UTC (Wed)
+                               by <b>adj</b> (subscriber, #7401)
+                              [<a href="/Articles/331933/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, I did miss that.  I'm going to have to imagine that a reflink-supporting ext3 filesystem would have a new feature bit set in the superblock.  And hopefully would not be mountable on a non-reflink-supporting kernel.  Two inodes sharing the same data blocks isn't something that any traditional UNIXy filesystem is going to understand.  MS-DOS type filesystems surely don't support it either (cross linked files should sound familiar to anyone who used a DOS system in the 1980s or early 1990s.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331933/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor331935"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 0:09 UTC (Wed)
+                               by <b>clugstj</b> (subscriber, #4020)
+                              [<a href="/Articles/331935/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How would you get into this situation?  The call is implemented in the file system.  If the file system doesn't support it, the file isn't shared.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331935/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331937"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 0:14 UTC (Wed)
+                               by <b>martinfick</b> (subscriber, #4455)
+                              [<a href="/Articles/331937/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, but I can run multiple kernels on the same machine (at different times).  So if I create the shared file with a modern spiffy new kernel which supports this feature and then boot an older kernel and write to one of the files, what happens?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331937/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331946"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 0:49 UTC (Wed)
+                               by <b>JoeBuck</b> (subscriber, #2330)
+                              [<a href="/Articles/331946/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      You'd need flags in the filesystem that would prevent the filesystem from being mounted by a kernel that lacks the needed feature.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331946/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331956"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 5:59 UTC (Wed)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/331956/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Specifically the ext filesystem family contains two sets of bit flags for this purpose. Each bit represents a feature which a particular implementation may or may not be aware of. Implementations are supposed to check one set before attempting to mount the filesystem at all, and another set in addition if the mount is read-write.<br>
+<p>
+It also contains per-inode flags, so that implementations can be warned that they're missing a feature needed to read or update a particular file, in this case the implementation should fail open() for that file.<br>
+<p>
+Of course poor quality implementations from third parties may be missing some or all of these checks. Fortunately the worst implementation I'm aware of as of this moment is read-only, so any problems only occur when reading files with that implementation and if/when they reboot into Linux everything is fine again.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331956/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor332131"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 19:31 UTC (Wed)
+                               by <b>clugstj</b> (subscriber, #4020)
+                              [<a href="/Articles/332131/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You are f***ed.  I would suggest you don't do something this crazy.  It would not be trivial to add a feature like this to a file system and assure that the older version knows about it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332131/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor331942"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">a reflink would be a new type of inode</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 3:00 UTC (Wed)
+                               by <b>xoddam</b> (guest, #2322)
+                              [<a href="/Articles/331942/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hard links are not distinct inodes (as reflinks must be); rather they are multiple directory entries pointing to a single inode.  Symlinks are (in most posixish filesystems) a special kind of inode.  Reflinks will be yet another special kind of inode; if the filesystem code does not recognise an inode type it will return an error when you attempt to open it (maybe -ENOSYS, I'm not sure).<br>
+<p>
+You could also specify flags in the superblock as others have suggested, so as to prevent a filesystem with reflinks from being mounted at all by a kernel which does not support them.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331942/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331973"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">a reflink would be a new type of inode</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 8:55 UTC (Wed)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/331973/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There seems to be some asymmetry.  If you make another hard link to a file, then the two links are equal in status and you can't see which is the original.  But a reflink is to be a special inode type and different somehow from the original version of the file.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331973/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331976"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">a reflink would be a new type of inode</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 9:46 UTC (Wed)
+                               by <b>xoddam</b> (guest, #2322)
+                              [<a href="/Articles/331976/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, like a symlink.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331976/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor331988"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">a reflink would be a new type of inode</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 12:24 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/331988/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      A reflink would be a new type of inode only in so far as the filesystem must track the fact that it has blocks shared with another inode.  There is no difference, though, between an inode created by a reflink and the file's original inode; they <i>both</i> become reflink inodes.  In Btrfs, I believe, things are even less different; the tracking of the shared blocks is done at the extent level.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331988/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332046"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">a reflink would be a new type of inode</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 16:07 UTC (Wed)
+                               by <b>masoncl</b> (subscriber, #47138)
+                              [<a href="/Articles/332046/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is more accurate to say (for both btrfs and ocfs2) that the result of the reflink is an entirely new file.  It has a known starting point (the contents and permissions of the original).<br>
+<p>
+The two files can be changed independently without affecting each other.  One could be deleted, truncated, expanded, chmoded, have new acls set, etc.<br>
+<p>
+The actual block sharing is just an implementation detail...it could be implemented as a lazy copy for example.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332046/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332133"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">a reflink would be a new type of inode</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 19:40 UTC (Wed)
+                               by <b>adj</b> (subscriber, #7401)
+                              [<a href="/Articles/332133/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That leaves the "link" part of the interface name sounding terribly misleading.<br>
+<p>
+Surely there's a better name for a make-a-copy-of-this-inode-and-all-its-data-and-maybe-do-some-cool-COW-magic system call.  It's too bad that the "dup" family of system call names is already used for something with a completely separate meaning.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332133/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332169"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">madcow()?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 21:47 UTC (Wed)
+                               by <b>AnswerGuy</b> (guest, #1256)
+                              [<a href="/Articles/332169/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<p>
+ magically-allocated-data-copy-on-write ... :)<br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332169/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor332271"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">a reflink would be a new type of inode</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 7, 2009 10:12 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/332271/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>A reflink would be a new type of inode only in so far as the filesystem must track the fact that it has blocks shared with another inode. There is no difference, though, between an inode created by a reflink and the file's original inode; they both become reflink inodes.</blockquote>Ah, so it is symmetric, somewhat like making a hard link with 'ln'.
+<p>
+If one of the two reflink inodes is then removed, does the other one revert back to being a normal file?  If not, is there any difference between a lone reflink inode and a normal one?  Couldn't all files be reflinks?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332271/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332435"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">a reflink would be a new type of inode</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 7, 2009 22:59 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/332435/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe that one of the features of a reflink is that it tells you what else it's linked with, so that you can find it to break the COW <br>
+<p>
+if this isn't the case, it should be, for just this reason.<br>
+<p>
+as I understand things, if a file is changed it may break the linking entirely (copying the entire file), or it may break the link partially (still sharing the common parts of the file, but with the differences being separated) at the option of the filesystem<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332435/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor332643"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 9, 2009 14:25 UTC (Sat)
+                               by <b>sdbrady</b> (guest, #56894)
+                              [<a href="/Articles/332643/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hmm, surely you'd expect ENOTSUP if the filesystem doesn't support the operation, and ENOSYS if the kernel doesn't support it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332643/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor331914"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2009 22:34 UTC (Tue)
+                               by <b>ikm</b> (guest, #493)
+                              [<a href="/Articles/331914/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What seems to be an omission in this article is some background information on why this was called for in the first place. From the article, it looks like this syscall came completely out of the blue and that's just it, but I'm sure there's some background, and that kind stuff is always nice to read and know.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331914/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331920"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2009 22:55 UTC (Tue)
+                               by <b>JoeBuck</b> (subscriber, #2330)
+                              [<a href="/Articles/331920/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Read the article again; the uses are described (snapshots, more efficient copying).
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331920/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331922"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2009 23:02 UTC (Tue)
+                               by <b>ikm</b> (guest, #493)
+                              [<a href="/Articles/331922/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wasn't referring to the uses, but rather to a history of the whole thing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331922/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor331928"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Pity userspace on where this is done on a simple minded filesystem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 5, 2009 23:36 UTC (Tue)
+                               by <b>adj</b> (subscriber, #7401)
+                              [<a href="/Articles/331928/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <code>
+  reflink("myold200Gbytefile", "myreflinked20Gbytefile);<br>
+  myfd = open("myreflinked200Gbytefile", (O_WRONLY|O_APPEND|O_LARGEFILE));<br>
+  res = write(myfd, "hereismyshortlittlemessage", 27);<br>
+  /*<br>
+   &nbsp;* wait, like _forever_ while i just added 200Gbytes to the amount<br>
+   &nbsp;* of space used on this filesystem.  Not to mention getting back<br>
+   &nbsp;* ENOSPC, because, even though there were 100Gbytes available<br>
+   &nbsp;* before this 27 byte long write, now there are none.  reflinks<br>
+   &nbsp;* sound neat, but sometimes have unexpected teeth.<br>
+   &nbsp;*/<br>
+</code>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331928/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331934"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: Pity userspace on where this is done on a simple minded filesystem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 0:00 UTC (Wed)
+                               by <b>daney</b> (guest, #24551)
+                              [<a href="/Articles/331934/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+On your filesystem that has 200Gbyte blocks you would indeed wait a while.<br>
+<p>
+On my filesystem with somewhat smaller blocks presumably the wait would be shorter.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331934/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331936"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: Pity userspace on where this is done on a simple minded filesystem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 0:12 UTC (Wed)
+                               by <b>adj</b> (subscriber, #7401)
+                              [<a href="/Articles/331936/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Where does my filesystem get 200Gbyte blocks?  Per the article, "a write to either file will cause some or all of the blocks to be duplicated."  I have to think the bookkeeping involved in the former would be simpler and is more likely to be implemented as a prototype in a non-OCFS2 filesystem.  At least in the short term.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331936/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331938"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: Pity userspace on where this is done on a simple minded filesystem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 0:17 UTC (Wed)
+                               by <b>adj</b> (subscriber, #7401)
+                              [<a href="/Articles/331938/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+s/former/latter/ in the above.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331938/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331947"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: Pity userspace on where this is done on a simple minded filesystem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 0:57 UTC (Wed)
+                               by <b>JoeBuck</b> (subscriber, #2330)
+                              [<a href="/Articles/331947/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      But appending (to logs, for example) is such a common special case that it would be likely to be supported at an early stage, so that you have an efficient representation when you take a snapshot of a filesystem, and then you let it go on, appending lots of stuff to your log files, blocks belonging to a common prefix can be shared.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331947/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor331948"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: Pity userspace on where this is done on a simple minded filesystem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 1:01 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/331948/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      btrfs, at least, has COW wired pretty deeply into it.  So it will only copy blocks which have 
+actually been changed. Results on other filesystems may vary.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331948/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor332119"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Pity userspace on where this is done on a simple minded filesystem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 18:49 UTC (Wed)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/332119/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Simple answer:  Don't implement this on simple minded filesystems.  :-)  Save it for filesystems that COW effectively (Btrfs), or can be taught to do so (ext4).  I doubt anyone's planning to implement this over xiafs or vfat.<br>
+<p>
+Slightly fancier answer:  Perhaps this is another thing to "ulimit"?  Return EPERM or EFBIG (file is too big) if the limit's exceeded.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332119/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor331952"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Any introspection into reflinked files?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 2:12 UTC (Wed)
+                               by <b>knobunc</b> (subscriber, #4678)
+                              [<a href="/Articles/331952/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Will there be any way to tell if a reflink is still viable?  I can tell if two files are hardlinked by looking at the inodes.<br>
+<p>
+But can I tell if two files are reflinked?  Can I tell if one has changed after the fact?  If the smarter COW semantics that only copy necessary blocks in a changed file is used, is there any way to tell which portions of the file are common, or at least what percentage?<br>
+<p>
+Can you reflink something more than once... I assume so.  And if so, how does that impact the above questions.<br>
+<p>
+Thanks, -ben<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331952/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor331964"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 7:34 UTC (Wed)
+                               by <b>butlerm</b> (subscriber, #13312)
+                              [<a href="/Articles/331964/">Link</a>] (18 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It seems to me that "reflink" is an extraordinarily bad name for something <br>
+that from a user point of view does not appear to make any kind of link at <br>
+all. <br>
+<p>
+The reasonable options are full copy semantics or (read-only) snapshot <br>
+semantics. A writable non-link "link" that you can't change the owner of <br>
+doesn't seem like a very useful construct to me.<br>
+<p>
+The general idea here is excellent of course.  However, I suggest this system <br>
+call would make a lot more sense if it were named "fclone" (or something like <br>
+that) with full copy semantics.  It should preserve the owner, permissions <br>
+and data to begin with, and then the caller should be able to change all <br>
+three after the fact. Sort of like "fork" or "clone".<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331964/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331996"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 13:22 UTC (Wed)
+                               by <b>Cato</b> (guest, #7643)
+                              [<a href="/Articles/331996/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Definitely some sort of "clone" name would be better - it's rather like forking a process as you say.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331996/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor332657"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 9, 2009 21:34 UTC (Sat)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/332657/">Link</a>] (16 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+It should preserve the owner, permissions 
+and data to begin with, and then the caller should be able to change all 
+three after the fact.
+</blockquote>
+
+<p>The caller should be able to change the owner of the file?  Or change permissions on a file, whether he owns it or not?  These are not normal Unix things, except for the superuser.
+<p>
+That's why there's a decision to be made (or not -- has anyone considered doing one of each?)
+
+<p>I would use a reflink that makes new metadata (and I can then copy whatever metadata I can, like cp --archive, if I like).  I wouldn't use one that clones the metadata -- that function is better served by a snapshot function that does a whole directory tree at once.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332657/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332661"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 9, 2009 23:31 UTC (Sat)
+                               by <b>butlerm</b> (subscriber, #13312)
+                              [<a href="/Articles/332661/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Assuming they have the necessary privileges to do so, obviously.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332661/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332670"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2009 1:45 UTC (Sun)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/332670/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+Assuming they have the necessary privileges to do so, obviously.
+</blockquote>
+<p>
+Well not <em>obviously</em>, since that assumption leaves the situation equally weird.
+<p>
+But now that you've said that's what you have in mind, maybe you can elaborate.  Would an unprivileged person be able to use reflink?  What would happen if he did it on a file he doesn't own?  Would it be possible for someone to create a file he can't access?  One whose space is charged to someone else?
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332670/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332681"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2009 10:30 UTC (Sun)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/332681/">Link</a>] (12 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It already is possible. Create a directory readable/executable only by <br>
+yourself; hardlink someone else's file into it; wait for that other person <br>
+to delete it. Now you've stolen that person's quota.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332681/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332690"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2009 18:03 UTC (Sun)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/332690/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Yes, and you misspoke.  The other person didn't delete the file because no one can delete a file.  The system deletes one automatically when it's no longer accessible.  The space charging problem is one of the many reasons this innovative Unix concept should actually be scrapped.  Along with the related concepts that directories are kernel level things, and you can't give a file a name.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332690/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332703"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2009 18:36 UTC (Sun)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/332703/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I suspect that if you actually tried to scrap link() et al, a million MTA <br>
+authors would try to kill you.<br>
+<p>
+(I'd be rather annoyed, too: I use hardlinks all the time.)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332703/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332730"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2009 5:50 UTC (Mon)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/332730/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+I suspect that if you actually tried to scrap link() et al, a million MTA 
+authors would try to kill you.
+</blockquote>
+<p>
+Well, I wouldn't scrap link() et al -- I'd just move them out of the kernel and add the ability to explicitly create and delete files independent of directory links.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332730/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332736"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2009 6:10 UTC (Mon)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/332736/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We already have the ability to create and delete files independently of <br>
+directory links: mkstemp(). What you can't do is easily create them <br>
+outside of /tmp, or link them to names at a later date.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332736/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor332729"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2009 5:42 UTC (Mon)
+                               by <b>butlerm</b> (subscriber, #13312)
+                              [<a href="/Articles/332729/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Personally, I would rather not have to reboot every time I installed or <br>
+updated virtually any piece of system software.  That would be the direct <br>
+consequence of discarding the directory entry / inode distinction in Unix - <br>
+to regress to the reboot happy world of Win32.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332729/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332731"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2009 5:57 UTC (Mon)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/332731/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+That would be the direct 
+consequence of discarding the directory entry / inode distinction in Unix -
+</blockquote>
+<p>
+But what I described makes the distinction even larger.  Today directory entries and inodes are tied together tightly by the kernel.
+<p>
+But I'm curious about how this affects having to reboot when you update system software.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332731/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332735"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2009 6:09 UTC (Mon)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/332735/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What? Directory entries and inodes aren't tied together in the fs model at <br>
+all, except that each directory entry increases i_nlink in the <br>
+corresponding inode by one. Reflinks simply would ensure that i_nlink was <br>
+*at least* one but would not increment it (probably by maintaining a <br>
+separate i_reflink count), and the semantics of unlink() would change to <br>
+ensure that a reflink()/unlink() sequence had the same (no) effect on link <br>
+count as link()/unlink().<br>
+<p>
+You could no longer rely on unlink() decrementing i_nlink, but I don't <br>
+know of *anything* that depends on this (some things doubtless do but it <br>
+can't be common).<br>
+<p>
+It breaks updating running software because that involves unlinking files <br>
+that are in use, and because the update process generally consists of <br>
+creating a file with a temporary name, filling it out, and rename()ing it <br>
+over the original (that's an implicit unlink right there, and it does not <br>
+fail). If you break that you break every package manager on the face of <br>
+the earth.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332735/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332742"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2009 7:37 UTC (Mon)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/332742/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+What? Directory entries and inodes aren't tied together in the fs model at 
+all, except that each directory entry increases i_nlink in the 
+corresponding inode by one.
+</blockquote>
+<p>
+That's a pretty tight bond, especially since i_nlink controls when the inode/file gets deleted.  Also, you can't make the kernel create an inode without also creating a directory entry, and except temporarily, an inode cannot exist without at least one directory entry associated with it.  Those are the bonds that it would be nice to get away from, as pretty much every OS except Unix does.
+<p>
+<blockquote>
+Reflinks simply would ...
+</blockquote>
+<p>
+We must be talking about different things.  I was just talking about what Unix <em>should</em> do instead of what it always has (as a fundamental design point) done.  Nothing to do with reflinks.  And I'm also not claiming it would be compatible with any existing Unix application, but I do believe every application could be done at least as well with a kernel without automatic file deletion and directories.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332742/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332817"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2009 18:32 UTC (Mon)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/332817/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+*And directories*? You're dreaming. Directories are in practice essential <br>
+for scalability. If they weren't in the kernel, they'd need to be in some <br>
+userspace library (ew).<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332817/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332856"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2009 1:22 UTC (Tue)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/332856/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+If they weren't in the kernel, they'd need to be in some 
+userspace library (ew).
+</blockquote>
+<p>
+They work better in user space -- there's more flexibility there and the basic concept of a directory has nothing to do with resource allocation between users, which is what the kernel is for.  Many OSes do them outside the kernel.  The only reason they have to be in the kernel in Unix is that the kernel deletes files implicitly based on directory references.   And as I've been saying, we'd be better off without that.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332856/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332983"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 12, 2009 19:59 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/332983/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Putting directories outside the kernel also means that a whole pile of <br>
+things POSIX guarantees become, as near I can tell, impossible to provide. <br>
+I can't see any way to keep cross-directory rename() atomic, for instance.<br>
+<p>
+Also it's a grotesque security hole: now you can't keep stuff secret by <br>
+hiding it in unreadable directories anymore.<br>
+<p>
+Periodically there are proposals to introduce an open()-by-inode-number <br>
+syscall. They are always shot down. I don't know what sort of system <br>
+you're thinking of, but it isn't Unix.<br>
+<p>
+(And if you're going to go that route, make the inums 1024 bits long and <br>
+bingo, you've got a capability-based system.)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332983/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor332767"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2009 15:38 UTC (Mon)
+                               by <b>butlerm</b> (subscriber, #13312)
+                              [<a href="/Articles/332767/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is no practical way for a filesystem to implement "reflinks" such that <br>
+the reflink shares the same inode.  The ownership, permissions, and file data <br>
+of both the original file and the new file all have to be modifiable <br>
+independently.  To make any sense, they would also need separate inode <br>
+numbers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332767/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor332728"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2009 5:34 UTC (Mon)
+                               by <b>butlerm</b> (subscriber, #13312)
+                              [<a href="/Articles/332728/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You raise an excellent point.  The useful implementation of "reflink" would <br>
+have semantics as a file copy.  Since an unprivileged user cannot change the <br>
+ownership of an existing file, a general purpose implementation *must* be <br>
+able to change the ownership of the new file to that of the current user in <br>
+the process.  <br>
+<p>
+Otherwise you would get a highly restricted operation that would only be <br>
+useful to unprivileged users for making efficient copies of files they <br>
+already own.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332728/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor331970"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 8:15 UTC (Wed)
+                               by <b>amw</b> (subscriber, #29081)
+                              [<a href="/Articles/331970/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why should my reflinked file be counted against my quota at all - I'm not using any more storage (at least not initially).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331970/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331972"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 8:52 UTC (Wed)
+                               by <b>lmb</b> (subscriber, #39048)
+                              [<a href="/Articles/331972/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The answer to the quota question points out that this call is only the first step.<br>
+<p>
+There is, of course, also a need for reflinkstat() or whatever it is going to be called - one needs to find out how many blocks are part of a specific COW, and also reflinkdiff(), which enumerates the (meta-)data blocks which differ from the link target (needed for efficient rsync/backup).<br>
+<p>
+Then, it also becomes possible to use quota to account just the difference, i.e. the actual space used by the reflink.<br>
+<p>
+A further complication arises when we look at using reflink() on directories, which would of course also be quite desirable (for snapshots, multi-use chroots etc). That will be an interesting direction to explore ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331972/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332662"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 9, 2009 23:52 UTC (Sat)
+                               by <b>butlerm</b> (subscriber, #13312)
+                              [<a href="/Articles/332662/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ZFS (for example) uses an COW design where it isn't remotely practical to <br>
+figure out which files / snapshots share which blocks in a reasonable amount <br>
+of time.  I imagine BTRFS is similar.  <br>
+<p>
+However both aforementioned filesystems store block checksums, so perhaps a <br>
+more practical means would be to add an interface that returns the block <br>
+checksums of a file range (if not the block offsets) to user space, and <br>
+generate a candidate duplication list from that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332662/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor331974"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 9:02 UTC (Wed)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/331974/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because if you make a reflink to a file, and your quota is unaffected, you might later find that when simply changing the contents of the reflink (without making it any larger) your quota is exhausted.  Userspace really doesn't expect that a seemingly harmless operation like changing one byte in the middle of a file could suddenly exhaust quota or free disk space.<br>
+<p>
+That said, it makes no sense to account disk quota conservatively while lying about the amount of free space really available.  The two should be treated the same, so if reflinking a large file has no effect on the reported free space, it shouldn't cost quota either.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331974/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331975"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 9:22 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/331975/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Any userspace that does not expect write() in the middle of a file to <br>
+potentially fail with -ENOSPC is broken. Such write()s can fail even now <br>
+thanks to sparse files. It is true that currently userspace can rely on <br>
+the second write() in a ftell()/write()/fseek()/write() sequence not <br>
+failing, but this seems a rather thin thing to rely on, to me.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331975/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331978"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 10:42 UTC (Wed)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/331978/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for pointing this out.  So if currently, creating a 10 gigabyte sparse file does not subtract 10 gigs from your quota nor from the free space report, giving the possibility that writing to the middle of an existing file can run out of space, then making a reflink to a 10 gig file should be treated the same way.  There is precedent.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331978/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor331990"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 12:33 UTC (Wed)
+                               by <b>vonbrand</b> (subscriber, #4458)
+                              [<a href="/Articles/331990/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+Even worse, if I reflink() a file of yours, and yout then change it (or delete it, whatever) suddenly my quota goes up <em>without</em> any action on my part.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331990/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor331980"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">quota behaviour of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 11:21 UTC (Wed)
+                               by <b>pjm</b> (guest, #2080)
+                              [<a href="/Articles/331980/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One issue is what happens when one of the copies is removed, especially if there's more than one owner involved.  Presumably the result must be that removing a file can increase someone else's quota usage.  One wonders then what should happen if that other user has already exhausted their quota, and what bugs may be triggered by not expecting whichever policy is chosen.<br>
+<p>
+The reasons for different quota behaviour would be if it results in different (and more desirable) user behaviour, or if it helps system administrators choose better quota limits, i.e. if it results in less frequent filesystem-full situations for a given amount of user productivity.<br>
+<p>
+How much are quotas used these days, and for what uses ?  Can people comment on the usefulness of different quota policies in the context of specific use cases?<br>
+<p>
+As to whether different quota behaviour would result in different user behaviour (e.g. encouraging taking steps for files to be reflink'ed rather than copied), I wonder how many quota'd users would have the necessary knowledge for it to change their behaviour.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331980/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331992"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">quota behaviour of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 12:47 UTC (Wed)
+                               by <b>utoddl</b> (guest, #1232)
+                              [<a href="/Articles/331992/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Interesting points, but remember: quota can be impacted by unrelated actions by other processes owned by the same or other users at any time, so user space needs to respond to space-related issues regardless of what quotas existed "moments ago". In fact, quota can be affected when the user takes no actions at all; the admin can change quotas, file systems can be resized, etc., and a user who was not over quota may suddenly be so even with no changes to his files.
+<p>Space-reporting tools can report variations of (1) actual space used by extant allocated blocks (modulo sparse files), (2) space free, (3) space that would be used in the case where a naive copy were made to another file system -- all of which are valid and different numbers. The "simple" question of how much storage is used is in fact complicated, our desire for simple answers notwithstanding.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331992/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor333465"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2009 0:37 UTC (Sat)
+                               by <b>efexis</b> (guest, #26355)
+                              [<a href="/Articles/333465/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's lots of discussion of a similar issue known as "over committing", and also in the memory limiting cgroup code, where I think a lot can be learnt on different solutions to the problem.<br>
+<p>
+One example - if you share somebody's file and it doesn't count as your own space, then the original owner deletes their copy, the space is now soley allocated to you, and so should count against your quota? This act could push you way over your quota; what if the file alone is bigger than your complete quota?<br>
+<p>
+What if two people are sharing a file that you delete? Should what's on your quota be divided equally amongst the two of them? If you want to be fair, surely the thing to do when you share a file from someone else is add half of its size to your own quote, and remove half of it from theres. If you share the file, you should share the cost?<br>
+<p>
+If it goes straight onto your quota when you share it, you simply don't have to worry about any of these - but you also do at the same time lose certain benefits of sharing the data. With VMs, over-committing can often be specified as a %, maybe a similar option for sharing files... sharing a file could save you a certain % of its size from your quota, which then means if you suddenly become the sole owner, you only have added the remaining % rather than the full 100%. The % chosen would be linked to the average reference count of all blocks that you own, as this shows the likelyhook of any block being or becoming soley yours.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/333465/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor331987"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW links?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 12:08 UTC (Wed)
+                               by <b>arnd</b> (subscriber, #8866)
+                              [<a href="/Articles/331987/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Interesting to see this come back years after the similar concept of COW <br>
+links was shot down. The interface is rather different, but the effective <br>
+use cases are practically the same.<br>
+<p>
+COW links were last covered five years ago, in <br>
+<a href="http://lwn.net/Articles/77972/">http://lwn.net/Articles/77972/</a>.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331987/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor331989"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">COW links?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 12:25 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/331989/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      I meant to work that in, but didn't... cowlinks were a similar idea, but a different implementation.  They were really links, while "reflinks" create a new inode.  So there's quite a bit of difference in how they work.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/331989/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor332041"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 16:03 UTC (Wed)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/332041/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't see why the reflink-as-copy idea wouldn't work for snapshotting. Sure, a snapshot of a file wouldn't include the metadata, but a snapshot of the directory containing a file would presumably copy the metadata (and would presumably require all sorts of interesting authorizations so that users can't squirrel away copies of setuid binaries and wait for security holes to be found in them). The difference in design seem to me only to affect where exactly the boundary between the part of the filesystem that gets snapshotted and the part that doesn't is for a particular choice of arguments.<br>
+<p>
+Of course, being about to copy directories with this sort of mechanism is probably trickier to implement, but any good snapshot mechanism would have to handle this sort of thing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332041/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332098"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The two sides of reflink()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2009 17:44 UTC (Wed)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/332098/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Most metadata is part of the inode, not the directory entry, so snapshotting the directory wouldn't have any effect on the metadata (apart from the filename). In the reflink-as-copy scenario the owner, group, permissions (e.g. setuid), and the like would be tracked separately for each reflink. Presumably the limitations concerning these attribute would be the same as for creating new files; e.g. the reflink would be created with the owner, group, and umask of the current user, and only the data would be shared (COW).<br>
+<p>
+Given their small average size, it probably makes more sense to just copy the directories themselves outright rather than implementing them as COW. Recursive copies would be similar to "cp -dlR", just with reflink() in place of symlink().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332098/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor332396"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There are better ways to snapshotting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 7, 2009 20:54 UTC (Thu)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/332396/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Many posters seem to think of snapshotting as a good use of reflinks,
+but snapshots should be created on the whole file system at once,
+atomically (so you get a snapshot that is consistent across files).
+File systems like btrfs have this functionality, and one can also use
+LVM for that (with a little fs support), so snapshots don't seem to be
+a good use and justification of reflink().
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332396/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332663"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There are better ways to snapshotting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2009 0:05 UTC (Sun)
+                               by <b>butlerm</b> (subscriber, #13312)
+                              [<a href="/Articles/332663/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One of the advantages of ZFS style snapshotting is it is a constant time <br>
+operation that is far more efficient than walking a directory tree and <br>
+creating thousands of new inodes.  It doesn't work for making a (writable) <br>
+snapshot of a snapshot, however, and that is a very important use case for <br>
+virtualization, for example.<br>
+<p>
+Copy-on-write filesystems could use a good interface (like this one) to make <br>
+efficient *copies* of files in the same (extended) filesystem.  That is <br>
+something that ZFS and BTRFS both appear to lack, and which for portability <br>
+reasons is easy to downgrade to an ordinary file copy.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332663/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332701"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There are better ways to snapshotting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2009 18:36 UTC (Sun)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/332701/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+One of the advantages of ZFS style snapshotting is it is a constant time
+operation that is far more efficient than walking a directory tree and
+creating thousands of new inodes. It doesn't work for making a (writable)
+snapshot of a snapshot, however
+</blockquote>
+
+That may be a limitation of ZFS, but it's not a necessary limitation.
+<a href="http://www.complang.tuwien.ac.at/anton/llfs/">LLFS</a> can do
+it, and nothing I have read about Btrfs indicates that it cannot do
+it.
+
+<blockquote>
+Copy-on-write filesystems could use a good interface (like this one) to make
+efficient *copies* of files in the same (extended) filesystem.
+</blockquote>
+
+Yes, implementing cp more efficiently seems to be the main benefit I
+see from this system call.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332701/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor332727"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">There are better ways to snapshotting</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2009 5:22 UTC (Mon)
+                               by <b>butlerm</b> (subscriber, #13312)
+                              [<a href="/Articles/332727/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Netapp does writable snapshots of writable snapshots. The advantage of the <br>
+ZFS scheme is you can have an unlimited number of snapshots, where with <br>
+Netapp these days I believe you get 256.<br>
+<p>
+The ZFS scheme is based on logical sequence numbers, Netapp uses block maps. <br>
+I understand that BTRFS allows nested writable snapshots, but that comes at a <br>
+general performance cost that ZFS doesn't have.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/332727/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor333319"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">different API</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 14, 2009 21:12 UTC (Thu)
+                               by <b>mslusarz</b> (guest, #58587)
+                              [<a href="/Articles/333319/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It would be more general and powerful to reflink (or clone or ...) only part of file. API could probably look like splice.<br>
+<p>
+long splice(int fd_in, loff_t *off_in, int fd_out, loff_t *off_out, size_t len, unsigned int flags);<br>
+<p>
+So don't add new syscall. Implement splice for two descriptors on one filesystem!<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/333319/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2009, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

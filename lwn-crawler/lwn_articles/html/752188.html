@@ -1,0 +1,594 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Zero-copy TCP receive [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/752188/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/752301/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/752188/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Zero-copy TCP receive</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 19, 2018</br>
+           </div>
+In the performance-conscious world of high-speed networking, anything that
+can be done to avoid copying packet data is welcome.  The <a
+href="/Articles/726917/"><tt>MSG_ZEROCOPY</tt> feature</a> added in 4.14
+enables zero-copy transmission of data, but does not address the receive
+side of the equation.  It now appears that the 4.18 kernel will include <a
+href="/Articles/752046/">a zero-copy receive mechanism</a> by Eric Dumazet
+to close that gap, at least for some relatively specialized applications.
+<p>
+Packet reception starts in the kernel with the allocation of a series of
+buffers to hold packets as they come out of the network interface.  As a
+general rule, the kernel has no idea what will show up next from the
+interface, so it cannot know in advance who the intended recipient of the
+next packet to arrive in a given buffer will be.  An implementation of
+zero-copy reception will thus have to map these packet buffers into
+user-space memory after the packets come in and are associated with
+an open socket.
+<p>
+That, in turn, implies a set of constraints that must be met.  Mapping of
+memory into a process's address space is done on a per-page granularity;
+there is no way to map a fraction of a page.  So inbound network data must
+be both page-aligned and page-sized when it ends up in the receive buffer,
+or it will not be possible to map it into user space.
+Alignment can be a bit tricky because
+the packets coming out of the interface start with the protocol headers,
+not the data the receiving process is interested in.  It is the <i>data</i>
+that must be aligned, not the headers.  Achieving this alignment is
+possible, but it requires cooperation from the network interface; in
+particular, it is necessary to use a network interface that is capable of
+splitting the packet headers into a different buffer as the packet comes
+in.
+<p>
+It is also necessary to ensure that the data arrives in chunks that are a
+multiple of the system's page size, or partial pages of data will result.
+That can be done by setting the maximum transfer unit (MTU) size properly
+on the interface.  That, in turn, can require knowledge of exactly what the
+incoming packets will look like; in a test
+program <a href="/Articles/752197/">posted</a> with the patch set, Dumazet
+sets the MTU to 61,512. 
+That turns out to be space for fifteen 4096-byte pages of data, plus
+40&nbsp;bytes for the IPv6 header and 32&nbsp;bytes for the TCP header.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+The core of Dumazet's patch set is the implementation of <a
+href="http://man7.org/linux/man-pages/man2/mmap.2.html"><tt>mmap()</tt></a>
+for TCP sockets.  Normally, using <tt>mmap()</tt> on something other than
+an ordinary file creates a range of address space that can be used for
+purposes like communicating with a device.  When it is called on a TCP
+socket, though, the behavior is a bit different.  If the conditions are met
+(the next incoming data chunk is page-sized and page-aligned), the
+buffer(s) containing that data will be mapped into the calling process's
+address space, where it can be accessed directly.  This operation also has
+the effect of consuming the incoming data, much as if it had been obtained
+with <tt>recvmsg()</tt> instead.  That is, needless to say, an unusual side
+effect from an <tt>mmap()</tt> call.
+<p>
+When the incoming data has been processed, the process should call
+<tt>munmap()</tt> to release the pages and free the buffer for another
+incoming packet.
+<p>
+If things are not just right (there is only a partial page of data
+available, for example, or that data is not page-aligned), the
+<tt>mmap()</tt> call will fail, returning <tt>EINVAL</tt>.  That will also
+happen if there is urgent data in the pipeline.  In such cases, the call
+does not consume the data, and the application must fall back to
+<tt>recvmsg()</tt> to obtain it.
+<p>
+It has long been conventional wisdom in the kernel community that zero-copy
+schemes dependent on memory-mapping tricks will struggle to outperform
+implementations that simply copy the data.  There is quite a bit of
+overhead involved in setting up and tearing down these mappings.  Indeed,
+Dumazet cautioned in the patch introduction that there may not be a benefit
+if the application uses a lot of threads, since the contention for the
+<tt>mmap_sem</tt> lock will become too expensive.  But it is still natural
+to wonder if performing zero-copy packet reception in this way is worth the
+trouble. 
+
+<p>
+One way of reducing the cost would be to not call <tt>mmap()</tt> until
+several pages of data are available to be consumed, so that they can all be
+mapped in a single batch.  The network stack
+provides a way to request that the application not be notified until a
+certain amount of data is pending in the form of the <tt>SO_RCVLOWAT</tt>
+option.  That said, the <a
+href="http://man7.org/linux/man-pages/man7/socket.7.html"><tt>socket()</tt>
+man page</a> cautions:
+<P>
+<div class="BigQuote">
+	The select(2) and poll(2) system calls currently do not respect the
+        SO_RCVLOWAT setting on Linux, and mark a socket readable when even
+        a single byte of data is available.  A subsequent read from the
+        socket will block until SO_RCVLOWAT bytes are available.
+</div>
+<p>
+That shortcoming would make <tt>SO_RCVLOWAT</tt> useless for this
+purpose.  That problem appears to <a
+href="https://git.kernel.org/linus/c7004482e8dc">to have been fixed</a> in
+2008 for the 2.6.28 kernel, though, so the man page is a bit behind the
+times.  Even so, there were still some shortcomings with
+<tt>SO_RCVLOWAT</tt>, including spurious wakeups, that Dumazet fixed as a
+part of this series.
+<p>
+In some benchmark results posted with <a href="/Articles/752207/">the core
+patch</a>, Dumazet shows some impressive improvements in packet-processing
+performance — from 129µs/MB to just 45µs/MB.  Naturally, this is a tuned
+test running in a controlled setting, but it shows that there are indeed
+benefits to be had.  Those benefits will be generally available before too
+long; networking maintainer Dave Miller has <a
+href="/Articles/752208/">applied</a> the series for the 4.18 merge window.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Networking-Performance">Networking/Performance</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/752188/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor752357"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 2:26 UTC (Fri)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/752357/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wouldn’t it be better (faster and saner) to mmap a magic region for zero copy reception and then use ioctl to materialize the data into it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752357/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752361"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 2:47 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/752361/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The underlying memory map would still need to change each time, to avoid copying the underlying pages. That said, using mmap repeatedly for this does seem quite strange.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752361/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752392"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 15:06 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/752392/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Right. An ioctl could at least return a proper error code (say, EAGAIN), and there's precedent for an ioctl consuming data. There's no precedent for mmap being destructive!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752392/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752416"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 16:55 UTC (Fri)
+                               by <b>ejr</b> (subscriber, #51652)
+                              [<a href="/Articles/752416/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, I'd expect something more along the lines of vmsplice(..., SPLICE_F_GIFT).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752416/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor752362"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 3:46 UTC (Fri)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/752362/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It might be worth comparing this to how PF_PACKET sockets works with mmap.<br>
+<p>
+Those I believe implement a shared ring buffer between kernel and user space.  Something like that might be possible.<br>
+<p>
+TCP is a little different though as you are seeing the abstraction.  With I think tcp segment offload or the ingress equivalent I think it is very likely you will get the kind of packets needed in this case.  <br>
+<p>
+Doing anything more complicated (aka a ring buffer) I suspect would be quite a bit harder to implement and more fragile than what has been implemented here.  As this sounds like it is just taking packets right out of the existing packet queue.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752362/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752365"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 7:04 UTC (Fri)
+                               by <b>k8to</b> (guest, #15413)
+                              [<a href="/Articles/752365/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ring buffers are pretty efficient for some patterns of data passing, but I don't see how you could do a zero-copy ring buffer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752365/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752393"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 15:08 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/752393/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; TCP is a little different though as you are seeing the abstraction. With I think tcp segment offload or the ingress equivalent I think it is very likely you will get the kind of packets needed in this case. </font><br>
+<p>
+Another possibility is just mapping the entire packet into the user-mode ring buffer and letting userspace skip over the embedded protocol headers --- sort of as a hybrid between a conventional network stack and a user-space network stack. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752393/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752430"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 20:04 UTC (Fri)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/752430/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Could showing the header data to userspace conceivably introduce a security hole?  It might be better to zero out those bytes (once the kernel has finished with them of course) before handing the page over to userspace.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752430/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752444"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 21, 2018 6:35 UTC (Sat)
+                               by <b>cladisch</b> (<b>&#x272D; supporter &#x272D;</b>, #50193)
+                              [<a href="/Articles/752444/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Another possibility is just mapping the entire packet into the user-mode ring buffer</font><br>
+<p>
+The FireWire driver does this for isochronous packets.<br>
+<p>
+<font class="QuotedText">&gt; and letting userspace skip over the embedded protocol headers</font><br>
+<p>
+The FireWire host controller interface is standardized and must support scatter+gather, so the driver can instruct it to write the header words into another buffer so that only the actual data bytes end up in the mmap buffer. This requires that the header size is fixed and 32-bit aligned, so doing the same for a TCP/IP interface would require more flexible hardware support.<br>
+<p>
+There is also a mode that dumps everything into the buffer, where the application has to parse out the packet metadata and headers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752444/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor752382"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 12:56 UTC (Fri)
+                               by <b>post-factum</b> (subscriber, #53836)
+                              [<a href="/Articles/752382/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Would speculative page faults patchset be able to address the contention for the mmap_sem lock?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752382/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752415"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 16:49 UTC (Fri)
+                               by <b>alkbyby</b> (subscriber, #61687)
+                              [<a href="/Articles/752415/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is a little odd to see such unusual band controversial change that also introduces new API, to be merged so quickly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752415/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752470"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 22, 2018 12:51 UTC (Sun)
+                               by <b>jmichels</b> (guest, #98352)
+                              [<a href="/Articles/752470/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wouldn't this also have to out perform kernel bypass functionality offered by vendors such as Solar Flare?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752470/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752487"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 23, 2018 2:18 UTC (Mon)
+                               by <b>sbates</b> (subscriber, #106518)
+                              [<a href="/Articles/752487/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well I’d assume these proposed patches are for a variety of NICs from multiple vendors. The SolarFlare stuff is (I assume) specific to their NICs. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752487/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor752825"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Zero-copy TCP receive</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2018 9:19 UTC (Thu)
+                               by <b>amarao</b> (subscriber, #87073)
+                              [<a href="/Articles/752825/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I may be naive, but I feel that hiding headers for any zero copy application is useless and adds compexity. Kernel can instead put a whole packet 'as is' into userspace memory and provide two 'data start/data end' pointers for each packet to help application to ignore headers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752825/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

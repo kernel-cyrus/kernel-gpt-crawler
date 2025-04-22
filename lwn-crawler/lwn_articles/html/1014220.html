@@ -1,0 +1,563 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>MM medley: huge page allocation, page promotion, KSM, and BPF [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/1014220/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/1014882/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/1014220/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>MM medley: huge page allocation, page promotion, KSM, and BPF</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 20, 2025</br>
+           </div>
+As the <a href="https://events.linuxfoundation.org/lsfmmbpf/">2025 Linux
+Storage, Filesystem, Memory-Management, and BPF Summit</a> (LSFMM+BPF)
+approaches, the density of memory-management patches on the mailing lists
+has increased.  Included among those are patches aimed at improving the
+reliability and performance of huge-page allocation, implementing page
+promotion on tiered-memory systems, adding a different approach to
+deduplicating memory, and replacing the BPF memory allocator.  Read on for
+an overview of each.
+
+<p>
+<h4>Reliable huge-page allocation</h4>
+<p>
+The use of huge pages — of various sizes — is increasingly important to the
+overall performance of many, if not most, systems.  If memory fragmentation
+prevents the kernel from allocating huge pages, performance will suffer.
+While quite a bit of progress in avoiding and fixing fragmentation has been
+made over the years, the ability to allocate huge pages still decreases
+over the lifetime of the system.  Johannes Weiner has been slowly working
+on <a href="/ml/all/20250313210647.1314586-1-hannes@cmpxchg.org">a patch
+series</a> to improve the situation for a couple of years now; the changes
+made are relatively small, but their impact may be quite a bit larger.
+<p>
+The kernel's page allocator tracks the "migration type" of each request;
+that type describes how easily a given page of data could be moved
+elsewhere in physical memory if it turns out to be in the way.  The <a
+href="https://elixir.bootlin.com/linux/v6.13.6/source/include/linux/mmzone.h#L48"><tt>migratetype</tt>
+enum</a> describes these types: whether pages can be moved or easily
+reclaimed, for example, or whether they are fixed in place.  The kernel
+divides physical memory into contiguous groups called "page blocks",
+typically holding 512&nbsp;pages; each page block has an associated
+migration type, and only compatible allocations are meant to happen from
+each page block.  The intent is to group all of the unmovable pages
+together, preventing situations where one unmovable page prevents the
+defragmentation of a large block of memory.
+<p>
+While the page allocator tries to avoid allocating unmovable pages in
+movable page blocks, it also tries to avoid performing reclaim and
+compaction while a caller is requesting memory.  An allocation request that
+starts either direct reclaim or compaction will do a lot of work before
+returning the asked-for memory, creating latency where it might not be
+welcome.  In current kernels, the page allocator will give up and allocate
+from a page block with the wrong migration type before trying more
+expensive remedies.
+<p>
+Weiner has concluded that those remedies are only more expensive in the
+short term, though, since misplaced allocations create fragmentation that
+may last until the system reboots.  So his series starts by introducing a
+new "defrag mode" that can be enabled via a sysctl knob.  When this mode is
+enabled, reclaim and compaction will be attempted before falling back to
+allocating from a page block with the wrong migration type.  Benchmark
+results shown in <a
+href="/ml/all/20250313210647.1314586-4-hannes@cmpxchg.org">this patch</a>
+demonstrate that, with this mode enabled, the success rate for huge-page
+allocation no longer degrades over time.
+<p>
+They also show, though, that the success rate starts at a much lower level
+than with current kernels and stays there.  Two more changes are needed to
+bring the success rate to a level above what a freshly booted current
+kernel can achieve, and to keep it there.  <a
+href="/ml/all/20250313210647.1314586-5-hannes@cmpxchg.org">The first</a> is
+a small change to instruct the <tt>kswapd</tt> and <tt>kcompactd</tt>
+kernel threads to try to create page-block-sized chunks of free memory
+rather than being content with smaller successes; that makes more full page
+blocks available for allocation as huge pages.  The <a
+href="/ml/all/20250313210647.1314586-6-hannes@cmpxchg.org">other change</a>
+raises the bar for the number of free page blocks that those kernel threads
+aim to create.
+<p>
+The end result is a much higher success rate for the allocation of
+transparent huge pages, and a lower allocation latency as well.  The
+results look good, but changes like these have the potential to create
+performance regressions in other types of workloads.  So rather wider
+testing of this work is likely to be needed before the memory-management
+community will feel confident about merging it.
+<!-- middle-ad -->
+<p>
+<a name="hotpage"></a>
+<h4>Hot-page promotion</h4>
+<p>
+In tiered-memory systems — those with memory having different performance
+characteristics — the kernel must constantly strive to keep the right pages
+in the right types of memory.  Usually, that means placing frequently
+accessed ("hot") data in the fastest memory that is closest to the workload
+using it, while less-frequently accessed ("cold") data can be relegated to
+slower, more distant memory.
+<p>
+One problem with this approach is that it can be hard to determine how hot
+a given page is.  Detecting memory that has not been accessed for a while
+is relatively easy, so demoting cold pages to slower memory can be made to
+work fairly well.  The promotion problem, which requires determining which
+data in slow memory is sufficiently actively used to merit migration to
+faster memory, is somewhat harder.
+<p>
+The latest attempt at solving the promotion problem is <a
+href="/ml/all/20250306054532.221138-1-bharata@amd.com">this series</a> from
+Bharata B Rao, which is built on the idea that the number of sources of
+information on data hotness is growing over time.  Classic methods, such as
+scanning memory and checking the "accessed" bit maintained by the hardware
+remain.  But newer technologies, including AMD's <a
+href="https://github.com/jlgreathouse/AMD_IBS_Toolkit">Instruction Based
+Sampling</a> (IBS) and monitoring provided by <a
+href="https://en.wikipedia.org/wiki/Compute_Express_Link">CXL</a> memory,
+are coming as well.  What is needed is a way to gather and use all of this
+information to promote the hottest pages to faster memory.
+<p>
+Rao's patch set adds a new function that can be used by any subsystem that
+knows something about memory access:
+<p>
+<pre>
+    int kpromoted_record_access(u64 pfn, int nid, int src, unsigned long time);
+</pre>
+<p>
+This call tells the kernel the memory indicated by the page-frame number
+<tt>pfn</tt> has just been accessed from the NUMA node indicated by
+<tt>nid</tt>.  The source of the information is provided by <tt>src</tt>,
+and <tt>time</tt> is the time of the access, in jiffies.  Sources are
+represented by macros like <tt>KPROMOTED_HW_HINTS</tt> for
+hardware-provided access information, or <tt>KPROMOTED_PGTABLE_SCAN</tt>,
+for access information obtained by scanning the page tables.  The return
+value is either zero or an error code indicating whether the call was able
+to record the access information. What the caller is meant to do with that
+information is not clear; the <a
+href="/ml/all/20250306054532.221138-4-bharata@amd.com">IBS driver</a>
+included in the patch set ignores it.
+<p>
+Access data is stored in a hash table, keyed by the page-frame number.
+This storage looks expensive, with a fair amount of data being maintained
+for each page in the system.  The consumer of this data is a new kernel
+thread called <tt>kpromoted</tt>; it uses an algorithm that Rao describes
+as "<q>pretty primitive</q>" to promote pages that appear to be hot — those
+that have been accessed a minimum number of times (twice in the current
+patch) within the last&nbsp;5ms.
+<p>
+Much of the code in this series is, by Rao's admission, fairly rudimentary.
+The purpose at this point is not to provide a polished subsystem for
+merging; instead, it is to try to get a sense for whether the overall
+approach is viable.  Most of the comments so far have focused on details,
+but Jonathan Cameron <a
+href="/ml/all/20250314152850.00003112@huawei.com/">pointed out</a> that CXL
+memory providers will be able to provide much of the information that this
+patch set is working to create by aggregating individual events.  Using
+that data, he suggested, may give good-enough results without needing all
+of the storage required by Rao's approach.
+<p>
+<a name="ksm"></a>
+<h4>Simpler KSM</h4>
+<p>
+The <a href="https://docs.kernel.org/admin-guide/mm/ksm.html">kernel
+samepage merging (KSM) mechanism</a> was designed to improve memory
+utilization by detecting pages of memory with identical contents, then
+arranging for a single page to be shared while freeing the duplicates.
+Those pages may be shared across processes that are entirely unaware of
+each other; the shared memory is (if writable) marked copy-on-write,
+causing the sharing to be broken should one process write to a shared
+page.  KSM can free a fair amount of memory for other uses, but it has
+never been used as heavily as might have been imagined.  Its page scanning
+requires CPU time, it requires some fiddly tuning to match the workload,
+and it raises security concerns since it can be used to determine whether a
+page with a given content exists elsewhere in the system.
+<p>
+Mathieu Desnoyers has recently posted <a
+href="/ml/all/20250228023043.83726-1-mathieu.desnoyers@efficios.com">a
+simplified KSM-like functionality</a> that he calls "Synchronous KSM"
+(SKSM).  It is aimed at a specific, seemingly niche use case, though it
+should be applicable more widely.  Desnoyers is working to make run-time
+code patching more common in user space.  Code patching is heavily used in
+the kernel to take advantage of the optimal instructions for the detected
+CPU, enable or disable features without the need for run-time tests, enable
+or disable tracepoints, and more.  Desnoyers is looking to bring more of
+these techniques to user space.
+<p>
+The problem with run-time code patching is that it breaks the sharing that
+normally happens with executable code.  If many processes are running the
+same program, they will normally share a single copy of its text; code
+patching will break that sharing, even if every process patches its code in
+the same way.  That increases memory use and decreases cache locality,
+taking away the performance that these techniques are meant to bring in the
+first place.
+<p>
+SKSM is meant to allow processes, with an explicit opt-in, to restore the
+sharing of these pages after they have patched them.  A call to <a
+href="https://man7.org/linux/man-pages/man2/madvise.2.html"><tt>madvise()</tt></a>
+with the <tt>MADV_MERGE</tt> operation will set up this sharing for the
+indicated memory range.  Significantly, that range is scanned immediately,
+and any sharing established, in the <tt>madvise()</tt> call itself.  There
+is no kernel thread scanning memory looking for sharing opportunities after
+the fact.  As a result, the overhead imposed by SKSM happens entirely at
+initialization time; after that, its job is done.
+<p>
+Linus Torvalds <a
+href="/ml/all/CAHk-=wgedRzDqOLhbOnvziVHZm9jtGOrT4GJEqA9etJDwTQ5Mg@mail.gmail.com/">responded</a>
+to the posting by saying that he had no interest in allowing a second KSM
+implementation into the kernel, but "<q>if the feeling is that this can
+*replace* the current horror that is KSM, I'm a lot more interested</q>".
+He <a
+href="/ml/all/CAHk-=wi5-+P49c3NPeZB_qrNyOtAJS3YadHB0q7J3eZ3UUwrjw@mail.gmail.com/">admitted</a>
+that he didn't know who was using KSM now, and worried that it might work
+well in specific cloud environments and, as a result, cannot be removed.
+David Hildenbrand <a
+href="/ml/all/e110e00f-9032-43ec-808e-45a912065fb0@redhat.com/">said</a>
+that KSM is mostly used in private clouds, where it can be "<q>very
+efficient</q>", but that its use in public clouds is strongly discouraged
+due to the associated security concerns.
+<p>
+As a result, it is not clear that SKSM is going anywhere.  The existing KSM
+functionality, for all its faults, does seem to work for some users, so its
+removal would not be greeted with universal acclaim.  Unless SKSM can
+somehow be made to fill in for KSM, there may simply not be a place for it
+in the mainline kernel.
+<p>
+<a name="bpf"></a>
+<h4>Edging out the BPF allocator</h4>
+<p>
+BPF programs can run in almost any context, including within interrupt
+handlers and even in handlers for non-maskable interrupts (NMIs), where the
+ability to take locks is severely constrained.  That can make allocating
+memory in those programs challenging.  The <a href="/Articles/899274/">BPF
+memory allocator</a> was introduced in the 6.1 development cycle as a way
+for BPF programs to (attempt to) allocate memory in any possible execution
+context.  It works by maintaining its own pool of memory that can be dipped
+into, without taking locks, when the need arises.  This allocator works,
+but it operates independently of the memory-management subsystem and is
+counter to the ongoing effort to reduce the number of memory allocators in
+the kernel.  One of the goals <a href="/Articles/974138/">discussed</a> at
+the 2024 LSFMM+BPF gathering was the desire to bring allocation for BPF
+programs back into the memory-management core.
+<p>
+Alexei Starovoitov has been working on that project; his work so far was <a
+href="/ml/all/20250222024427.30294-1-alexei.starovoitov@gmail.com">posted
+in its ninth revision</a> in late February.  It adds a new allocation
+function:
+<p>
+<pre>
+    struct page *try_alloc_pages(int nid, unsigned int order);
+</pre>
+<p>
+This function is safe to call in any context.  In more constrained
+contexts, this function will attempt to grab the number of desired pages
+(indicated by <tt>order</tt>) from the per-CPU free list maintained for the
+given NUMA node ID (<tt>nid</tt>).  Failing that, it will attempt to take the
+suitable per-zone lock and acquire the memory directly from the buddy
+allocator.  It is only an attempt, though; if the lock is not available,
+the allocator will fail the request rather than wait for it.  As a result,
+<tt>try_alloc_pages()</tt> has a relatively high likelihood of failure, and
+callers must be prepared to do without the requested memory.
+<p>
+There is also a new <tt>free_pages_nolock()</tt> function that can release
+pages back to the system without taking any locks in contexts where that is
+not possible.
+This patch set does not go as far as removing the BPF-specific allocator,
+though it does provide much of the infrastructure that will be needed to
+complete that step.
+<p>
+Andrew Morton initially <a
+href="/ml/all/20250310190427.32ce3ba9adb3771198fe2a5c@linux-foundation.org">resisted</a>
+this work, worrying that the extra maintenance burden it would impose on
+the core page allocator was not justified by the benefits it would provide.
+Starovoitov <a
+href="/ml/all/CAADnVQJsYcMfn4XjAtgo9gHsiUs-BX-PEyi1oPHy5_gEuWKHFQ@mail.gmail.com">reminded
+him</a> of last year's discussion, adding that moving this functionality
+back into the memory-management subsystem would eliminate the wasted memory
+sitting in the BPF allocator.  Slab maintainer Vlastimil Babka <a
+href="/ml/all/4d75c5a8-a538-4d7d-aaf4-8ecf1d1be6b9@suse.cz/">added his
+support</a>.  Morton resisted no further, and these changes are currently
+sitting in linux-next, with a probable merge into the mainline happening
+for the 6.15 release.
+<p>
+<h4>Stay tuned</h4>
+<p>
+The 2025 LSFMM+BPF gathering begins on March&nbsp;24 in Montreal, Canada.  Many,
+if not all, of the above topics are likely to see further discussion there.
+LWN, of course, will be there; keep an eye on these pages for our reporting
+from the conference.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#BPF-Memory_management">BPF/Memory management</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Huge_pages">Memory management/Huge pages</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Kernel_samepage_merging">Memory management/Kernel samepage merging</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Tiered-memory_systems">Memory management/Tiered-memory systems</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/1014220/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor1015015"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">KSM can be useful</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 21, 2025 7:28 UTC (Fri)
+                               by <b>bugfood</b> (subscriber, #124228)
+                              [<a href="/Articles/1015015/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm running KSM on a private KVM tier, and I get ~16-19% memory usage reduction per host.<br>
+<p>
+I have disabled merging across NUMA nodes, or else the savings would be even higher.<br>
+<p>
+The ksmd process is only using ~4-6% of a CPU core. That seems like a good tradeoff, at least for me. The benefits can vary for different use cases, though.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1015015/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1015017"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about dynamic stacks?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 21, 2025 8:09 UTC (Fri)
+                               by <b>linusw</b> (subscriber, #40300)
+                              [<a href="/Articles/1015017/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The most exciting work for me in the MM area is last years discussion around dynamic stack allocation that was covered by LWN here:<br>
+<a href="https://lwn.net/Articles/974367/">https://lwn.net/Articles/974367/</a><br>
+<p>
+Can we expect this to come up again this year, progress reports, or did the developers give up on it? I can't see any patches flying since Pasha's RFC 1 year ago.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1015017/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor1015024"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about dynamic stacks?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 21, 2025 9:36 UTC (Fri)
+                               by <b>vbabka</b> (subscriber, #91706)
+                              [<a href="/Articles/1015024/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hm I don't recall such proposal for this year nor can see it in the schedule.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1015024/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor1015149"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Embedded Usage</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 22, 2025 7:47 UTC (Sat)
+                               by <b>PengZheng</b> (subscriber, #108006)
+                              [<a href="/Articles/1015149/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; He admitted that he didn't know who was using KSM now, and worried that it might work well in specific cloud environments and, as a result, cannot be removed. David Hildenbrand said that KSM is mostly used in private clouds, where it can be ""very efficient"", but that its use in public clouds is strongly discouraged due to the associated security concerns. </span><br>
+<p>
+I can confirm that KSM is also widely used in low-cost embedded devices.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1015149/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1016397"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">KSM is working for me!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2025 15:54 UTC (Thu)
+                               by <b>slazzaris</b> (guest, #151681)
+                              [<a href="/Articles/1016397/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have a proxmox box rented from a cloud provider, with a lot of MVs that I use to test our software on different distros.<br>
+<p>
+That machine has 64GB of memory, and KSM let me save 18GB of them. Without KSM I'd need to upgrade to a (much more expensive) 128GB machine.<br>
+<p>
+So definitively KSM forks for me<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016397/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor1016528"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">KSM for testing network topologies</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2025 20:06 UTC (Fri)
+                               by <b>lobo</b> (subscriber, #92524)
+                              [<a href="/Articles/1016528/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+KSM is quite useful for testing network operating systems and network topologies. In this use-case you usually run multiple identical VMs of a network operating system.<br>
+<p>
+Containerlab as one of the open source tools in this space, has also a section for KSM in its manual: <a href="https://containerlab.dev/manual/vrnetlab/#memory-optimization">https://containerlab.dev/manual/vrnetlab/#memory-optimiza...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/1016528/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2025, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

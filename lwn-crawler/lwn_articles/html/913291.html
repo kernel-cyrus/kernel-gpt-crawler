@@ -1,0 +1,395 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Two performance-oriented patches: epoll and NUMA balancing [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/913291/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/913642/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/913291/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Two performance-oriented patches: epoll and NUMA balancing</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 4, 2022</br>
+           </div>
+The search for better performance from the kernel never ends.  Recently
+there has been a stream of smaller patches that promise incremental
+performance gains, at least for some types of applications.  Read on for an
+overview of two of those patches, which make changes to the epoll system
+calls and to NUMA balancing.  This work shows where developers are looking
+for performance improvements — and that not everybody measures performance
+the same way.
+
+<p>
+<h4>An epoll optimization</h4>
+<p>
+The <a href="https://man7.org/linux/man-pages/man7/epoll.7.html">epoll</a>
+family of system calls is aimed at event-loop applications that manage
+large numbers of file descriptors.  Unlike <a
+href="https://man7.org/linux/man-pages/man2/poll.2.html"><tt>poll()</tt></a>
+or <a
+href="https://man7.org/linux/man-pages/man2/select.2.html"><tt>select()</tt></a>,
+epoll allows the per-file-descriptor setup be performed once (with
+<a
+href="https://man7.org/linux/man-pages/man2/epoll_ctl.2.html"><tt>epoll_ctl()</tt></a>);
+the result can then be used with multiple <a
+href="https://man7.org/linux/man-pages/man2/epoll_wait.2.html"><tt>epoll_wait()</tt></a>
+calls to poll for new events.  That reduces the overall polling overhead
+significantly, especially as the number of file descriptors being watched
+grows.  The epoll system calls add some complexity, but for applications
+where per-event performance matters, it is worth the trouble.
+<p>
+Normally, <tt>epoll_wait()</tt> will block the calling process until at
+least one of the polled file descriptors is ready for I/O.  There is a
+timeout parameter, though, that can be used to limit the time the
+application will remain blocked.  What is lacking, however, is a way to
+specify a <i>minimum</i> time before the <tt>epoll_wait()</tt> call
+returns.  That may not be surprising; as a general rule, nobody wants to
+increase an application's latency unnecessarily, so <tt>epoll_wait()</tt> is
+designed to return quickly when there is something to be done.
+<p>
+Even so,
+<a href="/ml/linux-kernel/20221030220203.31210-1-axboe@kernel.dk/">this
+patch set from Jens Axboe</a> adds this minimum wait time.  It creates a
+new <tt>epoll_ctl()</tt> operation, <tt>EPOLL_CTL_MIN_WAIT</tt>, to specify
+the shortest time that subsequent <tt>epoll_wait()</tt> calls should block
+before returning to user space.  The reasoning behind this seemingly
+counterintuitive capability is to increase the number of events that can be
+returned by each <tt>epoll_wait()</tt> call.  Even with much of the
+setup work taken out, each system call still has a cost.  In situations where
+numerous events can be expected to arrive within a short time period, it
+can make sense to wait for a few of them to show up and only pay the
+system-call cost once.
+<p>
+In other words, an application may want to trade off a bit of latency for
+better throughput overall.  This is seemingly a common use case; as Axboe
+<a href="/ml/linux-kernel/20221030220203.31210-7-axboe@kernel.dk/">put
+it</a>:
+<p>
+<blockquote class="bq">
+	For medium workload efficiencies, some production workloads inject
+	artificial timers or sleeps before calling epoll_wait() to get
+	better batching and higher efficiencies. While this does help, it's
+	not as efficient as it could be.
+</blockquote>
+<p>
+Using this feature, he said, can reduce CPU usage by 6-7%.  Axboe is
+seeking input on the API; specifically, whether the minimum timeout should
+be set once with <tt>epoll_ctl()</tt>, or whether it should instead be
+provided with each <tt>epoll_wait()</tt> call.  This would be a good time
+for potential users to make their preferences known.
+<p>
+<h4>Control over NUMA balancing</h4>
+<p>
+Non-uniform memory access (NUMA) systems are characterized by variable
+RAM access times; memory that is attached to the node on which a given
+thread is running will be faster for that thread to access
+than memory on other nodes in the system.  On such systems, applications
+will thus perform better if their memory is located on the nodes they are
+running on.  To make that happen, the kernel performs NUMA balancing —
+moving pages within the system so that they are resident on the nodes where
+they are actually being used.
+<p>
+NUMA balancing, when done correctly, improves the throughput of the system
+by increasing memory speeds.  But NUMA balancing can also cause short-term
+latency spikes for applications, especially if they incur page faults while
+the kernel is migrating pages across nodes.  The culprit here, <a
+href="/Articles/893906/">as is often
+the case</a>, is contention for the process's <tt>mmap_lock</tt>.  For some
+latency-sensitive applications, that can be a problem; there are,
+seemingly, applications where it is better to pay the cost of suboptimal
+memory placement to avoid being stalled during NUMA balancing.
+<p>
+For such applications, Gang Li has posted <a
+href="/ml/linux-kernel/20221027025302.45766-1-ligang.bdlg@bytedance.com/">a
+patch set</a> adding a new <a
+href="https://man7.org/linux/man-pages/man2/prctl.2.html"><tt>prctl()</tt></a>
+operation, <tt>PR_NUMA_BALANCING</tt>, that can control whether NUMA
+balancing is performed for the calling process.  If that process disables
+NUMA balancing, pages will be left where they are even at the cost of
+longer access times.  Benchmark results included
+in the cover letter show that the performance effects of disabling NUMA
+balancing vary considerably depending on the workload.  This feature will
+not be useful for many applications, but there are seemingly some that will
+benefit.
+<p>
+The kernel development community tries hard to minimize the number of
+tuning knobs that it adds to the kernel.  Each of those knobs is a
+maintenance burden for the community but, more importantly, tuning knobs
+are a burden for application developers and system administrators as well.
+It can be difficult for those users to even discover all of the parameters
+that are available, much less set them for optimal performance.  It is
+better for the kernel to tune itself for the best results whenever
+possible.
+<p>
+Patches like the above show that this self-tuning is not always possible,
+at least in the current state of the art.  Achieving the best performance
+for all applications gets harder when different applications need to
+optimize different metrics.  Thus, one of these patches allows developers
+to prioritize throughput over latency, while the other does the opposite.
+This diversity of requirements seemingly ensures that anybody wanting to
+get that last bit of performance out of their application will continue to
+need to play with tuning knobs.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Epoll">Epoll</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-NUMA_systems">Memory management/NUMA systems</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#NUMA">NUMA</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/913291/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor913885"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Two performance-oriented patches: epoll and NUMA balancing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 4, 2022 18:02 UTC (Fri)
+                               by <b>slyfox</b> (subscriber, #112855)
+                              [<a href="/Articles/913885/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+EPOLL_CTL_MIN_WAIT idea sounds very close to <a href="https://en.wikipedia.org/wiki/Nagle%27s_algorithm">https://en.wikipedia.org/wiki/Nagle%27s_algorithm</a> from TCP land.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/913885/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor913919"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Two performance-oriented patches: epoll and NUMA balancing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 5, 2022 14:47 UTC (Sat)
+                               by <b>jazzy</b> (subscriber, #132608)
+                              [<a href="/Articles/913919/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It might also be seen as a workaround for epolls readiness reporting when you actually want to know when all your data has arrived like IOCP provides.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/913919/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor913945"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Two performance-oriented patches: epoll and NUMA balancing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 5, 2022 23:01 UTC (Sat)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/913945/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;whether the minimum timeout should be set once with epoll_ctl(), or whether it should instead be provided with each epoll_wait() call.</span><br>
+a global setting sounds like a great way to cause multithreading pain<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/913945/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor913947"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Two performance-oriented patches: epoll and NUMA balancing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 6, 2022 1:10 UTC (Sun)
+                               by <b>xi0n</b> (subscriber, #138144)
+                              [<a href="/Articles/913947/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It’s „global” per epoll fd, and these are typically local to a thread (at least in the common event loop scenarios).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/913947/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor914390"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Two performance-oriented patches: epoll and NUMA balancing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 10, 2022 16:35 UTC (Thu)
+                               by <b>tleb</b> (subscriber, #157207)
+                              [<a href="/Articles/914390/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And it's recommended to avoid sharing epoll fd across threads: <a href="https://idea.popcount.org/2017-02-20-epoll-is-fundamentally-broken-12/">https://idea.popcount.org/2017-02-20-epoll-is-fundamental...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/914390/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor915480"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Two performance-oriented patches: epoll and NUMA balancing</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 19, 2022 17:55 UTC (Sat)
+                               by <b>wtarreau</b> (subscriber, #51152)
+                              [<a href="/Articles/915480/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; And it's recommended to avoid sharing epoll fd across threads</span><br>
+<p>
+Agreed! We did this mistake of sharing epoll in haproxy for its early thread support. That lasted maybe one month before we switched to one poller per thread and never looked back. Shared epoll doesn't scale at all and causes lots of complicated races that you need to take care of in your application. No thanks, never again!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/915480/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,1053 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Toward better NUMA scheduling [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/486858/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/486631/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/486858/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Toward better NUMA scheduling</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 16, 2012</br>
+           </div>
+A non-uniform memory access (NUMA) system is a computer divided into
+"nodes," where each node (which may contain multiple processors) has some
+memory which is local to the node.  All system memory is visible to all
+nodes, but accesses to memory that is not local to the accessing node must
+go over an inter-node bus; as a result, non-local accesses are
+significantly slower.  There is, thus, a real performance advantage to be
+gained by keeping processes and their memory on the same node.
+<p>
+The Linux kernel has had NUMA awareness for some time, in that it
+understands that moving a process from one node to another can be an
+expensive undertaking.  There is also an interface (available via the
+<tt>mbind()</tt> system call) by which a process can request a
+specific allocation policy for its memory.  Possibilities include requiring
+that all allocations happen within a specific set of nodes
+(<tt>MPOL_BIND</tt>), setting a looser "preferred" node
+(<tt>MPOL_PREFERRED</tt>), or asking that allocations be distributed across
+the system (<tt>MPOL_INTERLEAVE</tt>).  It is also possible to use
+<tt>mbind()</tt> to request the active migration of pages from one node to
+another.
+<p>
+So NUMA is not a new concept for the kernel, but, as Peter Zijlstra noted
+in <a href="/Articles/486850/">the introduction to a large NUMA patch
+set</a>, things do not work as well as they could:
+<p>
+<div class="BigQuote">
+	Current upstream task memory allocation prefers to use the node the
+	task is currently running on (unless explicitly told otherwise, see
+	mbind()/set_mempolicy()), and with the scheduler free to move the
+	task about at will, the task's memory can end up being spread all
+	over the machine's nodes.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+	While the scheduler does a reasonable job of keeping short running
+	tasks on a single node (by means of simply not doing the cross-node
+	migration very often), it completely blows for long-running
+	processes with a large memory footprint.
+</div>
+<p>
+As might be expected, the patch set is dedicated to the creation of a
+kernel that does not "completely blow."  To that end, it adds a number of
+significant changes to how memory management and scheduling are done in the
+kernel.
+<p>
+There are three major sub-parts to Peter's patch set.  The first is a
+reworked patch set first <a
+href="http://markmail.org/message/mdwbcitql5ka4uws">posted</a> by Lee
+Schermerhorn in 2010.  These patches change the memory policy mechanism to
+make it easier for the kernel to fix things up after a process's memory has
+been allocated on distant nodes.  "Page migration" is the process of moving
+a page from one node to another without the owning process(es) noticing the
+change.  With Lee's patches, the kernel implements a variation called "lazy
+migration" that does not immediately relocate any pages.  Instead, the
+target pages are simply unmapped from the process's page tables, meaning
+that the next access to any of them will generate a page fault.  Actual
+migration is then done at page fault time.  Lazy migration is a less
+expensive way of moving a large set of pages; only the pages that are
+actually used are moved, the work can be spread over time, and it will be
+done in the context of the faulting process.
+<p>
+The lazy migration mechanism is necessary for the rest of the patch set,
+but it has value on its own.  So the feature is made available to user
+space with the <tt>MPOL_MF_LAZY</tt> flag; it is intended to be used
+with the <tt>MPOL_MF_MOVE</tt> flag, which would otherwise force the
+immediate migration of the affected pages.  There is also a new
+<tt>MPOL_MF_NOOP</tt> flag allowing the calling process to request the
+migration of pages according to the current policy without changing (or
+even knowing) that policy.
+<p>
+With lazy migration, memory distributed across a system as the result of
+memory allocation and scheduling decisions can be slowly pulled back to the
+optimal node.  But it is better to avoid making that kind of mess in the
+first place.  So the second part of the patch set starts by adding the
+concept of a "home node" to a process.  Each process (or "NUMA
+entity" - meaning groups containing a set of processes) is assigned
+a home node at <tt>fork()</tt> time.  The scheduler will then try hard to
+avoid moving a process off its home node, but within bounds: a process will
+still be run on a non-home node if the alternative would be an unbalanced
+system.  Memory 
+allocations will, by default, be performed on the home node, even if the
+process is running elsewhere at the time. 
+<p>
+These policies should minimize
+the scattering of memory across the system, but, with this kind of
+scheduling regime, it is inevitable that, eventually, one 
+node will end up with too many processes and too little memory while others
+are underutilized.  So, sometimes, it will be necessary to rebalance
+things.  When the scheduler notices that long-running tasks are being
+forced away from their home nodes - or that they are having to allocate
+memory non-locally - it will consider migrating them to a new node.
+Migration is not a half-measure in this case; the scheduler will move both
+the process and its memory (using the lazy migration mechanism) to the
+target node.  The move is expensive, but the process (and the system)
+should run much more efficiently once it's done.  It only makes sense for
+processes that are going to be around for a while, though; the patch set
+tries to approximate that goal by only considering processes with at least
+one second of run time for migration.
+<p>
+
+The final piece is a pair of new system calls allowing processes to be put
+into "NUMA groups" that will share the same home node.  If one of them is
+migrated, the entire group will be migrated.  The first system call is:
+<p>
+<pre>
+    int numa_tbind(int tid, int ng_id, unsigned long flags);
+</pre>
+<p>
+This system call will bind the thread identified by <tt>tid</tt> to the
+NUMA group identified by <tt>ng_id</tt>; the <tt>flags</tt> argument is
+currently unused and 
+must be zero.  If <tt>ng_id</tt> is passed as <tt>MS_ID_GET</tt>, the
+system call will, instead, simply return the current NUMA group ID for the
+given thread.  A value of <tt>MS_ID_NEW</tt>, instead, creates a new NUMA
+group, binds the thread to that group, and returns the new ID.
+<p>
+The second new system call is:
+<p>
+<pre>
+    int numa_mbind(void *addr, unsigned long len, int ng_id, unsigned long flags);
+</pre>
+<p>
+This call will set up a memory policy for the region of <tt>len</tt> bytes
+starting at <tt>addr</tt> and bind it to the NUMA group identified by
+<tt>ng_id</tt>.  If necessary, lazy migration will be used to move the
+memory over to the node where the given NUMA group is based.  Once again,
+<tt>flags</tt> is unused and must be zero.  Once the memory is bound to the
+NUMA group, it will stay with the processes in that group; if the processes
+are moved, the memory will move with them.
+<p>
+
+Peter provided some benchmark results from a two-node system.  Without the
+NUMA balancing patches, over time, the benchmark ended up with just as many
+remote memory accesses as local accesses - allocated memory was spread
+across the system.  With the NUMA balancer, 86% of the memory accesses were
+local, leading to a significant speedup.  As Peter put it: "<q>These
+numbers also show that while there's a marked improvement, there's still
+some gain to be had. The current numa balancer is still somewhat
+fickle.</q>"  A certain amount of fickleness is perhaps to be expected
+for such an involved patch set, given how young it is.  Given some time,
+reviews, and testing, it should evolve into a solid scheduler component,
+giving Linux far better NUMA performance than it has ever had in the past.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-NUMA_systems">Memory management/NUMA systems</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#NUMA">NUMA</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Scheduler-NUMA">Scheduler/NUMA</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/486858/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor486902"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Toward better NUMA scheduling</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 16, 2012 19:58 UTC (Fri)
+                               by <b>aliguori</b> (subscriber, #30636)
+                              [<a href="/Articles/486902/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The second system call, in particular, is useful for something like QEMU if you're emulating a guest that's large enough to have multiple virtual NUMA nodes.  It let's QEMU tell the kernel the relevant areas of the guest's memory that corresponds to the virtual NUMA nodes without getting into the business of doing explicit pinning.<br>
+<p>
+Userspace really has no business doing CPU or memory pinning IMHO so I'm glad to see the kernel start to be more proactive here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/486902/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor486946"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memory mirroring?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2012 1:43 UTC (Sat)
+                               by <b>martinfick</b> (subscriber, #4455)
+                              [<a href="/Articles/486946/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if it wouldn't make sense for the kernel to mirror certain pages across the memory of multiple nodes?  In particular I am thinking of FS caches for files opened for read only.  This way commonly used shared libraries, or output files during compiles could end up getting mirrored in memory across all the nodes making the read only accesses much faster.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/486946/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor486947"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memory mirroring?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2012 2:03 UTC (Sat)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/486947/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+under some conditions yes, under others, no :-)<br>
+<p>
+which makes your system faster, having these RO pages be accessed a little faster, or having more data cached in ram so you do less disk I/O?<br>
+<p>
+if your working set will fit in ram with the duplication, then it's a pretty clear (but still smallish) win, if the duplication forces pages of your working set out of ram, then it's a clear loss.<br>
+<p>
+I think you may be mistaking how much of a win this is. There is an improvement in the speed of accessing memory, and even if we say that it's a 2x improvement, it still may not make much practical difference.<br>
+<p>
+remember that accessing memory is already orders of magnitude slower than accessing the data in the CPU cache, so if the memory is a little slower it frequently has less of an effect than you would expect.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/486947/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor486968"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memory mirroring?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2012 8:40 UTC (Sat)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/486968/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><font class="QuotedText">I think you may be mistaking how much of a win this is. There is an improvement in the speed of accessing memory, and even if we say that it's a 2x improvement, it still may not make much practical difference.</font></blockquote>
+
+<p>Note that 2x improvement limit is recent improvement (when you have 8-16 cores in a single CPU you can build quite capable NUMA system with very few CPUs). It's not uncommon for older NUMA systems to have 10x or even 100x difference between access to local memory and remote memory. Not sure if anyone still builds such systems (SGI used to, but it's dead now).</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/486968/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor486980"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memory mirroring?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2012 12:24 UTC (Sat)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/486980/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+True, current NUMA machines are almost all in the category of multi-socket AMD64 systems, which have fast enough interconnects that it's usable if you ignore NUMA ad just treat is as a SMP machine.<br>
+<p>
+Historic NUMA machines had MUCH slower interconnects, the best comparison in moderns systems would be if you were connecting your CPU nodes together with high speed networks.<br>
+<p>
+There are still some people building such machines (I think the current Cray systems are this category), but when you get to interconnects that are that expensive, you are frequently better segmenting the system and running it as if it was a cluster of systems, or (the more common case), just build a cluster of commodity systems instead of the monster NUMA system in the first place.<br>
+<p>
+I think that if AMD hadn't introduced NUMA to the commodity desktop/server with the Opteron, NUMA would be something that's so rare that the overhead and complexity of it's logic wouldn't be acceptable in the kernel.<br>
+<p>
+There are some applications that really are hard to split into a multi-machine cluster, and for those NUMA (including RDMA setups that tie multiple commodity machine together) are the right tool for the task, but they are pretty rare, it's almost always worth re-architecting the application to avoid this requirement.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/486980/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor487038"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memory mirroring?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2012 23:07 UTC (Sat)
+                               by <b>davecb</b> (subscriber, #1574)
+                              [<a href="/Articles/487038/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Quite large systems have large penalties for using distant nodes than small ones: bus backplane latency is not your friend (;-))  Smaller systems with bus lengths in the millimeters don't pay so great a penalty.<br>
+<p>
+For one modern architecture there is a big hit after 32 sockets even when using a backplane derived from Cray's lowest-latency design. The speed of light needs improvement!<br>
+<p>
+Ancient mainframes used a radial design to avoid having to be NUMA, at the expense of having an exceedingly complicated, multi-ported "system controller" where we'd put a bus.<br>
+<p>
+--dave<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/487038/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor487044"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memory mirroring?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2012 0:56 UTC (Sun)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/487044/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; For one modern architecture there is a big hit after 32 sockets</font><br>
+<p>
+32 sockets * 6 (true) cores/socket = 192 core system<br>
+<p>
+at that sort of scale, I'll bet that locking overhead is at least as big a problem as the memory access times.<br>
+<p>
+now, the 'commodity' NUMA keeps creeping up the scale, what is it now, 8 sockets * 6 cores = 48 core systems (*2 or more if you want to include hyperthread 'cores')?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/487044/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor489728"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">you're a bit low....</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 30, 2012 21:55 UTC (Fri)
+                               by <b>cbf123</b> (guest, #74020)
+                              [<a href="/Articles/489728/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Current high-end xeons have 8 "real" cores.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/489728/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor487009"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memory mirroring?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2012 17:13 UTC (Sat)
+                               by <b>arjan</b> (subscriber, #36785)
+                              [<a href="/Articles/487009/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+also note that while latency might be 2x longer due to distance, there are cases where it's more beneficial to actually aggregate the memory bandwidth of local + remote rather than being local only....<br>
+single threaded, highly memory bandwidth bound apps come to mind in this regard.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/487009/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor492663"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memory mirroring?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2012 19:34 UTC (Mon)
+                               by <b>adavid</b> (guest, #42044)
+                              [<a href="/Articles/492663/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      SGI might be dead but <a rel="nofollow" href="http://www.sgi.com/">sgi</a> lives on after Rackable's <a rel="nofollow" href="http://www.sgi.com/company_info/newsroom/press_releases/2009/april/rackable.html">'switcheroo'</a> . SGI NUMA is certainly alive with their Ultraviolet range.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/492663/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor488438"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memory mirroring?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 24, 2012 4:37 UTC (Sat)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/488438/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <P>I was thinking about this earlier.  If you have a page from a shared library (eg. libc), if it's hot enough to be truly important, then multiple tasks will have pulled it into at least the shared L3 on a modern processor.  You don't need further duplication at the NUMA-node level then.</P>
+<P>If the page is shared, but not hot, then the cost of missing on it won't register very highly on the performance of the app, because it's a small portion of its run time.</P>
+<P>So, that leaves us with these weird middle-ground pages that are shared, moderately used (ie. neither hot nor cold, or only hot in sporadic bursts), but their users are so spread out and diffuse that they can't manage to keep copies resident in the onchip caches.  It seems like those will truly benefit from duplication.</P>
+<P>All that said, the crossover thresholds that determine the size and impact of this weird middle ground are a function of the cost of the remote fetch (larger latency/less bandwidth makes this middle-ground window larger) and the size of the last-level-of-cache-before-NUMA (smaller size makes this middle-ground window larger).  Modern systems seem to be working to close this gap from both sides, with increasing L3 sizes, and an emphasis on moderating the chip-to-chip latency while increasing the chip-to-chip bandwidth.</P>
+<P>Or am I thinking about this wrongly?</P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/488438/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor488452"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memory mirroring?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 24, 2012 8:47 UTC (Sat)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/488452/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+you are missing cases where the working set does not all fit in the cache. On large systems (which most NUMA systems tend to be), it's very common for the apps to use lots of memory, and exceed the cache size for their data working set (they may have their hot code fit in the cache, but not all the data that it's manipulating, you can do a lot of processing on each memory address while waiting for the system to prefetch the next hunk of memory without taking any more wall-clock time<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/488452/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor488476"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">memory mirroring?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 24, 2012 15:46 UTC (Sat)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/488476/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think you discount LRU action.  "Working set" in my mind implies read-write, and either private to a process, or at least private to a tree of closely related processes.  (I know that it also should include all the code pages involved, but typically those wouldn't be the thrashy bits.)  That large working set is most likely private and not one of these shared, read-only things.  A large working set will definitely thrash the cache, but will it really thrash all the cache equally?  <br>
+<p>
+That said, library / shared pages still will get referenced at least somewhat regularly by all of the processors on the NUMA node, and so the LRU will prevent the hottest lines from getting evicted.  If you assume non-random replacement (which, unfortunately, you can't with certain recent processors), the hot library pages will remain near the front of the LRU, so only the back of the LRU gets cycled.<br>
+<p>
+(The "unfortunately you can't" comment applies to recent ARM Cortex-A series processors, which have a highly associative shared L2 ("That's good!") with random replacement in lieu of an LRU ("That's bad!").)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/488476/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor487052"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hardware?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2012 11:50 UTC (Sun)
+                               by <b>slashdot</b> (guest, #22014)
+                              [<a href="/Articles/487052/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why isn't page migration done automatically by the hardware, by basically applying a cache protocol to RAM contents as well?<br>
+<p>
+Is it because the added overhead of doing that using generic RAM rather than cache with special hardware (and without just mirroring all RAM) is higher than communicating over the interconnect, or something else?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/487052/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor487055"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hardware?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2012 12:45 UTC (Sun)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/487055/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+the hardware can't do this transparently because the memory addresses of the page would change.<br>
+<p>
+NUMA is still a single-system image, so all the memory on all the nodes is in the same address space. move a page and you have to update all pointers to that page (or the mapping to that page if you go through some level of indirection)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/487055/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor487060"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hardware?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2012 14:34 UTC (Sun)
+                               by <b>slashdot</b> (guest, #22014)
+                              [<a href="/Articles/487060/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The hardware already transparently maps physical addresses to locations in L1, L2, L3 caches or RAM, and moves data between them, without this being software visible, so it's surely possible to do the same among NUMA nodes.<br>
+<p>
+I guess the issue is that the CPU caches include hardware to check all cache lines in a set in parallel for whether they contain a certain address, while DDR3 doesn't, so the CPU would need to do lookup operations manually via extra reads/writes, which might be so expensive that just using the interconnect is faster.<br>
+<p>
+And probably the market for huge NUMA systems isn't big enough to make manufacturing dedicated memory sticks with included caching/migration logic cost-effective.<br>
+<p>
+But this is just a guess, I'm not really sure.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/487060/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor487064"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hardware?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2012 16:53 UTC (Sun)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/487064/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><font class="QuotedText">Why isn't page migration done automatically by the hardware, by basically applying a cache protocol to RAM contents as well?</font></blockquote>
+
+<p>Because it's pointless.</p>
+
+<blockquote><font class="QuotedText">I guess the issue is that the CPU caches include hardware to check all cache lines in a set in parallel for whether they contain a certain address, while DDR3 doesn't, so the CPU would need to do lookup operations manually via extra reads/writes, which might be so expensive that just using the interconnect is faster.</font></blockquote>
+
+<p>DDR3 is not a problem. DMA is. Caches are only “transparent” for userspace programs. Kernel need to perform a complex dance to support system with caches and DMA. And this will be true for your “automatic page migration”, too! This makes the whole exercise totally insane: instead of adding migration logic to kernel (where it can be done transparently from the rest if the system because hardware <b>already</b> includes required logic: it's called <a href="http://en.wikipedia.org/wiki/Virtual_memory">page tables</a>) we add all that complexity to the hardware <b>and</b> then introduce complex dance in the kernel anyway to support DMA. What will it give us? Additional complexity and restrictions? Do not want.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/487064/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor487067"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hardware?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2012 18:15 UTC (Sun)
+                               by <b>slashdot</b> (guest, #22014)
+                              [<a href="/Articles/487067/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+AFAIK no kernel code is needed for operation of the CPU caches, since the BIOS does all the setup (with the exception of marking uncacheable memory ranges on some systems).<br>
+<p>
+As for DMA, surely the system could manage that automatically as well?<br>
+<p>
+That is, IOMMUs would map to the 64-bit automatically managed address space, and the system would move memory for DMA just like it does for CPU access, and just like PCIe DMA is cache coherent for L1/L2/L3, it can be cache-coherent for this hypotetical L4 cache.<br>
+<p>
+To clarify, a simple way to do this is to just add a few gigabytes of per-node L4 cache (in standalone chips), and use the same cache-coherency mechanism for it used for the L3 level.<br>
+<p>
+The advantage could be that memory movement would happen by specialized hardware in parallel with CPU operation.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/487067/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor487068"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hardware?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2012 19:08 UTC (Sun)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/487068/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><font class="QuotedText">AFAIK no kernel code is needed for operation of the CPU caches, since the BIOS does all the setup (with the exception of marking uncacheable memory ranges on some systems).</font></blockquote>
+
+<p>This only true if you don't ever use DMA and don't play tricks with page tables. Since kernel does both it includes <b>huge</b> amount of code which is supposed to keep all the data in sync.</p>
+
+<blockquote><font class="QuotedText">As for DMA, surely the system could manage that automatically as well?</font></blockquote>
+
+<p>To do that it basically needs to virtualize <b>all</b> memory accesses by <b>all</b> devices. Yes, it's doable but it'll slowdown everything and will either hog the <a href="http://en.wikipedia.org/wiki/Intel_VT-x#Intel_virtualization_.28VT-x.29">VT-x</a>/<a href="http://en.wikipedia.org/wiki/AMD-V#AMD_virtualization_.28AMD-V.29">AMD-V</a> or introduce yet another emulation level (which will require specialized CPU or separate emulation chips). Not a good idea: large NUMA systems are <b>exactly</b> where things like KVM are most valuable.</p>
+
+<blockquote><font class="QuotedText">like PCIe DMA is cache coherent for L1/L2/L3</font></blockquote>
+
+<p>Fail. PCIe DMA is <b>not</b> cache coherent for L1/L2/L3. It's resposibility of kernel to make sure everything works correctly despite the fact that IOMMU may have different setup from MMU in CPU and despite the fact that DMA moves data to main memory without bothering to do anything with CPU caches.</p>
+
+<blockquote><font class="QuotedText">To clarify, a simple way to do this is to just add a few gigabytes of per-node L4 cache (in standalone chips), and use the same cache-coherency mechanism for it used for the L3 level.</font></blockquote>
+
+<p>Success. “Cache-coherency mechanism used for the L3 level” is part of OS kernel and yes, it's possible to add transparent handling of memory from different NUMA nodes to it. You don't need anything on hardware level for that - this was my point.</p>
+
+<blockquote><font class="QuotedText">The advantage could be that memory movement would happen by specialized hardware in parallel with CPU operation.</font></blockquote>
+
+<p>Impossible. Contemporary systems attach memory directly to CPU - this means that any such mechanism will slow down <b>regular</b> memory accesses which will probably make the whole schema quite pointless.</p>
+
+<p>Basically this is nice idea which looks fine on paper but requires radical redesign of everything (kernel, CPU, chipset, etc) from the ground up which makes it pointless in practice.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/487068/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor487073"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hardware?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2012 21:20 UTC (Sun)
+                               by <b>slashdot</b> (guest, #22014)
+                              [<a href="/Articles/487073/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; To do that it basically needs to virtualize all memory accesses by all devices</font><br>
+<p>
+Which the hardware already does where IOMMUs are present...<br>
+<p>
+<font class="QuotedText">&gt; Fail. PCIe DMA is not cache coherent for L1/L2/L3</font><br>
+<p>
+Uh?<br>
+<p>
+PCI and PCIe are definitely cache coherent (or more precisely, they support it, although you can tell devices to not snoop caches).<br>
+<p>
+<font class="QuotedText">&gt; Success. “Cache-coherency mechanism used for the L3 level” is part of OS kernel</font><br>
+<p>
+What?!?<br>
+<p>
+This is totally false, and is simply a ridiculous claim.<br>
+<p>
+The cache coherence of L3 caches in x86 SMP systems certainly isn't managed by the kernel!<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/487073/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor487089"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hardware?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 19, 2012 4:21 UTC (Mon)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/487089/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><font class="QuotedText">PCI and PCIe are definitely cache coherent (or more precisely, they support it, although you can tell devices to not snoop caches).</font></blockquote>
+
+<p>PCI does not support it at all (initially it was optional part of the standard but since nobody bothered to implement it later versions just removed it completely) and PCIe does not recommend to use it on large and/or busy systems (and NUMA systems tends to be both large and busy).</p>
+
+<blockquote><font class="QuotedText">Which the hardware already does where IOMMUs are present...</font></blockquote>
+
+<p>Nope. IOMMU only hides physical addresses from <b>hardware devices</b>. OS kernel is in charge and must keep everything in sync. IOMMU presence is quite visible for device drivers. Since you want to make something not visible in kernel at all you need yet another level of indirection.</p>
+
+<blockquote><font class="QuotedText">&gt; Success. “Cache-coherency mechanism used for the L3 level” is part of OS kernel<br /><br />
+What?!?<br /><br />
+This is totally false, and is simply a ridiculous claim.<br /><br />
+The cache coherence of L3 caches in x86 SMP systems certainly isn't managed by the kernel!</font></blockquote>
+
+<p>See above. If your system includes some hardware which does not care about L3 cache coherence (contemporary system tend to include few PCI devices at least and on busy systems you don't want to use built-in PCIe cache snooping because it sucks significant amount of inter-CPU bandwidth which is scarce on such systems) then your kernel is charge of keeping L3 cache and main memory in sync.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/487089/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor487418"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Hardware?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 20, 2012 18:43 UTC (Tue)
+                               by <b>phip</b> (guest, #1715)
+                              [<a href="/Articles/487418/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What you are describing is called Cache-Only Memory Architecture (COMA).<br>
+For example:<br>
+<a href="http://en.wikipedia.org/wiki/Cache-only_memory_architecture">http://en.wikipedia.org/wiki/Cache-only_memory_architecture</a><br>
+<p>
+Cheers,<br>
+Phil<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/487418/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor488279"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SMP?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 23, 2012 13:02 UTC (Fri)
+                               by <b>ScottMinster</b> (subscriber, #67541)
+                              [<a href="/Articles/488279/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've noticed that when a single thread process runs on a Linux SMP system, it tends to be distributed to all the cores almost equally (based on looking at top output, etc).  Perhaps naively, it seems to me that it would be better to run that thread on a single core, to take advantage of caches in that core rather than switching between cores.<br>
+<p>
+So, my question is, would some of these changes, like the concept of a "home node" make sense in the normal SMP world?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/488279/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor488399"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SMP?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 23, 2012 21:34 UTC (Fri)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/488399/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hmm. That is counter to what I observe, which is that a high-cpu using process tends to stick to one core.<br>
+<p>
+Now, a process that does a lot of sleeping on IO does shift around a lot. It doesn't much matter where it wakes up, after all.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/488399/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor488437"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SMP?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 24, 2012 4:29 UTC (Sat)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/488437/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <BLOCKQUOTE><I>Now, a process that does a lot of sleeping on IO does shift around a lot. It doesn't much matter where it wakes up, after all.</I></BLOCKQUOTE>
+<P>What about whatever working set it had in the caches?  It may be sleeping on I/O, but if your number of running tasks stays below your number of CPUs, there's a good chance that a good fraction of that working set is still in the L2 of the last processor it ran on.  So, it seems like you'd want to wake it on that same CPU.</P>
+<P>Then again, with modern multiprocessors, that state might be in an L3 shared by multiple CPUs, even if it isn't in L2.  (And, the trend seems to be to increase the size of L3 at the expense of the size of L2, or at least in lieu of increasing L2.)  So then you want to wake up on a processor connected to the same L3...</P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/488437/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor488464"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SMP?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 24, 2012 12:21 UTC (Sat)
+                               by <b>ScottMinster</b> (subscriber, #67541)
+                              [<a href="/Articles/488464/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You're right.  I just verified with a simple CPU heavy application that it does tend to stay on a single core.  I think I've noticed migration in the past with compilers, which tend to use more I/O.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/488464/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor490090"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">SMP?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 1, 2012 21:38 UTC (Sun)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/490090/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This was a well-known failure mode with - I think - NT4.<br>
+<p>
+If you were running a single heavy-CPU process the scheduler would make it jump from CPU to CPU as it tried to balance the load ... :-)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/490090/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2012, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

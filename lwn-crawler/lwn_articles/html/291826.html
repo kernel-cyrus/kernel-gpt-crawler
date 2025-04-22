@@ -1,0 +1,591 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The lockless page cache [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/291826/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/291461/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/291826/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The lockless page cache</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 29, 2008</br>
+           </div>
+One of the biggest problems in kernel development is dealing with
+concurrency.  In a system where more than one thing can be happening at
+once, one must always take care to keep multiple threads of control from
+interfering with each other and corrupting the system as a whole.  In the
+same way that two roads become more dangerous when they intersect,
+connecting two or more processors to the same memory greatly increases
+their potential for the creation of mayhem.
+<p>
+Travelers to the US are often amused (or irritated) by the often-favored
+solution to roadway concurrency: putting in traffic lights.  Such a light
+will indeed (if observed) eliminate the potential for a number of
+unpleasant race conditions within intersections, but at a performance cost:
+traffic going through the intersection must often stop and wait.  This
+solution also scales poorly; as more roads (or lanes with different
+destinations) feed into the same intersection, each of them experiences
+more red-light time.
+<p>
+
+In kernel programming, the first tool for controlling concurrency - locks
+in various forms - are directly analogous to traffic lights.  It is not
+coincidental that the name for a common locking primitive (semaphore)
+matches the name for a traffic light (semaforo) in a number of
+Latin-derived languages.  Locks enforce exclusive access to a kernel
+resource in the same way that a traffic light enforces exclusive access to
+an intersection, and with many of the same costs.  When too many processors
+end up waiting at the same lock, the performance of the system as a whole
+can suffer significantly.
+<p>
+
+There are two common approaches to mitigating scalability problems with
+locks.  For many years after the 2.0 kernel came out, these problems were
+addressed through the creation of more locks, each controlling a smaller
+resource.  Lock proliferation is effective, in that it reduces the chance
+that two processors will be trying to acquire the same lock at the same
+time.  Since it works so well,  this approach has led to the creation of
+thousands of locks in the Linux kernel.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+
+Proliferation has its limits, though.  Adding locks increases complexity;
+in particular, with more locks, the chances of creating occasional deadlock
+situations increase.  Deadlocks can be avoided through the careful
+observation of rules on the acquisition of locks, and the order in which
+they are acquired in particular.  But nobody will ever be able to sort out
+- and document - the proper relative locking order for thousands of locks.
+So kernel developers must make do with rules for some of the most important
+locks and the vigilance of the lockdep tool to find any remaining problems.
+<p>
+
+The other problem with lock proliferation is harder to get around, though.
+The acquisition of a lock requires writing a value to a location in shared
+memory.  As each processor acquires a lock, it must change that value,
+which causes that processor to acquire exclusive access to the cache line
+holding the lock variable.  The cache lines for heavily-used locks will fly
+around the system in a way that badly hurts performance, even if no
+processor ever has to wait for another to release the lock.  Adding more
+locks will not fix this problem; instead, it will just create more bouncing
+cache lines and make things worse.
+<p>
+
+So, as the number of processors grows, the path to continued scalability
+must not include the wholesale creation of new locks; indeed, it requires
+the removal of locks in the most performance-critical paths.  And that is
+what this whole long-winded introduction leads up to: the 2.6.27 kernel
+will include some changes by Nick Piggin which implement lockless operation in some
+important parts of the virtual memory subsystem.  And those, in turn, will
+lead to faster operation on multiprocessor systems.
+<p>
+
+The first of these changes is a new function for obtaining direct access to
+user-space pages from the kernel:
+<p>
+<pre>
+	int get_user_pages_fast(unsigned long start, int nr_pages, int write,
+			        struct page **pages);
+</pre>
+<p>
+This function works much like <tt>get_user_pages()</tt>, but, in exchange
+for some limits on its operation, it is able to do its job without
+acquiring the mmap semaphore; that, in turn, can lead to a 10% performance
+boost on "a threaded database workload."  The details of how this function
+works were <a href="http://lwn.net/Articles/275808/">covered here last
+March</a> (though the function was called <tt>fast_gup()</tt> back then),
+so we'll not repeat that discussion here.
+<p>
+The other big change is a set of patches which Nick has been carrying for
+quite some time: the lockless page cache.  The page cache holds in-memory
+copies of pages from files on disk; its purpose is to improve performance
+by minimizing disk I/O.  Looking up pages in the page cache is a common
+activity; it happens as a result of file I/O, page faults, and more.  So it
+needs to be fast.  In 2.6.26 kernels, each mapping (each connection between
+the page cache and a specific file in a filesystem somewhere) has its own
+lock.  So processors will not normally contend for the locks unless they
+are operating on the same file.  But locks for commonly-accessed files
+(shared libraries, for example) are likely to be frequently bounced between
+processors.
+<p>
+Most page cache operations are lookups - read-only operations which make no
+changes.  In the lookup operation, the lock protects a few aspects of the
+task, including:
+<p>
+<ol>
+<li> A given page within the mapping must be looked up in the mapping's
+     <a href="http://lwn.net/Articles/175432/">radix tree</a> to find its
+     location in memory (if any).
+<p>
+<li> If the page is resident in the page cache, it must have its reference 
+     count increased so that it will not be evicted before the code
+     performing the lookup has done whatever it needs to do.
+</ol>
+<p>
+The radix tree, itself, is a complicated data structure; it must be
+protected from modification while the lookup is being performed.  For
+certain, performance-critical parts of the radix-tree code, that protection
+is done through (1)&nbsp;some rules on what can be called when, and
+(2)&nbsp;the use of read-copy-update (RCU).  As a result, the radix tree
+lookup can be done in a lockless manner.
+<p>
+There is still a problem, though: a given page may be evicted from the page
+cache (or simply moved) between steps (1) and (2) above.  Should that
+happen, the second step will increment the reference count for a page which
+now belongs to a different mapping, and return an incorrect pointer.  The
+kernel developers have, through lots of experience over many years, learned
+that system crashes resulting from data corruption are quite hard on
+throughput.  So true scalability requires that this kind of scenario be
+avoided; thus the mapping semaphore, which prevents page cache changes from
+being made until the reference count has been properly updated.
+<p>
+Nick made an interesting observation here: it actually doesn't matter if
+the wrong reference count gets incremented as long as one ensures that the
+specific page mapping is still valid afterward.  The result is a new,
+low-level page cache function:
+<p>
+<pre>
+    int page_cache_get_speculative(struct page *page);
+</pre>
+<p>
+If the given <tt>page</tt> has a reference count of zero, then the page has
+been removed from the page cache; in that case this function return zero
+and the reference count will not be changed.  If the reference count is
+non-zero, though, it will be increased and a non-zero value will be
+returned. 
+<p>
+Incrementing a page's reference count will prevent that page from being
+evicted or moved until the count goes back to zero.  So kernel code which
+has incremented a specific page's reference count will thereby ensure that the page
+stays in its current state.  In the page cache case, the code can obtain a
+speculative reference to a page found in a mapping's radix tree.  But it
+does not, yet, know whether it actually got a reference to the page it was
+looking for - something may have happened between the radix tree lookup and
+the obtaining of the reference.  So it must check - after the reference has
+been acquired - to be sure that it has the right page.  If not, it releases
+the reference and tries again.  Eventually it will either pin down the right page
+or verify that the relevant part of the file is not resident in memory.
+<p>
+Lockless operation forces a bit more care on the part of the page reclaim
+code, which is trying to get a page's reference count down to zero so that
+it can remove the page.  Since there is no locking around the reference
+count now, the reclaim code must set it to zero while checking, in an
+atomic manner, that nobody else has incremented it.  That is the purpose
+of the <tt>atomic_cmpxchg()</tt> function, which will only perform the
+operation if it does not collide with another processor.  Since
+<tt>page_cache_get_speculative()</tt> will not increment the reference
+count if it is zero, the reclaim code knows that, by getting that count to
+zero, it now has exclusive control of the page.
+
+<p>
+The end result of all this is that a set of locking operations has been
+removed from the core of the page cache, improving the scalability of that
+code.  There is, of course, a cost, in the form of trickier code with a
+more complex set of rules which must be followed.  Chances are that we will
+see more of this kind of code, though, as the number of processors in our
+systems increases.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#fast_gup">fast_gup()</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Lockless_page_cache">Lockless page cache</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Scalability">Memory management/Scalability</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Scalability">Scalability</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/291826/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor292219"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The lockless page cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2008 15:31 UTC (Thu)
+                               by <b>intgr</b> (subscriber, #39733)
+                              [<a href="/Articles/292219/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Do these changes have a measurable speed gain with practical workloads on dual-core or
+quad-core processors? The only benchmark I found was a synthetic benchmark from April 2006 by
+Jens Axboe. The patch has probably been turned inside out since then.
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/292219/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor292493"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The lockless page cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2008 0:00 UTC (Sun)
+                               by <b>Nick</b> (guest, #15060)
+                              [<a href="/Articles/292493/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+I would be surprised if there was anything too noticeable for desktop types of workloads,
+however 
+the nice thing about these patches is that they actually speed up single threaded performance
+as 
+well as improve scalability.
+
+Here is my justification to have them merged, which includes some numbers:
+<a href="http://lwn.net/Articles/285339/">http://lwn.net/Articles/285339/</a>
+
+For server workloads using threads and direct IO, there should be some improvement at even 2
+or 4 
+cores. The OLTP database workload that gained nearly 10% throughput was run on a 2s/8c system,
+
+so a 4 core system should see a few %.
+
+
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/292493/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor303132"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Performance booster ?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2008 5:50 UTC (Wed)
+                               by <b>RTT</b> (guest, #54698)
+                              [<a href="/Articles/303132/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What if instead there were multiple page files for each core.<br>
+<p>
+<p>
+And plus, what if each of those page file is on a separate SAS hard disk ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/303132/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor292225"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The lockless page cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2008 15:51 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/292225/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Code isn't really tricky unless it has at least one 'QUA'ing koala in it.
+
+;}
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/292225/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor292285"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">lockless data structures?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2008 20:02 UTC (Thu)
+                               by <b>shapr</b> (subscriber, #9077)
+                              [<a href="/Articles/292285/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Is there a good reason linux doesn't have lots of lockless data structures all over the place?
+That would dramatically increase multi-core performance, yeah?
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/292285/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor292295"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">lockless data structures?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2008 21:38 UTC (Thu)
+                               by <b>bronson</b> (subscriber, #4806)
+                              [<a href="/Articles/292295/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Yes.  Lockless is quite simple in theory but gets really difficult in the real world (say,
+where ring buffers actually wrap).  You thought threading was hard to prove correct, debug,
+and maintain?  Lockless is harder in every way.
+
+I converted a small event-based networking app I wrote two years ago to use lockless lists.
+It was fun but ultimately a waste of time...  It didn't run much faster but now it contained
+subtle boundary conditions that, when violated by an unwary programmer, resulted in occasional
+corruptions under load.  Good luck trying to debug that (don't bother stepping through it in
+gdb)!
+
+There are a few areas where lockless really is worth it, especially when you have a hot,
+high-contention buffer or stack.  But be prepared for some tough maintenance.
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/292295/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor292317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">lockless data structures?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 1, 2008 1:43 UTC (Fri)
+                               by <b>maney</b> (subscriber, #12630)
+                              [<a href="/Articles/292317/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      From one of Val's responses to a question asked about the <a href="http://lwn.net/Articles/270081/">KHB: Synthesis</a> article:
+<p><i>My personal opinion is that lock-free algorithms are not a good generic synchronization
+technique, and are definitely very very complex and difficult to understand.  However, in
+certain specific cases, lock-free can be simple, elegant, and a huge performance advantage
+over traditional approaches.</i>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/292317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor292373"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">lockless data structures?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 1, 2008 15:42 UTC (Fri)
+                               by <b>PaulMcKenney</b> (<b>&#x272D; supporter &#x272D;</b>, #9624)
+                              [<a href="/Articles/292373/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Val's comment is directed at <A HREF="http://en.wikipedia.org/wiki/Non-blocking_synchronization">lock-free synchronization</A>, which is a very different animal than lockless algorithms.
+The RCU implementation described in this article is lockless, but not lock-free: although RCU has deterministic read-side primitives, its updates can block via <tt>call_rcu()</tt> and <tt>synchronize_rcu()</tt>.
+In some cases, the fact that RCU's updates do block keeps things (relatively) simple.
+<P>
+We are still learning how best to use RCU to obtain good performance and scalability while keeping things (again, relatively) simple.  For that matter, we are also still learning when <i>not</i> to use RCU.  RCU is quite specialized, so is not always the right tool for the job, much though I might wish it otherwise.  ;-)
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/292373/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor292359"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Linus on lockless data structures</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 1, 2008 14:01 UTC (Fri)
+                               by <b>pflugstad</b> (subscriber, #224)
+                              [<a href="/Articles/292359/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Linus posts in a long thread over on RealWorldTech about lockless algorithms and SMP scaling:
+
+<a href="http://www.realworldtech.com/forums/index.cfm?action=detail&amp;id=91906&amp;threadid=91801&amp;roomid=2">http://www.realworldtech.com/forums/index.cfm?action=deta...</a>
+
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/292359/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor337246"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The lockless page cache</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 12, 2009 12:24 UTC (Fri)
+                               by <b>helltone</b> (guest, #59074)
+                              [<a href="/Articles/337246/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Can you please explain the difference between lock-free and lockless? That's a complex topic, and I can't find anything on that... e-mail me a link if you have a good reference please: gafunchal AT gmail DOT com<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/337246/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2008, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

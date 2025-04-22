@@ -1,0 +1,1224 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Filesystem notification, part 2: A deeper investigation of inotify [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/605128/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/605132/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/605128/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Filesystem notification, part 2: A deeper investigation of inotify</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ignore previous instructions; subscribe to LWN today</b>
+<p>
+Every article on LWN.net is written by humans, for humans. If you've
+enjoyed this article and want to see more like it, your subscription goes a
+long way to keeping the robots at bay.  We are offering <a href="https://lwn.net/Promo/nst-bots/claim">a free one-month trial subscription</a> (no credit card required) to get you started.
+</blockquote>
+<div class="GAByline">
+           <p>July 14, 2014</p>
+           <p>This article was contributed by <a href="http://man7.org/">Michael Kerrisk</a>.</p>
+           <hr>
+<a href="/Articles/605313/">Filesystem notification</a>
+</div>
+<p>
+	In the <a href="/Articles/604686/">first article</a> in this
+	series, we briefly looked at the original Linux filesystem
+	notification API, dnotify, and noted a number of its
+	limitations. We then turned our attention to its successor,
+	inotify, and saw how the design of the newer API addressed various
+	problems with the dnotify API while providing a number of other
+	benefits as well. At first glance, inotify seems to provide a
+	complete solution for the task of creating an application that
+	reliably monitors the state of a filesystem.  However, we are
+	about to see that this isn't quite the case.
+
+<p>
+	So, now we dig deeper into the use of inotify, looking at how the
+	API can be used to create an application that monitors the dynamic
+	state of a directory tree. Our goals are, on the one hand, to
+	demonstrate how inotify can be used to robustly achieve this task
+	and, on the other hand, to discover some of the challenges inherent
+	in the task, and thereby discover some of the limitations of
+	inotify.
+
+<p>
+	Our
+	application, <a href="http://man7.org/tlpi/code/online/dist/inotify/inotify_dtree.c.html"><tt>inotify_dtree.c</tt></a>,
+	serves as a proof-of-concept, rather than performing any practical
+	task.  It is invoked with a command of the following form:
+
+<pre>
+    ./inotify_dtree &lt;directory&gt; &lt;directory&gt;...
+</pre>
+
+
+	
+<p>
+	The goal of the application is to robustly and accurately maintain
+	an internal representation ("a cache") of the dynamically
+	changing set of subdirectories under each of the directories
+	named in its command line. This is somewhat similar to the task of
+	programs such as GUI file managers, which must present the user
+	with an accurate representation of (some part of) a filesystem
+	tree.
+
+<p>
+	In addition to caching the state of the directory trees, the program
+	also provides a command-line interface that allows the user to do
+	such things as dumping the contents of the cache and triggering a
+	consistency check of the cache against the current state of the
+	directory trees.
+
+<p>
+	In order to keep the program to a manageable size, we make a
+	number of simplifications:
+
+	<ul class="spacylist">
+	    <li>
+		    The application caches only the subdirectories under a
+		    directory tree. Other types of files are ignored. Caching
+		    other file types is reasonably straightforward, but we
+		    focus on monitoring subdirectories because they are the
+		    most challenging part of the problem.
+		</li>
+
+	    <li>
+		    For each directory, the only information we cache is the
+		    directory name and the corresponding watch descriptor. In
+		    a real-world application, we might want to cache other
+		    information as well, such as file ownership, permissions,
+		    and last modification time.
+		</li>
+
+	    <li>
+		    The cache data structure is simply a list (a dynamically
+		    allocated array of structures that is resized as needed).
+		    The list is searched linearly by pathname or watch
+		    descriptor. This allows a simple implementation, at the
+		    expense of efficiency.  In a real-world application, we
+		    might instead elect to use a tree data structure whose
+		    form matches the directory tree.
+		</li>
+	</ul>
+
+<p>
+	Even with these simplifications, we will see that programming with
+	inotify presents a number of challenges.
+
+
+<h4>Challenge 1: recursively monitoring a  directory tree</h4>
+
+<p>
+	Inotify does not perform recursive monitoring of directories. If
+	we monitor the directory <tt>mydir</tt>, then we will receive
+	events for the directory itself and for its immediate children,
+	but not for children of subdirectories. 
+
+<p>
+	Therefore, in order to monitor an entire directory tree, we must
+	create a watch for each subdirectory in the tree. This requires a
+	recursive process whereby, for each directory, we create a watch
+	and scan for subdirectories that should also be watched.  The fun
+	starts when we consider some of the possible race conditions. For
+	example, suppose that we handle the tasks in the following order:
+
+	<ol class="spacylist">
+	    <li>
+		    We scan <tt>mydir</tt>, adding watches for the
+		    subdirectories that we find.
+		</li>
+	
+	    <li>
+		    We add a watch for <tt>mydir</tt>.
+		</li>
+	
+	</ol>
+
+<p> Suppose that between these two steps, a new
+	subdirectory, <tt>mydir/new</tt>, is created (or a directory is
+	renamed into <tt>mydir</tt>).  No watch will be created for that
+	directory, since, on the one hand, it was created after the scan
+	of subdirectories, and, on the other hand, it will not generate an
+	event for inotify, because it was created before a watch was added
+	for the directory <tt>mydir</tt>.
+
+<p>
+	The solution is to ensure that we perform the above steps in the
+	reverse order, first creating a watch for the parent directory,
+	and then scanning for subdirectories. If a new subdirectory is
+	created between these two steps, then it might both generate an
+	inotify event and be caught by the scanning step, which may result
+	in a watch being created twice for the subdirectory. However, with
+	careful programming, this is harmless, since
+	repeated <tt>inotify_add_watch()</tt> calls for the same
+	filesystem object will generate the same watch descriptor number.
+
+<p>
+	There are other race conditions to consider as well.  For example,
+	during the scanning step we may find a subdirectory and attempt
+	to add a watch for it, only for the <tt>inotify_add_watch()</tt>
+	call to fail because the directory has already been deleted or
+	renamed. The correct approach in such cases is to silently ignore
+	the error.
+
+<p>
+	The
+	standard <a href="http://man7.org/linux/man-pages/man3/nftw.3.html"><tt>nftw()</tt></a>
+	library function can assist with the task of creating a watch list
+	for an entire directory tree. <tt>nftw()</tt> performs a traversal
+	(preorder by default) of all of the files in a directory, calling
+	a user-defined function once for each file. Among the arguments
+	supplied to that function are the pathname of the file being
+	visited and
+	a <a href="http://man7.org/linux/man-pages/man2/stat.2.html"><tt>stat</tt></a>
+	structure containing attributes of that file, including the file
+	type.
+
+
+<p>
+	Here's an edited version of our function that is called by
+	<tt>nftw()</tt> as it recursively traverses a directory tree that
+	we want to add to the cache:
+
+<pre>
+   static int
+   traverseTree(const char *pathname, const struct stat *sb, int tflag,
+                struct FTW *ftwbuf)
+   {
+       int wd, slot, flags;
+   
+       if (! S_ISDIR(sb-&gt;st_mode))
+           return 0;               /* Ignore nondirectory files */
+   
+       flags = IN_CREATE | IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE_SELF;
+       if (isRootDirPath(pathname))
+           flags |= IN_MOVE_SELF;
+   
+       wd = inotify_add_watch(ifd, pathname, flags | IN_ONLYDIR);
+</pre>
+
+<p>
+	A few points in the above code warrant explanation.
+	The <tt>S_ISDIR()</tt> check allows us to skip non-directory files.
+	We initialize the <tt>inotify_add_watch()</tt> <tt>flags</tt>
+	argument with the set of flags that are relevant for monitoring
+	the creation, renaming, and deletion of directories.
+
+<p>
+	Our <tt>isRootDirPath()</tt> function returns true if the given
+	path is one of those supplied on the command line.  For these
+	directories, we are interested in events that rename the
+	directories themselves, so we include the <tt>IN_MOVE_SELF</tt>
+	flag. When an <tt>IN_MOVE_SELF</tt> event is processed, the
+	program ceases monitoring the corresponding directory and all of
+	its subdirectories.
+
+<p>
+	The <tt>IN_ONLYDIR</tt> flag causes <tt>inotify_add_watch()</tt>
+	to check that the monitored file is a directory.  Although we
+	already checked (via the <tt>S_ISDIR()</tt> macro)
+	that <tt>pathname</tt> is a directory, there is a chance that in
+	the meantime the directory was deleted and a regular file with the
+	same name was created. In other words, <tt>IN_ONLYDIR</tt>
+	provides us with a race-free way of ensuring that a monitored
+	object is a directory.
+
+<p>
+	The remainder of the function handles the consequences of the
+	various race conditions described earlier, and then caches the new
+	watch descriptor and pathname:
+
+<pre>
+       if (wd == -1) {
+   
+           /* By the time we come to create a watch, the directory might
+              already have been deleted or renamed, in which case we'll get
+              an ENOENT error. In that case, we log the error, but
+              carry on execution. Other errors are unexpected, and if we
+              hit them, we give up. */
+   
+           logMessage(VB_BASIC, "inotify_add_watch: %s: %s\n",
+                   pathname, strerror(errno));
+           if (errno == ENOENT)
+               return 0;
+           else
+               exit(EXIT_FAILURE);
+       }
+   
+       if (findWatch(wd) &gt; 0) {
+   
+           /* This watch descriptor is already in the cache;
+              nothing more to do. */
+   
+           logMessage(VB_BASIC, "WD %d already in cache (%s)\n", wd, pathname);
+           return 0;
+       }
+   
+       slot = addWatchToCache(wd, pathname);
+   
+       return 0;
+   }
+</pre>
+
+
+<h4>Challenge 2: handling overflow events</h4>
+
+<p>
+	Queueing inotify events until they are read requires kernel
+	memory. Therefore, the kernel imposes a per-queue limit on the
+	number of events that can be queued.  
+(The various inotify limits are exposed,
+and can, with privilege, be modified via <tt>/proc</tt> files, as
+described in the <a
+href="http://man7.org/linux/man-pages/man7/inotify.7.html">inotify(7)
+man page</a>.)
+When this queue limit is
+	reached, the kernel adds an inotify overflow event
+	(<tt>IN_Q_OVERFLOW</tt>) to the event queue and
+	then <i>discards</i> further events until the application has
+	drained some events from the queue.
+
+<p>
+	This behavior has a number of implications. First of all, it means
+	that when an overflow situation occurs, the application loses
+	information about filesystem events. Or, to put things another
+	way, inotify can't be used to produce a completely accurate log
+	of filesystem activity.
+
+<p>
+	Overflow events also have implications for applications such as
+	our example application. Once an overflow occurs, the cache state
+	in our application is no longer synchronized with the filesystem
+	state. Furthermore, even if we drain the inotify event queue so
+	that future events can be queued, we are likely to encounter
+	problems because some of those events will likely be inconsistent
+	with the now-out-of-sync cache. In this circumstance, there is only
+	one thing to do: close the inotify file descriptor, discard the
+	existing cache, open a new inotify file descriptor and then
+	repopulate the cache and re-create all of our watch descriptors by
+	rescanning the monitored directories. This may take some time, if
+	we are monitoring a large number of directories. These steps are
+	handled in the <a href="http://man7.org/tlpi/code/online/dist/inotify/inotify_dtree.c.html#reinitialize"><tt>reinitialize()</tt> function</a> of our
+	example application.
+
+<p>
+	Although the inotify queue limit can be raised in order to make
+	overflow events less likely, there 
+	nevertheless always remains a risk that the limit will be hit in
+	an application. Therefore, all inotify applications must be
+	written to properly handle overflow events.
+	
+<p>
+	In passing, it's worth noting that unexpected corner cases or
+	program bugs also may cause an application cache to become
+	inconsistent with the state of the filesystem. A robust
+	application should allow for this possibility: if such
+	inconsistencies are detected, it is probably necessary to take the
+	same steps as for the queue overflow case.
+
+		
+<h4>Challenge 3: handling rename events</h4>
+			   
+<p>
+	As noted in our previous article, inotify provides much better
+	support than dnotify for monitoring rename events. When a
+	filesystem object is renamed, two events are generated:
+	an <tt>IN_MOVED_FROM</tt> event for the source directory from
+	which the file is moved, and an
+	<tt>IN_MOVED_TO</tt> for the target directory to which the file is
+	moved. Those events are only generated for directories that are
+	being watched, so an application will only get both if it is
+	monitoring both the source and destination. The <tt>name</tt>
+	fields of these two events provide the 
+	old and new names of the file. The two events will have the same
+	(unique) value in their <tt>cookie</tt> field, which provides an
+	application with the means to connect them.
+
+
+<p>
+<img align="right" width="266" height="170" hspace=5
+	 alt="[Directory tree example for inotify]" 
+	 src="https://static.lwn.net/images/2014/inotify_dir_example.png" />			  
+
+	Rename events present a number of challenges. One of these is
+	that, depending how we cache pathnames, a rename event may affect
+	multiple items in the cache. For example, in our application, each
+	item in the cache consists of a watch descriptor plus the complete
+	pathname string corresponding to that watch descriptor. Suppose
+	that we had a subtree containing the directories shown in the
+	diagram to the right.
+
+
+<p>
+	If the directory <tt>abc</tt> was renamed to <tt>def</tt> under
+	directory <tt>xyz</tt>, then three pathname strings inside our
+	cache would need to be modified (so, for
+	example, <tt>mydir/abc/man</tt> would
+	become <tt>mydir/xyz/def/man</tt>).
+
+<p>
+	More sophisticated cache designs may mitigate or eliminate this
+	problem. For example, if the cache employs a tree data structure
+	that mirrors the structure of the directory tree, and each node
+	contains just the filename (rather than the full pathname) of the
+	corresponding filesystem object, then only a single cache object
+	would be affected by a rename (it would be relocated inside the
+	tree structure, and its pathname string would be modified).
+
+<p>
+	Rename events present other, more serious challenges, however.
+	First, it's important to note that the <tt>IN_MOVED_FROM</tt>
+	and <tt>IN_MOVED_TO</tt> events are generated only if,
+	respectively, the source and target directories are each in the
+	set being monitored by our inotify file descriptor. If only the
+	target directory is in the set, then we will receive only
+	an <tt>IN_MOVED_TO</tt> event. This can be dealt with
+	straightforwardly: it is the same as the case of (recursively)
+	adding a complete subtree to the set of watch subtrees.
+
+<p>
+	On the other hand, if only the source directory is in the
+	monitored set, then only an <tt>IN_MOVED_FROM</tt> event is
+	generated.  Notionally, this can be treated like a deletion event:
+	for all of the monitored objects in the renamed subtree, we
+	destroy each of the corresponding objects in our cache and destroy
+	each of the watch descriptors using <tt>inotify_rm_watch()</tt>.
+
+<p>
+	However, there is a problem: when we receive
+	an <tt>IN_MOVED_FROM</tt> event, we do not yet know if there will
+	be a following <tt>IN_MOVED_TO</tt> event. In other words, we do
+	not yet know whether to treat this as a deletion event or as a
+	"true rename" event.  And it gets worse. If there are multiple
+	processes generating events in the monitored trees, then there is
+	no guarantee that, for a true rename event,
+	the <tt>IN_MOVED_FROM</tt> and <tt>IN_MOVED_TO</tt> events will be
+	returned as consecutive items in the buffer of events returned
+	when reading from the inotify file descriptor; other events may be
+	returned between the pair.  The upshot is that when we encounter
+	an <tt>IN_MOVED_FROM</tt> event, we need to do some measure of
+	forward searching to see if there is a
+	corresponding <tt>IN_MOVED_TO</tt> event.
+
+<p>
+	At this point, one might ask: rather than going to the effort of
+	detecting whether there is an event pair, why not simply always
+	treat <tt>IN_MOVED_FROM</tt> as a deletion event
+	and <tt>IN_MOVED_TO</tt> as a creation event? This approach
+	simplifies the programming in some respects, but it has some
+	costs. If this is a true rename event, then we will waste effort
+	in deleting items from our cache and destroying watch descriptors
+	only to immediately repopulate the cache with the same filesystem
+	objects and re-create a new set of watch descriptors. If the
+	subtree that is being renamed is large, this may be rather
+	expensive. Furthermore, when the watches are re-created they will
+	use different watch descriptors. This means that there may be a
+	series of events ahead in the inotify queue that contain watch
+	descriptors that no longer exist. The simplest thing to do with
+	these events is to discard them.
+
+<p>
+	Because of the problems described in the previous paragraph, it is
+	usually worth going to some effort to detect whether there is
+	an <tt>IN_MOVED_TO</tt> that matches
+	the <tt>IN_MOVED_FROM</tt>. The only question is: how much effort
+	do we make? It turns out that even on a busy filesystem where
+	multiple processes are generating events, the two events
+	are <i>almost</i> always consecutive. So, a simple approach when
+	encountering <tt>IN_MOVED_FROM</tt> is to check whether the very
+	next event is <tt>IN_MOVED_TO</tt>, in which case this can be
+	treated as a true rename, otherwise the <tt>IN_MOVED_FROM</tt>
+	can be treated as a deletion event.  Occasionally, we will fail to
+	detect true renames because the events are not consecutive, in
+	which case we fall back to the situation described in the
+	preceding paragraph.
+
+<p>
+	However, even when performing this simplified detection of
+	<tt>IN_MOVED_FROM</tt>+<tt>IN_MOVED_TO</tt> pairs, some care
+	is required. A <tt>read()</tt> from an inotify descriptor
+	will (given a sufficiently large buffer) return multiple
+	events if they are available. This means that, generally, if
+	there is a true rename operation, the
+	<tt>IN_MOVED_FROM</tt> and <tt>IN_MOVED_TO</tt> events will be
+	read in the same buffer. However, it may happen that only
+	the <tt>IN_MOVED_FROM</tt> can fit at the end of the buffer
+	returned by one <tt>read()</tt> and the <tt>IN_MOVED_TO</tt> event
+	is fetched by the next <tt>read()</tt>. The application should
+	deal with this possibility. 
+
+<p>
+It is also possible, of course, that
+	there is no following <tt>IN_MOVED_TO</tt>, and indeed there might
+	not (for the moment) be any more events at all.  Furthermore, from
+	the point of view of user space,
+	the <tt>IN_MOVED_FROM</tt>+<tt>IN_MOVED_TO</tt> pair that is
+	generated by a rename is not inserted atomically into the event
+	queue: this means that having read an <tt>IN_MOVED_FROM</tt> from
+	the queue, the following <tt>IN_MOVED_TO</tt> may not yet be
+	available if we try to immediately fetch it with a
+	nonblocking <tt>read()</tt>.
+	Therefore, the second <tt>read()</tt> that tries to fetch the
+	possibly following <tt>IN_MOVED_TO</tt> event must be
+	performed with a (small)
+	timeout. 
+<p>
+The <a href="http://man7.org/tlpi/code/online/dist/inotify/inotify_dtree.c.html#processInotifyEvents"><tt><font class="SpellingError">processInotifyEvents</font>()</tt>
+	function</a> in our example application provides one example of
+	how to do this. It employs a 2-millisecond timeout for the
+	second <tt>read()</tt>, which was found to be sufficient to catch
+	around 99.8% of the true renames even when the monitored directory
+	tree was subject to a high level of rename
+	activity.
+
+<p>
+For the purposes of testing, I created a test
+	program, <a href="http://man7.org/tlpi/code/online/dist/inotify/rand_dtree.c.html"><tt>rand_dtree.c</tt></a>,
+	that randomly performs either subdirectory creations,
+	subdirectory deletions, or subdirectory renames at a specified
+	location. During testing, I simultaneously ran ten instances of
+	the program in rename mode against a directory tree that contained
+	approximately 200 subdirectories. 
+
+<p>
+A similar timeout technique is
+	used in
+	the <a href="https://git.gnome.org/browse/glib/tree/gio/inotify/inotify-kernel.c"><tt>inotify-kernel.c</tt></a>
+	source file
+	of the <a href="https://developer.gnome.org/gio/stable/">GIO</a>
+	library in <a href="https://wiki.gnome.org/Projects/GLib">GLib</a>, where a 0.5 millisecond timeout is used. In my tests, this was sufficient to detect true renames with only
+	95% accuracy.
+
+
+<h4>Challenge 4: using pathnames for notifications</h4>
+			   
+<p>
+	When an event is generated for an object inside a monitored
+	directory, inotify produces an event containing the name of the
+	file. This is more information than given to us by
+	dnotify. However, notification via pathname has some
+	difficulties. The problem is that pathnames exist independently of
+	filesystem objects. (One must also bear in mind that a filesystem
+	object may have multiple pathnames, since a file can have multiple
+	hard links.) Thus, by the time we read a notification that
+	contains a filename, that filename may already have been deleted
+	or renamed. Applications must be designed to handle this
+	possibility.</p>
+
+<img align="right" width="198" height="258" hspace=5 vspace=5
+	 alt="[Two files that link to the same inode]" 
+	 src="https://static.lwn.net/images/2014/inotify_links.png" />			  
+
+<p>
+	Notification via pathname also produces some other oddities.
+	Suppose that a filesystem object has two links, one inside a
+	directory (<tt>mydir/abc</tt>) that we are monitoring for all
+	possible 
+	events via inotify,
+	and another link inside a directory (<tt>mydir/xyz</tt>) that we
+	are not monitoring, as shown in the diagram to the right.
+
+<p>
+	If the inode 5139 is opened via the link <tt>mydir/abc/x1</tt>,
+	then an event will be generated. On the other hand, if it is
+	opened via <tt>mydir/xyz/x2</tt>, no event is generated. More
+	generally, inotify events are generated for files only when they
+	occur via pathnames that are in the monitored set.  This behavior
+	is not the consequence of a kernel limitation, but rather is a
+	limitation of the notification method. In some circumstances,
+	notifying the application about an event that occurred via one pathname using a different
+	pathname would be confusing. For example, suppose that the
+	pathname <tt>mydir/xyz/x2</tt> was deleted, how should
+	an <tt>IN_DELETE</tt> event for <tt>mydir/abc/x1</tt> be
+	interpreted? A similar question can be asked about rename
+	events. To avoid these sorts of confusions, inotify only notifies
+	events that occur via pathnames in the monitored set.
+
+
+<h4>Other limitations of the inotify API</h4>
+		  
+<p>
+	In addition to the various challenges dealt with by our example
+	application, there are several other limitations of the inotify
+	API that an application may encounter:
+
+	<ul class="spacylist">
+
+	  <li>
+		Event notifications do not include information about
+		the process that generated the event. Nevertheless, it would
+		sometimes be useful to have the process ID and user ID of the
+		triggering process. One particularly notable case is that if a
+		monitoring application itself touches files inside the
+		monitored directories, then it may also generate events, but it
+		has no way (for example, a PID) to distinguish those events
+		from events generated by other processes.
+	  </li>
+	  
+	  <li>
+		Inotify does not provide any gatekeeping functionality. That
+		is to say, inotify only informs us about filesystem activity;
+		it provides no way to block filesystem actions by other
+		processes. This type of functionality is needed by antivirus
+		software and some types of user-space file servers, for
+		example.
+	  </li>
+	  
+	  <li>
+		Inotify reports only events that a user-space program triggers
+		through the filesystem API. This constitutes a fairly serious
+		limitation of the API. For example, it means that inotify does
+		not inform us of events on monitored objects via a remote
+		filesystem (e.g. NFS) operation. Likewise, no events are
+		generated for virtual 
+		filesystems such as <tt>/proc</tt>. Furthermore, events are
+		not generated for file accesses and modifications that may
+		occur via file mappings created
+		using <a href="http://man7.org/linux/man-pages/man2/mmap.2.html"><tt>mmap()</tt></a>.
+		To discover changes that occur via these mechanisms, an
+		application must revert to polling the filesystem
+		using <tt>stat()</tt> and <tt>readdir()</tt>.
+	  </li>
+	  
+	</ul>
+
+<p>
+	Inotify improves on dnotify in many respects. However, a number of
+	limitations of the API mean that reliably monitoring filesystem
+	events still presents quite a challenge. In the next article in
+	this series, we will consider the fanotify API, which, although
+	more restricted than inotify in its range of applications,
+	addresses some of the limitations of inotify.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Development_model-User-space_ABI">Development model/User-space ABI</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Inotify">Inotify</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Kerrisk_Michael">Kerrisk, Michael</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/605128/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor605448"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2014 14:07 UTC (Tue)
+                               by <b>ms-tg</b> (subscriber, #89231)
+                              [<a href="/Articles/605448/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is a fantastic series. Thank you for writing it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/605448/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor605489"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2014 20:03 UTC (Tue)
+                               by <b>richmoore</b> (guest, #53133)
+                              [<a href="/Articles/605489/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I second that. Keep it coming!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/605489/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor605491"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2014 20:18 UTC (Tue)
+                               by <b>garloff</b> (subscriber, #319)
+                              [<a href="/Articles/605491/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
++1<br>
+Well written and with all the technical depth that makes this useful for real world development. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/605491/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor606028"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 21, 2014 9:09 UTC (Mon)
+                               by <b>JIghtuse</b> (guest, #95703)
+                              [<a href="/Articles/606028/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I confirm. Informative and useful series. It is always interesting to see how internal mechanisms of things you use everyday works. Thanks, Michael!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/606028/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor606076"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 21, 2014 17:26 UTC (Mon)
+                               by <b>_xhr_</b> (guest, #92665)
+                              [<a href="/Articles/606076/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Kudos to the author, a great and useful article!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/606076/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor606430"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2014 8:27 UTC (Thu)
+                               by <b>darwish07</b> (guest, #49520)
+                              [<a href="/Articles/606430/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I second that too, very interesting series! Thanks a lot for all of your efforts.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/606430/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor605631"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 16, 2014 16:20 UTC (Wed)
+                               by <b>CurtBrune</b> (subscriber, #88208)
+                              [<a href="/Articles/605631/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
++1, solid content worth reading.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/605631/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor605940"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 18, 2014 18:36 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/605940/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Of course, an actually useful, simple notification API that simply emitted an unfiltered stream of events (over a netlink socket, say) for all operations carried out that affect filesystems mounted on this machine... doesn't exist. Which means we're still doing huge long walks over the entire system to figure out what to back up.<br>
+<p>
+In 2014.<br>
+<p>
+How simply ridiculous.<br>
+<p>
+<p>
+(Even the really simple 'non-NFS only, locally mounted filesystems, no filtration at all' would work perfectly well for the backup case.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/605940/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor605986"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 20, 2014 7:00 UTC (Sun)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/605986/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hm. Actually it would need to cover changes made via NFS as well. "Tell me everything that changed on local disks". (Obviously, *some* provision for overflow need be made, but one hopes that a backup program could accept a stream of filenames at great speed and back them up later.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/605986/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor605987"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 20, 2014 8:01 UTC (Sun)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/605987/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's support for that in btrfs (change log streaming). And I think XFS has something similar.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/605987/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor606381"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2014 23:19 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/606381/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah. Changelog streaming sends you a pile of stuff in a format that only btrfs can read, though, doesn't it? I'd rather know what on the fs has changed, so my backup program can do its deduplicatory magic on it in such a way that I can restore file-by-file later if I want to, as well as in a single huge lump. Otherwise, I might as well just be using horrible old dump(8)...<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/606381/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor606399"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2014 4:28 UTC (Thu)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/606399/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The btrfs code is all open, so if you wished to make your own tool to read it you probably could.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/606399/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor606755"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2014 13:03 UTC (Sat)
+                               by <b>Lennie</b> (subscriber, #49641)
+                              [<a href="/Articles/606755/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can generate a list if you like:<br>
+<p>
+<a href="http://marc.merlins.org/perso/btrfs/post_2014-05-19_Btrfs-diff-Between-Snapshots.html">http://marc.merlins.org/perso/btrfs/post_2014-05-19_Btrfs...</a><br>
+<a href="http://www.tummy.com/blogs/2010/11/01/fun-with-btrfs-what-files-have-changed/">http://www.tummy.com/blogs/2010/11/01/fun-with-btrfs-what...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/606755/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor607092"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2014 10:22 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/607092/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ooh! Yeah, that's useful. I somehow never noticed find-new.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/607092/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor606070"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 21, 2014 15:53 UTC (Mon)
+                               by <b>krakensden</b> (subscriber, #72039)
+                              [<a href="/Articles/606070/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+OS X's solution to the overflow problem is to occasionally just notify for the parent directory (or the grandparent, or etc), 'coalescing' all the updates for the children. The updates are also logged in a persistent file.<br>
+<p>
+As an application programmer, the coalescing turned out to be the normal case, and it was actually far more annoying to figure out what was going on on an OS X filesystem than it was to have a lightweight thing that got inotify'd and dumped events on a queue.<br>
+<p>
+You could never do anything clever on application restart though.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/606070/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor606027"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 21, 2014 9:06 UTC (Mon)
+                               by <b>JIghtuse</b> (guest, #95703)
+                              [<a href="/Articles/606027/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I found a weird inotify limitation: it cannot detect mounting event on watching directory. If we have some directory and set inotify watch on it and then we mount something to this directory, inotify will not send any events.<br>
+<p>
+This behavior leaks to Qt library too (on Linux at least). If we create some directory, open it in Qt's QFileTree and then mount to it, directory will be empty. Collapsing and expanding of parent nodes will not help. There are two possibilities to see mounted contents: recreate QFileSystemModel attached to QFileTree or reload application itself.<br>
+<p>
+Moreover, you can see this behavior in KDE's dolphin file manager. You can open, say, /media/usb0 (empty directory) and then mount usb drive to it. Instead of showing contents of the drive in opened window, KDE will open a new one, showing contents there. The old one will be empty until you didn't reload it with F5 or something.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/606027/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor606644"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2014 7:50 UTC (Fri)
+                               by <b>cvubrugier</b> (subscriber, #67166)
+                              [<a href="/Articles/606644/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thank you for this article!<br>
+<p>
+<font class="QuotedText">&gt; Likewise, no events are generated for virtual filesystems such as /proc</font><br>
+<p>
+That's true for /proc, but other virtual file systems like tmpfs, cgroup or configfs can be monitored with inotify.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/606644/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor607724"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2014 13:23 UTC (Wed)
+                               by <b>poruid</b> (guest, #15924)
+                              [<a href="/Articles/607724/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Small question (irrelevant for the quintessence of this instructive article).<br>
+Why is the call to exit() in the sample code put into an else branch when the if branch unconditionally executes a return?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/607724/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor607933"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Filesystem notification, part 2: A deeper investigation of inotify</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 7, 2014 9:05 UTC (Thu)
+                               by <b>mkerrisk</b> (subscriber, #1978)
+                              [<a href="/Articles/607933/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      They're both equivalent, of course. The form I used feels slightly more natural (to me). If I'd done it the other way, I'd probably rather have written:
+
+<pre>
+if (errno != ENOENT)
+    exit(EXIT_FAILURE);
+
+return 0;
+</pre>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/607933/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor919873"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Preallocated file handles</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 13, 2023 14:13 UTC (Fri)
+                               by <b>yecril71pl</b> (guest, #163130)
+                              [<a href="/Articles/919873/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The problem with inotify is that it exceeds the number of preallocated file handles and fails.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/919873/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

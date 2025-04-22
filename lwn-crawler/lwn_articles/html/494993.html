@@ -1,0 +1,1763 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Fixing the unfixable autofs ABI [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/494993/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/494926/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/494993/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Fixing the unfixable autofs ABI</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 30, 2012</br>
+           </div>
+One of the few hard rules of kernel development is that breaking the
+user-space binary interface is not acceptable.  If there is user-space code
+that depends on specific behavior, that behavior must be maintained
+regardless of how inconvenient that may be.  But what is to be done if two
+different programs depend on mutually-incompatible behaviors, so that it is
+seemingly impossible to keep them both working?  The answer may be to
+violate another rule by putting an ugly hack into the kernel—or to do
+something rather more tricky.
+
+<p>
+The "autofs" protocol is used to communicate between the kernel and an
+automounter daemon.  It allows the automounter to set up special virtual
+filesystems that, when referenced by user space, can be replaced by a
+remote-mounted real filesystem.  Much of this protocol is implemented with
+<tt>ioctl()</tt> calls on a special autofs device, but it also makes use of
+pipes between the kernel and user space when specific filesystems are
+mounted. 
+<p>
+
+This protocol is certainly part of the kernel ABI, so its components have
+been defined with some care.  One of the key elements of the autofs
+protocol is the <tt>autofs_v5_packet</tt> structure, which is sent from the
+kernel to user space via a pipe; it is used, among other things, to report
+that a filesystem has been idle for some time and should be unmounted.
+This structure looks like:
+<p>
+<pre>
+    struct autofs_v5_packet {
+	struct autofs_packet_hdr hdr;
+	autofs_wqt_t wait_queue_token;
+	__u32 dev;
+	__u64 ino;
+	__u32 uid;
+	__u32 gid;
+	__u32 pid;
+	__u32 tgid;
+	__u32 len;
+	char name[NAME_MAX+1];
+    };
+</pre>
+<p>
+The size of every field is precisely defined, so this structure should look
+the same on both 32- and 64-bit systems.  And it does, except for one tiny
+little problem.  The size of the structure as defined is 300 bytes, which
+is not divisible by eight.  So if two of these structures were to be placed
+contiguously in memory, the 64-bit <tt>ino</tt> field would have to be
+misaligned in one of them.  To avoid this problem, the compiler will, on
+64-bit systems, round the size of the structure up to a multiple of eight,
+adding four bytes of padding at the end.
+So <tt>sizeof()</tt> on <tt>struct autofs_v5_packet</tt> will return 300 on
+a 32-bit system, and 304 on a 64-bit system.
+<p>
+That disparity is not a problem most of the time, but there is an
+exception.  Automounting is one of the many tasks being assimilated by the
+systemd daemon.  When systemd reads one of the above structures from the
+kernel, it checks the size of what it read against its idea of the size of
+the structure to ensure that everything is
+operating as it should be.  That check works just fine, as long as systemd
+and the kernel agree on that size.  And normally they do,
+but there is an exception: if systemd is running as a 32-bit process on a
+64-bit kernel, it will get a 304-byte structure when it is expecting 300
+bytes.  At that point, systemd concludes that something has gone wrong and
+gives up.
+<p>
+In February, Ian Kent merged <a
+href="http://git.kernel.org/linus/a32744d4abae24572eff7269bc17895c41bd0085">a
+patch</a> to deal with this problem.  One could be forgiven for calling the
+solution hacky: on 64-bit systems, the kernel's automount code will
+subtract four from the size of that structure if (and only if) it is
+talking with a user-space client running in 32-bit mode.  This patch makes
+systemd work in this situation; it was merged for 3.3-rc5 and fast-tracked
+into the various stable kernel releases.  Everybody then lived happily ever
+after.
+<p>
+...except they didn't.  It seems that the <tt>automount</tt> program from
+the autofs-tools package, which is still in use on a great many systems,
+had run into this problem a number of years ago.  At that time, the
+autofs-tools developers decided to work around the problem in user space.
+So, if automount determines that it is running in 32-bit mode on a 64-bit
+kernel (Linus <a href="/Articles/495003/">has little respect</a> for how
+that determination is done, incidentally), it will correct its idea of what
+the structure size should be.  If the kernel messes with that size, the
+automount "fix" no longer works, so Ian's patch fixes systemd at the cost of
+breaking automount.
+<p>
+So we are now in a situation where two deployed programs have different
+ideas of how the autofs protocol should work.  On pure 32- or 64-bit
+systems, both programs work just fine, but, depending on which kernel is
+being run, one or the other of the two will break in the 32-on-64
+configuration.  If Ian's patch remains, some users will be most unhappy,
+but reverting it will upset other users.  It is, in other words, a somewhat
+unfortunate situation.
+<p>
+Unfortunate, but not necessarily unrecoverable.  One possible way to fix
+things can be seen in <a href="/Articles/495004/">this patch</a> from
+Michael Tokarev.  In short, this patch looks at the name of the current
+command (<tt>current-&gt;comm</tt>) and compares it against
+"<tt>automount</tt>".  If the currently-running program is called
+"automount," the structure-size tweak is not applied and things work
+again.  For any other program (including systemd), the previous fix
+remains.  So things are fixed at the expense of having the kernel ABI
+depend on the name of the running program.  At best, this solution can be
+described as "inelegant."  At worst, there may be some other, unknown
+program with a different name that breaks in the same way automount does;
+any such program will remain broken with this fix in place.
+<p>
+Still, Linus has <a href="/Articles/495008/">conceded</a> that "<q>it's
+probably what we have to go with</q>".  But he preferred to look for
+a less kludgy and more robust solution.  One possibility was for the kernel
+to look at the
+size of the <tt>read()</tt> operation that would obtain the
+<tt>autofs_v5_packet</tt> 
+structure prior to writing that structure; if that size is either 300 or
+304, the kernel could give the 
+calling program the size it is expecting.  The problem here is that
+the <tt>read()</tt> operation is hidden behind the pipe, so the autofs
+code does not actually have access to the size of the buffer provided by
+user space.
+<p>
+So Linus came up with a different solution, the concept of "<a
+href="/Articles/495081/">packetized pipes</a>".  A packetized pipe
+resembles the normal kind with a couple of exceptions: each
+<tt>write()</tt> is kept in a separate buffer, and a <tt>read()</tt>
+consumes an entire buffer, even if the size of the read is smaller than the
+amount of data in the buffer.  With a packetized pipe, the kernel can
+always just write the larger (304-byte) structure size; if user space is
+only trying to read 300 bytes, then it will get what it expects and be
+happy.  So there is no need for special hacks in the kernel, just a
+slightly different type of pipe dynamics.  Following a suggestion from Alan
+Cox, Linus made an open with <tt>O_DIRECT</tt> turn on the packetized
+behavior, so user space can create such pipes if need be.
+<p>
+After a couple of false starts, Linus got this patch working and merged it
+just prior to the 3.4-rc5 release.  So the 3.4 kernel should work fine for
+either automount or systemd.
+<p>
+The kernel community got a bit lucky here; it was possible for a suitably
+clever and motivated developer to figure out a way to give both programs
+what they expect and make the system work for everybody.  The next time
+this kind of problem arises, the solution may not be so simple.  
+Maintaining ABI stability is not always easy or fun, but it is necessary to
+keep the system viable in the long term.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Development_model-User-space_ABI">Development model/User-space ABI</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-autofs">Filesystems/autofs</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/494993/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor495307"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 17:39 UTC (Mon)
+                               by <b>kilpatds</b> (subscriber, #29339)
+                              [<a href="/Articles/495307/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have to enquire: why not use the "packed" attribute?  The pipe-hack would still have to be used to keep backwards compatibility, but declaring the structure to be packed would then be the (IMHO: obviously correct) way of keeping future users from hitting the issue.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495307/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495310"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Packed</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 17:44 UTC (Mon)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/495310/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Because it's way too late to add "packed," that would have done nothing to fix the current users.
+<p>
+There has been some talk in the discussion of a version 6 of the autofs protocol that would address a number of shortcomings, but there's no particular hurry to get that into place.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495310/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor495819"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2012 14:18 UTC (Thu)
+                               by <b>stevem</b> (subscriber, #1512)
+                              [<a href="/Articles/495819/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Or even better: don't define structs in this way in the first place - keep them automatically naturally aligned... :-(<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495819/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495833"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2012 15:12 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/495833/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The twist here is that the i386 ABI only requires 4-byte alignment for 64-bit types, which is why the structure size differs.  Since i386 only supported accesses up to 32 bits, this seemed "natural" at the time.<br>
+<p>
+So, what do you define as natural alignment?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495833/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495835"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2012 15:28 UTC (Thu)
+                               by <b>stevem</b> (subscriber, #1512)
+                              [<a href="/Articles/495835/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've always tried to arrange structs in decreasing order of size to do that:<br>
+<p>
+64-bit types<br>
+32-bit types<br>
+16<br>
+8<br>
+<p>
+and it's worked for me. It *might* not be the best layout for caching performance, but for API structures like ioctls I think it's a clean way to go.<br>
+<p>
+Alternatively, add explicit padding in the structures to make them alignment-neutral. Much less clean, but better than having differently-sized structs depending on architecture.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495835/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495837"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2012 15:41 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/495837/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <P>That doesn't fix this structure, as I understand it.  The total size of the elements is 300 bytes, but the whole struct must be aligned to 8 bytes on 64 byte architectures, but only needs alignment 4 on the i386 ABI.</P>
+<P>Consider this much simpler structure:</P>
+<PRE>struct broken
+{
+    __u64 f1;
+    __u32 f2;
+};
+</PRE>
+<P>On the i386 ABI,<TT> sizeof(struct broken) </TT>is 12.  On the x86-64 ABI, it's 16.</P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495837/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495838"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2012 15:50 UTC (Thu)
+                               by <b>stevem</b> (subscriber, #1512)
+                              [<a href="/Articles/495838/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, yes. :-(<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495838/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor495865"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2012 18:46 UTC (Thu)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/495865/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Yes, but if you add padding fields you can ensure the same alignment on all reasonable architectures:</p>
+
+<pre>struct fixed
+{
+    __u64 f1;
+    __u32 f2;
+    __u32 pad1;
+};</pre>
+
+<p>This way sizeof(struct fixed) is 16 bytes on i386 and x86-64. Of course, that doesn't help with the structure from this article, because the smaller i386 alignment was written into the ABI. IMHO, any structures exposed through the ABI should be naturally aligned <em>and</em> marked as "packed", with explicit padding fields where necessary; alignment should not be left to the compiler where ABI compatibility is a concern.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495865/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495873"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2012 19:10 UTC (Thu)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/495873/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <P>That would generally be the best idea, but as you stated, it doesn't fix this structure, because the i386 ABI doesn't require natural alignment for 64-bit types, as per the definition you gave in your other comment.  The reason I asked is that i386's ABI is perverse in requiring natural alignment for some, but not all data types.  So, I wasn't sure if the concept of "natural" had different meaning in the context of i386's ABI.</P>
+<BLOCKQUOTE><I>IMHO, any structures exposed through the ABI should be naturally aligned and marked as "packed", with explicit padding fields where necessary; alignment should not be left to the compiler where ABI compatibility is a concern.</I></BLOCKQUOTE>
+<P>I tend to agree, and do this myself when I care about the actual layout of a struct.  Ok, I usually forego 'packed' since it isn't portable. I instead make the struct a multiple of the largest data type, and force fields onto natural boundaries for their types.</P><P>This practice is especially necessary when you have any "wire formats" or "on disk format."  You can almost think of packets crossing the kernel/user-space boundary as having "wire format" semantics in this case, with the minor difference that pointers are more meaningful in user-space exchanges than they usually are over, say, a TCP link.</P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495873/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor495862"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2012 18:30 UTC (Thu)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/495862/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; So, what do you define as natural alignment?</font><br>
+<p>
+"Natural alignment" is a term of art meaning that the address (or in this case, offset) of the data is a multiple of its size. It can be used independently of the target, and for any size, though it's usually applied to powers of two. For example, on most platforms with multiple page sizes, pages must be naturally aligned; you can't construct a 1MB hugepage from an arbitrary span of 256 4kB pages, but instead have to use a region aligned to a multiple of 1MB.<br>
+<p>
+In this case it would mean aligning 64-bit fields to an offset which is a multiple of eight bytes, even on i386 where only 32-bit alignment is required.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495862/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor495311"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing broken userspace is NOT the kernel's job</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 17:46 UTC (Mon)
+                               by <b>pr1268</b> (subscriber, #24648)
+                              [<a href="/Articles/495311/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>I think autofs and systemd should get their s**t together. While I think it's proper and appropriate for the kernel to avoid breaking userspace, I firmly believe it's also <b>not</b> the kernel's job to <i>fix</i> broken userspace!</p>
+
+<p>&lt;/rant&gt;</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495311/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495316"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing broken userspace is NOT the kernel's job</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 18:19 UTC (Mon)
+                               by <b>drag</b> (guest, #31333)
+                              [<a href="/Articles/495316/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's like telling somebody that just fell down the stairs and broke their arm that they were stupid for slipping and they just need to walk back to the top the of the stairs and do it right this time.  It's all fine and dandy, but it doesn't do anything to fix the current problem. <br>
+<p>
+Plus I don't understand why it's so terrible that systemd checks to make sure that the data it's getting from the kernel is the correct size.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495316/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495338"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Magic numbers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 21:16 UTC (Mon)
+                               by <b>man_ls</b> (guest, #15091)
+                              [<a href="/Articles/495338/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      But why check only for exactly 300 bytes? It would be understandable if systemd would check that the size of the data is >=300. That way there would be room to add padding or even new fields at the end, if needed.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495338/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495339"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Magic numbers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 21:19 UTC (Mon)
+                               by <b>felixfix</b> (subscriber, #242)
+                              [<a href="/Articles/495339/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Might be just general paranoia, to catch changes it doesn't know about.  It won't catch all since there's no check for the layout of the data, but if someone adds or removes a member, or changes the size of some, it has a chance of noticing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495339/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor495401"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Magic numbers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 8:03 UTC (Tue)
+                               by <b>mjt</b> (guest, #1515)
+                              [<a href="/Articles/495401/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is not a magic number, it is sizeof(kernel packet), which turned out to be different on 32bit and 64bit.  It is the unit of data kernel exchanges data with usespace, it is the protocol definition.  The protocol itself wasn't designed properly, that's the whole issue.<br>
+<p>
+Now, reading just 300 bytes (size of that packet on 32bit userspace) instead of 304 bytes which a 64bit kernel sent to userspace does the trick, but the pipe buffer now holds 4 bytes, which will be read by userspace as a NEW packet.  Even if new packet actually arrives, for the userspace the result will be complete garbage, since the packet boundary got lost.<br>
+<p>
+At any rate, no userspace trick will fix already released versions of userspace applications, which is the whole point.  Yes it could be made differently, but what's done is done and we don't want to break it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495401/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495518"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Magic numbers</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 18:34 UTC (Tue)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/495518/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+with the new packetized interface if you read 300 bytes, the other 4 bytes are forever lost, so the next read will get the correct packet boundary.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495518/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor495981"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing broken userspace is NOT the kernel's job</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 4, 2012 17:44 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/495981/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      That's the wrong analogy for this debate.  I'm sure you can think of a 100 cases where users got burned by a design decision in a user space program 5 years ago, and a kernel change today could compensate for it, but the consensus is the users should suffer.
+<p>
+Here's a closer analogy:  John has 12 steps in his house.  He likes to walk down them with his eyes closed and count the steps.  Mary invites John over to her house and he resists, saying "I know where everything is in my house and I'm afraid I would get lost in your house."  Mary assures him that her house is just like his in every relevant detail, and on that basis John accepts.  But Mary has 13 steps and John, walking down with his eyes closed and counting to 12, falls and breaks his arm.  Should Mary pay for his medical bills?
+<p>
+Did Mary break her promise?  Is having one more step in the staircase is a relevant detail?  Is a person entitled to walk down stairs with his eyes closed?
+<p>
+We typically say you can move a program from a 32 bit computer to a 64 bit one without change because the environment is the same in every relevant detail.  We also say you can move a program from kernel release N to N+1 for the same reason.  Automount and Systemd users are relying on some interpretation of those promises.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495981/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor495317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing broken userspace is NOT the kernel's job</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 18:26 UTC (Mon)
+                               by <b>vrfy</b> (guest, #13362)
+                              [<a href="/Articles/495317/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Systemd just did not like to get any "shit" together in userspace:<br>
+  <a href="http://lists.freedesktop.org/archives/systemd-devel/2011-September/003473.html">http://lists.freedesktop.org/archives/systemd-devel/2011-...</a><br>
+<p>
+Adding runtime matches for architectures in userland tools to find out what to expect from a running kernel interface is just not acceptable these days, and people should stop doing that. We need to fix what's broken, and not paper over it.<br>
+<p>
+It's surely not the kernel's job to fix userland tools, but it's even less the job of userspace to work around obviously non-working kernel interfaces, when they should be fixed instead.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor495315"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing broken userspace is NOT the kernel's job</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 18:27 UTC (Mon)
+                               by <b>arjan</b> (subscriber, #36785)
+                              [<a href="/Articles/495315/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+but reality happens as well......<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495315/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor495554"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing broken userspace is NOT the kernel's job</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 23:59 UTC (Tue)
+                               by <b>mezcalero</b> (subscriber, #45103)
+                              [<a href="/Articles/495554/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sorry, but systemd is not the place to put workarounds for broken APIs. Fix the stuff where it is broken, don't litter systemd code with it, thank you very much.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495554/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495560"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing broken userspace is NOT the kernel's job</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2012 5:02 UTC (Wed)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/495560/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have seen a very good companies product basically destroyed over many years of fixing things in the wrong place.<br>
+<p>
+In opensource software there is almost never a reason to do this, and never without discussing the problem first.<br>
+<p>
+That said, I have no problem with the sanity check that systemd is doing. They are not working around anything, they are just checking that what they are getting has a chance of being what they expect to get. They know the size of the object that they are getting, and so they only get that much data. fetching more would potentially cause other grief.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495560/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor495319"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">not all 32 bit compat, just x86</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 18:48 UTC (Mon)
+                               by <b>arnd</b> (subscriber, #8866)
+                              [<a href="/Articles/495319/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Note that part of the problem here is that 32 bit x86 handles the alignment of 64 bit integers different from everyone else. While there was originally no problem at all on the other architectures with compat support (powerpc, mips, s390, parisc and sparc), some user space tools added workarounds for x86 compat code that actually broke compat mode on all other architectures.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495319/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor495329"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 20:26 UTC (Mon)
+                               by <b>bdale</b> (subscriber, #6829)
+                              [<a href="/Articles/495329/">Link</a>] (12 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm a bit surprised that the apparent root cause of the conflict, that a patch needed for systemd was "fast-tracked" without a good understanding of the consequences for previously existing user space code, didn't even get a mention in the article.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495329/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495333"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 20:47 UTC (Mon)
+                               by <b>ernstp</b> (guest, #13694)
+                              [<a href="/Articles/495333/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yeah, that was what I was thinking also...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495333/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor495404"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 9:14 UTC (Tue)
+                               by <b>etrusco</b> (guest, #4227)
+                              [<a href="/Articles/495404/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+After reading Linus' comments I can't avoid being biased against automount (well, this and maybe the automount's old-age fame of being hacky and buggy).<br>
+As I see it systemd simply "discovered" a bug in the kernel and the maintainers decided a general solution in the kernel was the best. And why do you say it was "fast-tracked"? 5 moths don't seem that rushed to me - but of course it's a bit unpleasant that they failed to notice that the other obvious user of the API had a different "fix" during all that time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495404/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495410"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 10:05 UTC (Tue)
+                               by <b>cortana</b> (subscriber, #24596)
+                              [<a href="/Articles/495410/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+AIUI the problem only crops up when i386 userland is used on an amd64 kernel. Perhaps I'm being hopelessly naive, but I'd hope that such a setup is not particularly commonplace.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495410/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495412"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 10:29 UTC (Tue)
+                               by <b>Fowl</b> (subscriber, #65667)
+                              [<a href="/Articles/495412/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Why? Seems like a perfectly reasonable situation.
+
+No bloated 64bit pointers but 4gb per process. 
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495412/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor495435"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 15:09 UTC (Tue)
+                               by <b>bdale</b> (subscriber, #6829)
+                              [<a href="/Articles/495435/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+FWIW, 64 bit kernel and 32 bit userspace is what I run on my notebook.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495435/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495960"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 4, 2012 14:37 UTC (Fri)
+                               by <b>bronson</b> (subscriber, #4806)
+                              [<a href="/Articles/495960/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How do you set that up?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495960/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor496693"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2012 12:36 UTC (Thu)
+                               by <b>nye</b> (subscriber, #51576)
+                              [<a href="/Articles/496693/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;How do you set that up?</font><br>
+<p>
+aptitude install linux-image-amd64<br>
+<p>
+Actually, it might even be the default these days if you install the i686 version of Debian on a 64-bit machine.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/496693/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor495478"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 16:45 UTC (Tue)
+                               by <b>drag</b> (guest, #31333)
+                              [<a href="/Articles/495478/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am running 64bit kernel with 32bit userland on a couple of my systems. <br>
+<p>
+It's a very good option.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495478/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor496873"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2012 13:21 UTC (Fri)
+                               by <b>WolfWings</b> (subscriber, #56790)
+                              [<a href="/Articles/496873/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's becoming the norm actually, lots of distro's do that by default or support it on their install/rescue media since it means they no longer need to build two separate userspaces, they just include two kernels to boot from on one disc, so for 99% of actual users there's only one specific disc image to download as a result.<br>
+<p>
+Especially since a LOT of the time you _need_ a 32-bit userland to deal with a lot of binary packages out there or to get stuff running under WINE properly, it's easier for the "end user" images to stick to 32-bit userland even on 64-bit platforms. And even if you have a 64-bit userland you'll find it littered with various 32-bit-compat libraries.<br>
+<p>
+Servers? Those are a different story, but many of those folks don't even need 32-bit compatibility so they can end up with a cruft-free pure-64-bit userland without all the 'compat' crap bolted in. So it reduces the size of the true-64-bit install media too, since there's no 32-bit cruft now.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/496873/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor497429"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2012 23:04 UTC (Wed)
+                               by <b>steffen780</b> (guest, #68142)
+                              [<a href="/Articles/497429/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+IIRC that is what Linus recommends for many situations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/497429/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor495493"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 17:14 UTC (Tue)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/495493/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess that's the real issue here:  Linux accidentally broke the user-space ABI, and user-space hacked around it.  (For me, that raises the question:  Did they ever report this breakage to the kernel folks?  If not, shame on them.  If so, why didn't we fix this then?)  <br>
+<p>
+In any case, that effectively enshrined the bug as a new facet of the Linux kernel ABI.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495493/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495494"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Nobody can know everything, but...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 17:21 UTC (Tue)
+                               by <b>raven667</b> (subscriber, #5198)
+                              [<a href="/Articles/495494/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That communication and feedback loop from user space developers is really a critical factor.  I would theorize that this explains a lot in the internals of older proprietary software such as Oracle or Solaris or Windows where the development team is kept away from customers.  Raymond Chen has many curious examples of weird compatibility hacks in Windows for example which closely mirror this situation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495494/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor495335"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 21:09 UTC (Mon)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/495335/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Packetized pipes seem like a bad idea.
+<p>
+1) O_DIRECT doesn't what this patch says it should mean. O_DIRECT means "no buffering", not "weird read(2) games". O_DIRECT on a pipe ought to mean something like "block write(2) until someone blocks in read(2), then memcpy directly to the reader's buffer", and with this patch, O_DIRECT can never mean that for pipes.
+<p>
+2) This "packetized pipe" system looks like an invitation for data loss. It's one thing to create a pipe mode that preserves message boundaries (like NT's <a href="http://msdn.microsoft.com/en-us/library/windows/desktop/aa365150%28v=vs.85%29.aspx">PIPE_TYPE_MESSAGE named pipes</a>), but the right behavior should be to cause read(2) to fail unless the reader gets the whole packet. (That's how NT message pipes work.) Because of the silent data loss issue, these packetized pipes aren't truly general-purpose.
+<p>
+In general, this approach seems like an overly general solution to a very particular problem.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495335/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495376"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 2:46 UTC (Tue)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/495376/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Applying an old flag to a new context is always a best-effort sort of thing.  It is rarely perfect.<br>
+<p>
+O_DIRECT typically has significant alignment restrictions, and this new semantic has some sort of alignment restrictions (if you squint a bit).<br>
+<p>
+O_SYNC is also available for pipes and the man page say "Any writes on the resulting file descriptor will block the calling process until the data has been physically written to the underlying hardware", and if we understand "the memory in the reading process" to be "the underlying hardware", then your suggested feature (which I like) would fit to some degree with O_SYNC.<br>
+<p>
+<p>
+The data-loss issue sounds problematic, but we seem to have lived with it with SOCK_DGRAM sockets so I suspect we will survive with pipes.  Hopefully the FIONREAD ioctl will provide the number of bytes that can be read, so a well written program can avoid losing data.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495376/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495391"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 7:26 UTC (Tue)
+                               by <b>butlerm</b> (subscriber, #13312)
+                              [<a href="/Articles/495391/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Discarding data isn't so much of a problem as knowing when data has been discarded. recvmsg(2) is nice for that. You generally can't have message per read semantics for arbitrary size messages in any case because the kernel buffers must store an entire message to avoid unusual complexities.  (Ask the SCTP people about the fun problems you get trying to implement a point-to-multipoint socket that supports arbitrary size messages.)<br>
+<br>
+Considering that reality, all you really need is some reliable way to know whether your message has been truncated.  Sockets have MSG_PEEK / MSG_TRUNC for that, so I guess the question is why wouldn't it be practical to make recvmsg(2) work on a packetized pipe so that you can do the same thing? 
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495391/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495885"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2012 19:30 UTC (Thu)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/495885/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Interestingly, packetised pipes have existed for a while, see SOCK_SEQPACKET (possibly only supported for AF_UNIX). They're indeed useful in cases where you want to be sure that clients don't lose sync when the packets change size. Though a well designed protocol doesn't have the problem in the first place.<br>
+<p>
+I suppose changing the type of pipe to userspace would be an even greater ABI change.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495885/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor496650"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2012 5:53 UTC (Thu)
+                               by <b>kevinm</b> (guest, #69913)
+                              [<a href="/Articles/496650/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, yes - changing the type of file descriptor used wouldn't fix the existing binaries, which is the whole problem (in the autofs protocol, the userspace program creates the pipe with pipe(2)).<br>
+<p>
+I think it was mentioned somewhere in the thread that an SOCK_SEQPACKET socket would have been a better design, but hindsight is always an exact science.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/496650/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor495352"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 23:18 UTC (Mon)
+                               by <b>renox</b> (guest, #23785)
+                              [<a href="/Articles/495352/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Bleah, this API seems really ugly: when they created an API which can return different structures according to the kernel configuration, why didn't they add a word in the structure identifying the structure returned?<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495352/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495446"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 15:40 UTC (Tue)
+                               by <b>juliank</b> (guest, #45896)
+                              [<a href="/Articles/495446/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The different size was apparently an accident, not intended.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495446/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor495359"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2012 23:59 UTC (Mon)
+                               by <b>ewan</b> (guest, #5533)
+                              [<a href="/Articles/495359/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How does this even solve the problem? Surely any future releases of autofs using tools that are aware enough of the issue to use O_DIRECT to turn on the new, fixed, behaviour, would also be aware enough of the problem to work around it themselves? And any old releases won't be using O_DIRECT, and won't get the fix.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495359/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495362"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 0:36 UTC (Tue)
+                               by <b>hamjudo</b> (guest, #363)
+                              [<a href="/Articles/495362/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      This is a two part kludge. Part one is adding the "unusual" behavior to pipes. Part two, is making it so that the kernel side of the autofs code will set the flag in the right situations.<p>
+
+The history of operating systems is filled with examples of bad design decisions that weren't caught in time, and thus got stuck in the interface definition.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495362/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495364"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 0:55 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/495364/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Almost.  The kernel side <i>always</i> turns on packetized behavior so that things work as expected with all known user-space binaries.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495364/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495434"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 15:08 UTC (Tue)
+                               by <b>ewan</b> (guest, #5533)
+                              [<a href="/Articles/495434/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm sure I'm being dense, but when the article says "Linus made an open with O_DIRECT turn on the packetized behavior" surely that rather implies that it's off unless you use O_DIRECT? <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495434/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor495442"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 15:38 UTC (Tue)
+                               by <b>hamjudo</b> (guest, #363)
+                              [<a href="/Articles/495442/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      It is off unless, something turns on O_DIRECT. The kernel side of the autofs interface turns on O_DIRECT. As far as I know, it isn't turned on anywhere else in the kernel (yet).<p>
+
+Nothing, but common sense, prevents users from writing programs that use this feature.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495442/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor495447"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 1, 2012 15:41 UTC (Tue)
+                               by <b>juliank</b> (guest, #45896)
+                              [<a href="/Articles/495447/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As far as I understand it, if you create such a a pipe yourself, then you use O_DIRECT; and for autofs, the kernel creates such a pipe itself and you thus automatically get that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/495447/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor496095"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 7, 2012 11:23 UTC (Mon)
+                               by <b>mjthayer</b> (guest, #39183)
+                              [<a href="/Articles/496095/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not that it would have helped immediately in this situation, but I wonder why kernel ABIs are not designed in a way that they can be easily be emulated in user space.  Then when people decide that an ABI is old and broken it could be replaced with a better one in the kernel and optional user space emulation could be added for the old ABI and any remaining users.  Which given the way Linux distributions are organised would mean that the emulation would go into a package which would become a dependency of the packages for those users.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/496095/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor496101"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 7, 2012 14:04 UTC (Mon)
+                               by <b>dgm</b> (subscriber, #49227)
+                              [<a href="/Articles/496101/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What you're describing is a library, just like the Standard C Library, or pthreads. Your hard drive is full of them.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/496101/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor496102"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 7, 2012 14:24 UTC (Mon)
+                               by <b>mjthayer</b> (guest, #39183)
+                              [<a href="/Articles/496102/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree, shared libraries in user space tend to have that property.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/496102/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor496694"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2012 12:41 UTC (Thu)
+                               by <b>slashdot</b> (guest, #22014)
+                              [<a href="/Articles/496694/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's simpler and faster to just do the "emulation" in the kernel and keep it there forever.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/496694/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor496895"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing the unfixable autofs ABI</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 11, 2012 16:49 UTC (Fri)
+                               by <b>amonnet</b> (guest, #54852)
+                              [<a href="/Articles/496895/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+a solution which leads to the current problem ...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/496895/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor497315"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Only Natural Alignment Is Byte Alignment</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2012 10:03 UTC (Wed)
+                               by <b>ldo</b> (guest, #40946)
+                              [<a href="/Articles/497315/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <P>This is why alignment on greater than one-byte boundaries should <B>never</B> be included in any interchange format or protocol, because invariably the architectural considerations that make them look like a good idea at one end in one situation will end up looking stupid at the other end or in another situation. And because it’s an interchange format, you cannot just simply change it without breaking compatibility.
+<P>Alignment only makes sense for <B>internal</B> program in-memory structures, which can be changed with a simple recompile and restart. Interchange formats should always be defined with <B>no</B> alignment padding. End of story.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/497315/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor497317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Only Natural Alignment Is Byte Alignment</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2012 10:33 UTC (Wed)
+                               by <b>amonnet</b> (guest, #54852)
+                              [<a href="/Articles/497317/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Look's like many protocol (think IPv4, etc) have been carefully crafted to provide natural alignment bigger than a byte. No padding but a nice choice of field size and position. <br>
+Anyway, it's not as if 16, 32, 64, .. are just some random numbers.<br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/497317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor497323"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Only Natural Alignment Is Byte Alignment</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2012 10:50 UTC (Wed)
+                               by <b>amonnet</b> (guest, #54852)
+                              [<a href="/Articles/497323/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To make things clear, alignment paddings in protocol are called private/unused/future fields.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/497323/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor497332"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Only Natural Alignment Is Byte Alignment</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2012 12:15 UTC (Wed)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/497332/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sure, but all the fields' positions are still explicitly specified independently of any alignment concerns. I.e. the fields may have been constructed with regard for alignment, however the protocol doesn't depend on any alignment concerns.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/497332/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2012, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

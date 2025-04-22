@@ -1,0 +1,646 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Writing network flow dissectors in BPF [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/764200/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/764310/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/764200/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Writing network flow dissectors in BPF</h1>
+</div>
+<div class="ArticleText">
+<div class="GAByline">
+           <p>September 6, 2018</p>
+           <p>This article was contributed by Marta Rybczyńska</p>
+           </div>
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>Network packet headers contain a great deal of information, but the
+kernel often only needs a subset of that information to be able to perform
+filtering or associate any given packet with a flow. The piece of code that
+follows the different layers of packet encapsulation to find the important
+data is called a flow dissector. In current Linux kernels, the <a
+href="https://elixir.bootlin.com/linux/v4.18.6/source/net/core/flow_dissector.c">flow
+dissector</a>
+is written in C. A <a href="/Articles/763938/">patch set</a> has been
+proposed recently to implement it in BPF with the clear goal of improving
+security, flexibility, and maybe even performance.</p>
+
+<h4>Flow dissection in the kernel</h4>
+
+<p>Flow dissector usage is common in high-speed networks, but it is not limited
+to that use case. Information from the flow dissector may be used
+by a firewall or a traffic filter, or in any other situation where complete
+packet parsing is not necessary. For example, just the source IP address or UDP
+port number may be enough for the kernel to decide on the action to
+perform on a packet.  The flow dissector extracts just
+the values the caller has requested from the headers; those values are
+called "keys". The Linux implementation of the flow dissector is not
+the only one; Wireshark, for example, has its own version of <a
+href="https://www.wireshark.org/docs/wsdg_html_chunked/ChapterDissection.html">packet
+dissection</a>.</p>
+
+<p>Let us show packet dissection on an example of extracting fields from a
+UDP packet; in this case, it has been asked to extract two keys: the IP
+addresses and the UDP port numbers.  The dissector starts at the Ethernet
+layer to check whether 
+the packet contains an IP header directly or if there are VLANs or other
+encapsulations to deal with. At the IP level it will save the source and
+destination addresses, along with the protocol field, which determines
+the type of the payload protocol. Assuming that the protocol is UDP, the
+dissector will look for the source and destination port fields,
+respectively, and save their values. At that point, the requested keys have
+been found and the dissector's work is done.  Note that the real dissector
+will be more complicated; it will also follow other encapsulation cases
+(if the UDP header does not directly follow the IP header, for example),
+take into account the 
+packet fragmentation, and possibly save more keys.</p>
+
+<p>Linux currently includes one built-in flow dissector; the <a
+href="https://www.netdevconf.org/2.2/papers/horman-tcflower-talk.pdf">flower
+classifier [PDF]</a> is the main user. The idea of using a flow dissector
+based on BPF was <a
+href="http://vger.kernel.org/netconf2017_files/rx_hardening_and_udp_gso.pdf">raised
+back in 2017 [PDF]</a>. Petar Penkov and Willem de Bruijn have recently
+proposed to add a
+flow dissector written in BPF for the receive path.</p>
+
+<h4>Switching to BPF</h4>
+
+<p>Using BPF for flow dissection adds a number of interesting security
+features. Certain types of vulnerabilities become impossible because BPF
+programs are 
+guaranteed to terminate and thus won't go into an infinite loop.
+The submission mentioned <a
+href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2013-4348">CVE-2013-4348</a>
+as an illustration of the type of problem that can be avoided.
+That vulnerability consisted of the flow dissector entering an
+infinite loop when using IPIP encapsulation in cases where it received a
+packet with a tiny header length value.</p>
+
+<p>Additionally, in BPF, all memory accesses are checked, so it is
+not possible for a program to read outside of the packet bounds. Another
+possible feature of the new flow dissector is allowing the administrator to
+disable the dissection of packets containing unused protocols,
+reducing the number of possible attacks. If a bug is discovered, the
+administrator can remove the faulty code from the dissector without a
+kernel recompilation or even a reboot. Or, they can add their own specialty
+dissector if needed.</p>
+
+<p>The proposed patch adds the BPF execution in
+<tt>__skb_flow_dissect()</tt>; each network namespace can have its own
+dissector.  The submission includes an <a
+href="/ml/netdev/20180830182301.89435-3-peterpenkov96@gmail.com/">example
+program</a> to illustrate the concept. It already handles most of the
+protocols needed, including multiple levels of IP encapsulation, VLAN, and
+IPv4/v6 extension headers.</p>
+
+<p>The possible return values of the BPF flow dissector were the subject of a
+discussion. Currently the program returns <tt>BPF_OK</tt> (if dissection
+has completed successfully) or <tt>BPF_DROP</tt> (if the dissector came to
+a conclusion that it is necessary to drop the packet). Song Liu <a
+href="/ml/netdev/CAPhsuW5pOYdTx+w06=xW0XMPkjx62RsJ2EP5iJZCx_3QQZb=xw@mail.gmail.com/">asked</a>
+if there should be a separate value to allow fallback to the C
+implementation if the BPF program encounters a protocol it does not
+support. Penkov <a
+href="/ml/netdev/CAG4SDVVS1Akdg7hkFwkencBk_rZL5zGRYREHtAiK3+Cg=oL3pw@mail.gmail.com/">answered</a>
+that fallback to C would defeat the security guarantees provided by
+BPF.  De Bruijn <a 
+href="/ml/netdev/CAF=yD-KciJUH6Mi_oE2rqfOPWTLvEAdinos64fL=0+dEA=_gFQ@mail.gmail.com/">explained
+further</a> that this idea had been discussed, but they had decided
+against it. The goal of the BPF flow dissector is to replace the built-in
+version; falling back to the C dissector would make reaching this goal harder
+because users would quickly come to depend on this behavior.</p>
+
+<p>The location of the hook for the BPF program was also discussed. It
+would be possible to add it to the XDP (eXpress Data Path) hook instead,
+for example. The authors of the proposal did not go that way for
+multiple reasons. The first reason is that it would be more expensive
+&mdash; the XDP hook executes before <a href="/Articles/358910/">GRO</a>
+(generic receive offload), so the dissector would run more often. The XDP
+hook also runs before the SKB structure to hold the packet is allocated,
+and there is no easy way to move
+the dissected keys to the SKB afterwards. It could be possible to
+implement both flow dissection and GRO in a single pass, but that would
+require much more flow state to work.
+
+<p>In the first version of the submission, the definitions of the <a
+href="https://elixir.bootlin.com/linux/v4.18.6/source/include/net/flow_dissector.h">various
+structures</a> used to hold flow-dissector keys were copied into the BPF
+program itself, since they are otherwise not visible to user space. Alexei
+Starovoitov <a
+href="/ml/netdev/20180820205205.jj7e75pulwqkorpr@ast-mbp/">noted</a> that
+everything used by a BPF program becomes part of the user-space API; he
+suggested three solutions: moving all the key structures to the user-space
+headers, wrapping all of them into a separate structure and modifying the
+code when the internal ones change, or waiting for <a
+href="/Articles/750695/">BTF</a> to solve the issue. The last option was
+eliminated since BTF is not ready for this kind of use yet. As networking
+maintainer  David Miller
+also <a
+href="/ml/netdev/20180820.192446.1163576988616844281.davem@davemloft.net/">supported</a>
+the wrapping option, this is the solution the second
+submission used: <tt>struct bpf_flow_keys</tt> contains all of the
+supported keys
+so that they are available to the BPF program.</p>
+
+<p>
+The first version of this patch set ran into an interesting problem: since
+the offset at which to start dissection in a packet is supplied by the
+caller, the BPF verifier cannot ensure that accesses using that offset will
+remain within bounds.  So relatively slow accessors had to be used to get
+at packet data.  Daniel Borkmann <a
+href="/ml/netdev/3551c6f1-61d4-6f2d-885f-9f84131179e9@iogearbox.net/">suggested</a>
+a simple trick to get around this issue: the BPF program need only check
+that the offset is in bounds at the beginning; after that, the verifier can
+prove that subsequent uses will remain within bounds.  That change 
+<a
+href="/ml/netdev/CAG4SDVXU8kT_ZX17GkZb8BVBEHGRSR9vBe+jE_EavkBzjOeECQ@mail.gmail.com/">improved
+the performance</a> of BPF dissectors to be comparable with the in-kernel
+dissector.
+
+<h4>Current state</h4>
+
+<p>
+A performance evaluation is
+included with the submission; it compares the BPF flow dissector with
+the in-kernel dissector and the no-op dissector on a UDP flow.
+The speed of the dissectors is similar, with
+the BPF one performing slightly better than the in-kernel dissector. More
+evaluations will probably
+follow, but the results are already encouraging.</p>
+
+<p>The BPF flow dissector already integrates with the flower classifier since it
+uses the same interface. The tests included with the patch set show this
+integration: the demonstration drops packets from a specified UDP source
+port in the scenario we covered at the beginning of the article. As
+flower uses the flow dissector to match flows, dropping the right ones shows
+the right dissection.</p>
+
+<p>The BPF flow dissector is another part of an increasingly BPF-based
+network processing model that includes
+XDP (<a href="/Articles/750845/">covered here</a> previously).  The
+goal of the BPF flow dissector is ambitious: to replace the built-in
+one. Time will tell if it will succeed.  Before that,
+the patch set received positive comments and it seems likely that it will be
+included in the near future.</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#BPF-Networking">BPF/Networking</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Networking">Networking</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Rybczynska_Marta">Rybczynska, Marta</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/764200/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor764339"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 6, 2018 22:15 UTC (Thu)
+                               by <b>mtaht</b> (subscriber, #11087)
+                              [<a href="/Articles/764339/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The flow dissector is also heavily used by the various fq based qdiscs.<br>
+<p>
+I still have a hard time believing an ebpf version would be even close in speed to the C version... but... cool. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764339/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor764353"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2018 9:26 UTC (Fri)
+                               by <b>grawity</b> (subscriber, #80596)
+                              [<a href="/Articles/764353/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      As long as it's <em>compiled</em> to similar machine code (iirc, ebpf is compiled on load) then there's no reason it shouldn't run at a similar speed, is there?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764353/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor764402"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2018 17:45 UTC (Fri)
+                               by <b>mm7323</b> (subscriber, #87386)
+                              [<a href="/Articles/764402/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Years of work on C compilers makes them pretty good both at higher level transformations and low level machine specific optimisation.<br>
+<p>
+I'd be surprised if this could easily be beaten or quickly replicated by the eBPF compiler.<br>
+<p>
+The only case I see BPF winning is if the BPF program is produced and compiled specifically for the task in hand and thus omits a lot of option checking and branches that are not used in the specific dissector.  This could well be what's happening here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764402/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor764408"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2018 19:11 UTC (Fri)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/764408/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The nature of the BPF instruction set and virtual machine also makes it easier for a compiler to elide rote conditionals and branches, such as related to bounds checking, regardless of the scope and SLoC of the policy logic. This can be accomplished in C, but the language and environment have many more degrees of freedom so it requires careful and deliberate use of data structures[1] and composition[2] such that the compiler can readily ascertain and prove the variants through complex conditionals, type conversions, and deep call chains. Such careful design is normally lacking in typical C software stacks, including Linux kernel networking code, and its one of those aspects of programming (like good error handling, OOM recovery, or concurrency modeling) that demands strict discipline across the code base from the very outset.<br>
+<p>
+A BPF compiler should have an easier time optimizing data access because of the stricter invariants baked into the design; and because these invariants demand greater discipline from the outset. C compilers are super sophisticated and the eBPF compiler quite naive, but we overestimate the ease of proving constraints in general purpose code and underestimate the dividends from code underpinned by strong, natural invariants.<br>
+<p>
+I think this is one aspect of BPF that indisputably gives it a leg up, notwithstanding the abusive use of BPF. I've been critical of the shift to using BPF and eBPF as a green field for reinventing subsystems that are more maintainable and transparent using the normal C kernel interfaces and architecture. From a functional perspective I'm suspicious of heavy BPF usage, but I can't deny the technical potential.<br>
+<p>
+[1] For example, using fixed-sized arrays...<br>
+[2] ...and passing them in a way that access bounds remain easily statically provable despite C's pointer decay semantics. (E.g. keep pointer derivations in lexically close proximity to parameter declarations and variable definitions containing the array.) Relying on the compiler to hoist bounds checking out of loops has proven spotty at best. Like JIT optimizations and performance claims, it's theoretically workable but difficult for compilers to resolve consistently. Plus, such hoisting can be done more reliably in something like BPF because there are more invariants enforced from the outset.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764408/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor764417"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2018 20:32 UTC (Fri)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/764417/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't know BPF at all, but I can support the idea that it is remarkably difficult to prove constraints in C.<br>
+<p>
+In general, in high performance computing situations, one reason Fortran is sometimes preferred is that it does not have pointers (in practical terms - they do exist but are very little used).  A pointer in C can point *anywhere*, so unless the compiler can trace its entire lifecycle, they can make lots of otherwise relatively straightforward optimizations very hard.  Pointers can also point in to the middle of what you'd like to have as unitary data types, again preventing certain optimizations.  So in general, Fortran code is more easily optimized than C.  (There are modified dialects of C that implement some additional constraints for this same reason (C11 has some effort in this direction, I believe).)<br>
+<p>
+That specific example might not apply here, but is hopefully interesting.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764417/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor764424"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 7, 2018 22:25 UTC (Fri)
+                               by <b>mm7323</b> (subscriber, #87386)
+                              [<a href="/Articles/764424/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed, it has often been said, and it is logically true, that higher level languages with stronger typing and more descriptive constructs should allow for better compiler optimisation and faster execution.<br>
+<p>
+Often that's not the case as code can be a mess in any language- and though this may also be a situation where the C is aged and not well optimised.<br>
+<p>
+The security benefits of eBPF make this initiative a good thing though.  And if anything, further use of eBPF should help drive optimisation efforts in the compiler/assembler.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764424/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor764436"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2018 15:08 UTC (Sat)
+                               by <b>mtaht</b> (subscriber, #11087)
+                              [<a href="/Articles/764436/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've heard these sorts of defenses of jitted code over and over again for 30 years. Please forgive me for being dubious as to any advantages in real world applications on anything other than toy benchmarks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764436/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor764582"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2018 17:14 UTC (Tue)
+                               by <b>jezuch</b> (subscriber, #52988)
+                              [<a href="/Articles/764582/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Java, a JITted runtime, actually is pretty fast. What drags it down in real world workloads is garbage collection pauses. There are techniques that avoid allocation, and thus the GC, but barely anyone uses them.<br>
+<p>
+And the Graal compiler available in newer OpenJDK promises to show what a JIT is really capable of, because the current compiler is so old and complex that progress in it ceased a long time ago. Early adopters of Graal report even 20% improvements, if I remember correctly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764582/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor764540"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2018 9:09 UTC (Tue)
+                               by <b>miquels</b> (guest, #59247)
+                              [<a href="/Articles/764540/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <br>&gt; [1] For example, using fixed-sized arrays...
+<br>&gt; [2] ...and passing them in a way that access bounds remain easily statically provable despite C's pointer decay semantics.
+<p>
+Found this posting by Walter Bright from 2009. Too bad no C compiler has implemented something like it (AFAIK):
+<a href="https://www.digitalmars.com/articles/b44.html">C's Biggest Mistake</a>.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764540/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor764435"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 8, 2018 15:03 UTC (Sat)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/764435/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Higher level transformations can still be done when compiling to eBPF, since they are done before instruction selection. So LLVM does the first round of optimization and emits eBPF, while the kernel does bytecode verification and x86 instruction selection. Where a regular compiler has an edge is in register allocation and target-dependent loop optimizations (optimizing induction variables, choosing addressing modes, etc.).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764435/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor764686"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 13, 2018 11:45 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/764686/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Are loops permitted in eBPF now? I mean, there's no reason loops that the verifier can prove terminate might not exist in eBPF, but last I knew they were still prohibited (in check_cfg()). (... I just checked, and that's still true in master, and in -next.)<br>
+<p>
+In the absence of loops I don't see that target-dependent loop optimizations are going to be particularly relevant (except, I suppose, for complete unrolling.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764686/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor764581"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 11, 2018 17:06 UTC (Tue)
+                               by <b>jezuch</b> (subscriber, #52988)
+                              [<a href="/Articles/764581/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Years of work on C compilers makes them pretty good both at higher level transformations and low level machine specific optimisation.</font><br>
+<p>
+A C compiler is like a cow. It's big and complex (how many stomachs?) because it has to be if it wants to stand a chance extracting anything of value from the extremely low quality food it takes.<br>
+<p>
+Assembler, on the other hand, is like a dog. It's much simpler because transition from meat to meat is kind of easy.<br>
+<p>
+But C? Nope. It has to work *hard*.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764581/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor764614"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Writing network flow dissectors in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 12, 2018 11:27 UTC (Wed)
+                               by <b>dbkm11</b> (subscriber, #125598)
+                              [<a href="/Articles/764614/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"Linux currently includes one built-in flow dissector; the flower classifier [PDF] is the main user." It's one user but /not/ the main one. Calculating the skb-&gt;hash is done using the flow dissector and this is done for every packet in the stack, and its something that cannot be compiled out, hence the target to reduce attack surface there.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764614/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

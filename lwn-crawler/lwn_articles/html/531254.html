@@ -1,0 +1,755 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Improving ticket spinlocks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/531254/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/530215/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/531254/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Improving ticket spinlocks</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 3, 2013</br>
+           </div>
+Spinlocks, being the lowest-level synchronization mechanism in the kernel,
+are the target of seemingly endless attempts at performance enhancement.
+The <a href="/Articles/267968/">ticket spinlock</a> mechanism used in the
+mainline has resisted such attempts for a few years.  Now, though, some
+developers have identified a performance bottleneck associated with these
+locks and are busily trying to come up with an improved version.
+<p>
+A spinlock is so-named because a CPU waiting for a contended lock will
+"spin" in a tight loop, repeatedly querying the lock until it becomes
+available.  Ticket spinlocks adjust this algorithm by having each waiting
+CPU take a "ticket" so that each CPU obtains the lock in the order in which
+it arrived.  These locks thus resemble the "take a number" mechanisms found
+at deli counters or motor vehicle division offices worldwide — though, with
+luck, the wait is rather shorter than is required to renew a driver's
+license in your editor's part of the world.  Without the ticket mechanism,
+which was added for the 2.6.25 release, the kernel's spinlocks were unfair;
+in some situations, some waiters could be starved for an extended period of
+time.
+<p>
+It has long been understood that lock contention reduces system performance
+considerably.  The simple act of spinning for a lock clearly is not going
+to be good for performance, but there are also caching issues to take into
+account.  If two CPUs are repeatedly acquiring a spinlock, the memory
+location representing that lock will bounce back and forth between those
+CPUs' caches.  Even if neither CPU ever has to wait for the lock, the
+process of moving it between caches will slow things down considerably.
+For that reason, interest in lockless algorithms has been growing for many
+years.
+<p>
+In the case of a contended lock, though, cache contention would appear to
+be less of an issue.  A CPU spinning on a lock will cache its contents in a
+shared mode; no cache bouncing should occur until the CPU owning the lock
+releases it.  Releasing the lock (and its acquisition by another CPU)
+requires writing to the lock, and that requires exclusive cache access.
+The cache line movement at that time hurts, but probably not as much as
+waiting for the lock in the first place.  So it would seem that trying to
+optimize cache behavior in the contended case is not likely to produce much
+in the way of useful results.
+<p>
+That picture is not complete, though; one must take a couple of other facts
+into account.  Processors do not cache a single value; they cache a "line"
+of (typically) 128 consecutive bytes as a single unit.  In other words, the
+cache lines in any contemporary processor are 
+almost certainly significantly larger than what is required to hold a
+spinlock.  So when a CPU needs 
+exclusive access to a spinlock's cache line, it also gains exclusive access
+to a significant chunk of surrounding data.  And that is where the other
+important detail comes into play: spinlocks tend to be embedded within the
+data structures that they protect, so that surrounding data is typically
+data of immediate interest to the CPU holding the lock.
+<p>
+Kernel code will acquire a lock to work with (and, usually, modify) a
+structure's contents.  Often, changing a field within the protected
+structure will require access to the same cache line that holds the
+structure's spinlock.  If the lock is uncontended, that access is not a
+problem; the CPU owning the lock probably owns the cache line as well.  But
+if the lock is contended, there will be one or more other CPUs constantly
+querying its value, obtaining shared access to that same cache line and
+depriving the lock holder of the exclusive access it needs.  A subsequent
+modification of data within the affected cache line will thus incur a cache
+miss.  So
+CPUs querying a contended lock can slow the lock owner considerably, even
+though that owner is not accessing the lock directly.
+<p>
+How badly can throughput be impacted?  In the description of his <a
+href="/Articles/530458/">patch adding proportional backoff to ticket
+spinlocks</a>, Rik van Riel describes a microbenchmark that is slowed by a
+factor of two when there is a single contending CPU, and by as much as a
+factor of ten with many CPUs in the mix.  That is not just a slowdown; that
+is a catastrophic loss of performance.  Needless to say, that is not the
+sort of behavior that kernel developers like to see.
+<p>
+Rik's solution is simple enough.  Rather than spinning tightly and querying a
+contended lock's status, a waiting CPU should wait a bit more patiently,
+only querying the lock occasionally.  So his patch causes a waiting CPU to
+loop a number of times doing nothing at all before it gets impatient and
+checks the lock again.  It goes without saying that picking that "number of
+times" correctly is the key to good performance with this algorithm.  While
+a CPU is looping without querying the lock it cannot be bouncing cache
+lines around, so 
+the lock holder should be able to make faster progress.  But too much
+looping will cause the lock to sit idle before the owner of the next ticket
+notices that its turn has come; that, too, will hurt performance.
+<p>
+The first step in Rik's patch series calculates how many CPUs must release
+the lock before the current CPU can claim it (by subtracting the current
+CPU's ticket number from the number currently being served) and loops 50
+times for every CPU that is ahead in the queue.  That is where the
+"proportional backoff" comes in; the further back in line the CPU is, the
+longer it will wait between queries of the lock.  The result should be a
+minimizing of idle looping while also minimizing cache traffic.
+<p>
+The number 50 was determined empirically, but it seems unlikely that it
+will be optimal for all situations.  So the final part of Rik's patch set
+attempts to tune that number dynamically.  The dynamic delay factor is
+increased when the lock is found to be unavailable and decreased when the
+lock is obtained.  The goal is to have a CPU query the lock an average of
+2.7 times before obtaining it. The number 2.7, once again, was obtained by
+running lots of tests and seeing what worked best; subsequent versions of
+the patch have tweaked this heuristic somewhat.  
+Details aside, the core idea is that the delay factor (a per-CPU value that
+applies to all 
+contended locks equally) will increase for workloads experiencing more
+contention, tuning the system appropriately.  
+<p>
+
+That said, the notion of a single delay
+for all locks is likely to be causing a severe case of raised eyebrows for
+some readers, and, indeed, it turned out to be inadequate; some locks are
+rather more contended than others, after all.  So <a
+href="/Articles/531312/">the January&nbsp;3 version of Rik's patch</a>
+keeps a hashed list (based on the spinlock address) of delay values instead.
+<p>
+Michel Lespinasse <a
+href="http://permalink.gmane.org/gmane.linux.kernel/1415755">ran some
+experiments of his own</a> to see how well the proportional backoff
+algorithm worked.  In particular, he wanted to figure out whether it was
+truly necessary to calculate a dynamic delay factor, or whether an optimal
+static value could be found.  His conclusion was that, in fact, a static
+value is good enough; it might be possible to do a little better with a
+dynamic value, he said, but the improvement is not enough to justify the
+added complexity of the tuning mechanism.  There is just one little
+difficulty:
+<p>
+<div class="BigQuote">
+	Of course, one major downside in my proposal is that I haven't
+	figured out an automatic way to find the most appropriate
+	spinlock_delay system tunable. So there is clearly some more
+	experimentation needed there. However, IMO the important result
+	here is that our goal of avoiding performance cliffs seems to be
+	reachable without the complexity (and IMO, risk) of per-spinlock
+	tuning values.
+</div>
+<p>
+If these results stand, and an appropriate way of picking the static value
+can be found, then there is probably not a case for adding dynamic backoff
+to the kernel's spinlock implementation.  But the backoff idea in general
+would appear to be a significant improvement for some workloads.  So the
+chances are good that we will see it added in some form in an upcoming
+development cycle.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Spinlocks">Spinlocks</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/531254/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor531426"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving ticket spinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 4, 2013 4:08 UTC (Fri)
+                               by <b>jdike</b> (subscriber, #4055)
+                              [<a href="/Articles/531426/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The goal is to have a CPU query the lock an average of 2.7 times before </font><br>
+<font class="QuotedText">&gt; obtaining it. The number 2.7, once again, was obtained by running lots of</font><br>
+<font class="QuotedText">&gt; tests and seeing what worked best</font><br>
+<p>
+This is e, which shows up in similar contexts.  I have a fuzzy recollection that in a situation where you want to buy something, i.e. a house or car, you know nothing about the market going in, and you need to decide to buy or not on the spot (i.e. the item disappears from the market after you've seen it), you need to sample the market (i.e. look without buying) before thinking about buying.  The optimal number of items to sample is e, which translates to 3 for discrete things like houses and cars.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/531426/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor531586"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving ticket spinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2013 3:27 UTC (Sat)
+                               by <b>spigot</b> (subscriber, #50709)
+                              [<a href="/Articles/531586/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      It sounds like you're describing the <a href="http://en.wikipedia.org/wiki/Secretary_problem">secretary problem</a>.  The idea is that you have <i>n</i> applicants for a job, each of whom has a rank from 1 (most qualified) to n (least qualified).  You get to interview them in a random order, and after each interview you must decide, on the spot, whether to hire them or reject them.  You would like a procedure to maximize your chances of hiring the most qualified candidate.
+</p>
+It turns out that you should reject the first n/e candidates, then hire the first of the remainder who is more qualified than any of the rejects (or hiring the last, if none are more qualified).
+</p>
+However, it's not obvious to me that this is applicable to the problem at hand.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/531586/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor531517"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about separating locks and data?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 4, 2013 16:54 UTC (Fri)
+                               by <b>renox</b> (guest, #23785)
+                              [<a href="/Articles/531517/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the cause of the issue is that the lock is in the same cache line as the data, I wonder if it would be possible to ensure that the lock would be in a different place(different cache line)?<br>
+<p>
+Either the lock would be handled separately or the data would have a pointer to the "real" lock.<br>
+It strikes me as quite funny that adding a level of indirection could help performance in this case.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/531517/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor531519"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about separating locks and data?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 4, 2013 17:04 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/531519/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I'd pondered that a bit as I was writing the article.  It would be painful.
+<p>
+If you move the lock out of the structure it is protecting, you have to allocate it in a separate step.  The allocation could maybe be hidden in <tt>spin_lock_init()</tt>, but the freeing would require explicit action (in vast numbers of call sites) or some severe magic.  Probably don't want to do that.
+<p>
+Regardless of whether the lock is relocated or not, the only way to avoid cache problems with surrounding data is to expand the lock to fill an entire cache line.  That would bloat spinlocks considerably, and there are a <i>lot</i> of spinlocks in a running kernel.  That overhead would hurt; among other things, the bloat, alone, would slow things by causing additional cache utilization.
+<p>
+Maybe I'm missing something (I often do), but, from what I can tell, trying to isolate the locks isn't really a viable solution.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/531519/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor531526"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about separating locks and data?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 4, 2013 17:34 UTC (Fri)
+                               by <b>renox</b> (guest, #23785)
+                              [<a href="/Articles/531526/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I agree with you that the management of deallocation is a significant issue/change.<br>
+<p>
+As for the memory bloat, I think that these "separated spinlock" would be useful for only the most contended spinlocks which would somewhat mitigate the issue.<br>
+Of course contention isn't the same on all the systems and developers working on embedded or supercomputers would probably disagree on which spinlocks has to be "separated"..<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/531526/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor531637"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about separating locks and data?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2013 22:53 UTC (Sat)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/531637/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There will then be the problem of exactly how much space do you allocate for the spinlock<br>
+<p>
+how do you know what the best cache size is to use on the processor that someone will buy next year and run the binary you compiled today on.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/531637/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor531643"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about separating locks and data?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2013 23:50 UTC (Sat)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/531643/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Aren't there runtime facilities in the kernel for tailoring behavior to the actual cache line size?  Something like a cache line allocator?
+<p>
+That would make this kind of memory layout feasible until they invent a more complex form of caching.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/531643/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor531618"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about separating locks and data?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2013 18:07 UTC (Sat)
+                               by <b>PaulMcKenney</b> (<b>&#x272D; supporter &#x272D;</b>, #9624)
+                              [<a href="/Articles/531618/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Putting the lock and the data together increases performance at low levels of lock contention.  After all, if the lock and data are in separate cache lines, you will take two cache misses, whereas if the lock and data are in the same cache line, you will only take one cache miss.<br>
+<p>
+Of course, and noted earlier in this thread, the opposite holds true at high levels of contention.  Life is like that sometimes!  ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/531618/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor531536"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about separating locks and data?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 4, 2013 18:58 UTC (Fri)
+                               by <b>daney</b> (guest, #24551)
+                              [<a href="/Articles/531536/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are really two issues:<br>
+<p>
+1) Each load from the Now-Serving counter memory location creates traffic on the internal CPU buses.  This traffic decreases the amount of useful work that can be done.  Since the threads blocked waiting for their Now-Serving number to come up are not doing anything useful, decreasing the amount of bus traffic they are generating makes everything else go faster.<br>
+<p>
+<p>
+2) Cache line contention/bouncing caused by Ticket-Counter modifications and modifications to the data protected by the lock.<br>
+<p>
+The first issue is (mostly) the one addressed by the patch in question. Increasing the size/alignment of arch_spinlock_t to occupy an entire cache line might be beneficial for some use cases, but it would increase the size of many structures, thus causing increased cache pressure.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/531536/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor531595"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about separating locks and data?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 5, 2013 10:38 UTC (Sat)
+                               by <b>renox</b> (guest, #23785)
+                              [<a href="/Articles/531595/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for this informative reply.<br>
+<p>
+For the second issue, what you're describing (having the spinlock occupying an entire cache line) isn't always necessary: in some cases you could put 'cold' data in the same cache line as the lock to get the best performance without using too much memory.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/531595/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor532317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about separating locks and data?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2013 18:30 UTC (Thu)
+                               by <b>ksandstr</b> (guest, #60862)
+                              [<a href="/Articles/532317/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Having considered this topic for a bit, I wonder: given that there are two uses of CAS involved in ticket spinlocks, i.e. one on next-ticket (lock immediately or wait), and one on now-serving (unlock), which is as many as with regular locked/not spinlocks, the issue is clearly the increased _non-local_ write traffic on the data structure under contention. This seems to suggest a solution where spinlocks associated with objects smaller than a cacheline are moved out of the data and into, say, a hashed group keyed like the objects' parent data structure, trading some false contention for space.<br>
+<p>
+That'd protect the significant cachelines from not only write-bouncing from ticket-acquisition, but from any spinlock-related "oops, had to flush this exclusive cache line to RAM in the meantime" cases due to read traffic also. I'm guessing that an operation to acquire locks on N objects without ordering foulups could fit on top of that as well.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/532317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor986204"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What about separating locks and data?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2024 14:14 UTC (Mon)
+                               by <b>301043030</b> (guest, #172920)
+                              [<a href="/Articles/986204/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe you and your responders even dind't understand what the author says and what the paper writes about the lock, so you would never know the data of cache line means the lock, not some fileds of the data structure, your title is rather ridiculous and misleading. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/986204/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor531571"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving ticket spinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 4, 2013 22:06 UTC (Fri)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/531571/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if you could use a profiling step to determine the ideal number of cycles to wait for each lock?<br>
+<p>
+For example, record the cycle count when getting the lock and when releasing the lock, record the difference as N. The next lock spinner in line should ideally wait N+1 cycles before checking the lock.<br>
+<p>
+Then on the next kernel build use those profile numbers and record them in each spinlock structure.<br>
+<p>
+This would work perfectly if it weren't for the pesky problems of unexpected cache line misses, CPU interrupts and other interference.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/531571/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor531572"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving ticket spinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 4, 2013 22:12 UTC (Fri)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/531572/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How expensive are inter-processor interrupts? If they're cheaper than 50 cycles and a cache-line bounce then the thing to do would be to have the lock owner CPU look at the next ticket in line and send it an interrupt while the waiting CPU just sits in an idle. From what I could pick up in a fast Google an IPI is about the same as a cache line bounce, it is the register saves and all that make it more expensive. But since the waiting CPU is in a known state the code could probably skip all that and just resume with the lock acquire.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/531572/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor532259"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving ticket spinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2013 15:18 UTC (Thu)
+                               by <b>Otus</b> (subscriber, #67685)
+                              [<a href="/Articles/532259/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That would shift the cost to the uncontended case, since it would have to check whether someone is waiting.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/532259/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor532215"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving ticket spinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2013 9:44 UTC (Thu)
+                               by <b>heijo</b> (guest, #88363)
+                              [<a href="/Articles/532215/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What about replacing ticket locks with a queue-based lock mechanism with local spinning?<br>
+<p>
+Like an MCS lock with the internal state stored in a pseudo-stack of per-CPU variables searched for the lock address, or maybe something stateless if possible.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/532215/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor532327"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving ticket spinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2013 19:54 UTC (Thu)
+                               by <b>quanstro</b> (guest, #77996)
+                              [<a href="/Articles/532327/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+i believe the common cache line sizes are 64-bytes for most x86<br>
+machines, and 32-bytes for arms.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/532327/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor533490"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Improving ticket spinlocks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2013 21:00 UTC (Mon)
+                               by <b>vcunat</b> (guest, #88938)
+                              [<a href="/Articles/533490/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, exactly my point. I read on Wiki that P4 had L2 with 128-byte lines, but I thought 64B is the most common. One can check individually around /sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/533490/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,1163 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Faster reference-count overflow protection [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/728675/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/728437/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/728675/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Faster reference-count overflow protection</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 24, 2017</br>
+           </div>
+Improving the security of a system often involves tradeoffs, with the costs
+measured in terms of convenience and performance, among others.  To their
+frustration, security-oriented developers often discover that the tolerance
+for these costs is quite low.  Defenses against reference-count overflows
+have run into that sort of barrier, slowing their adoption considerably.
+Now, though, it would appear that a solution has been found to the
+performance cost imposed by reference-count hardening, clearing the way
+toward its adoption throughout the kernel.
+<p>
+Reference-count overflows typically come about as the result of a
+programming error.  Code that increments the reference count on an object
+may neglect to decrement it in certain error paths, for example.  Such
+errors can allow an attacker to repeatedly increment a counter until it
+overflows, at which point the object in question can be made to appear to
+be unused and freed while it is, in fact, still in use.  The resulting
+use-after-free vulnerability is often exploitable to fully compromise the
+system.
+<p>
+The path toward protection against reference-count overflows in the kernel
+has been a long one.  It started with code from the PaX/grsecurity patch
+set, but the initial approach of adding protection to the core
+<tt>atomic_t</tt> type <a href="/Articles/706498/">ran into opposition</a>
+and had to be changed.  The next step was to introduce a new
+<tt>refcount_t</tt> type specifically for reference counts and to add the
+protections there.  This type was <a href="/Articles/715161/">merged for
+the 4.11 development cycle</a> and various kernel subsystems were changed
+to use it, but <tt>refcount_t</tt> <a href="/Articles/718275/">upset the
+networking developers</a>, who were unwilling to pay the performance cost
+associated with it. 
+<p>
+The networking layer is often where such patches run into trouble, but it
+was not the only place this time around.  Andrew Morton recently <a
+href="/Articles/728680/">complained</a> about a <tt>refcount_t</tt>
+conversion in the interprocess communication (IPC) subsystem, for example,
+saying that 
+there was no point in slowing down "<q>simple, safe, old, well-tested
+code</q>".   It began to appear that, even if reference-count
+protection were added throughout the kernel, it would be disabled by
+distributors who feared the performance hit.
+<p>
+One of the core truths of secure-systems development is that disabled (or
+never implemented) protective measures are remarkably ineffective at
+stopping attackers.  Another one is that "safe, old, well-tested" code may
+be merely old, as Ingo Molnar <a href="/Articles/728681/">pointed out</a>:
+<p>
+<div class="BigQuote">
+	It's old, well-tested code _for existing, sane parameters_, until
+	someone finds a decade old bug in one of these with an insane
+	parameters no-one stumbled upon so far, and builds an exploit on
+	top of it.
+</div>
+<p>
+Truly protecting the kernel against reference-count overflows requires
+making the checks as universal as possible.  That, in turn, requires either
+convincing developers to accept the performance cost of those checks or
+finding a way to 
+reduce that cost to acceptable levels.  The latter course is almost
+certainly the path of least resistance — if a solution to the performance
+cost can be found.
+<p>
+
+<div class="tlr">
+<b>Update</b>: the single instruction mentioned to the left has been
+claimed by Pax Team as his work.  The patch set remains Kees's.
+</div>
+
+With his <a href="/Articles/728626/">fast refcount overflow protection
+patch set</a>, Kees Cook would indeed appear to have found that solution.
+It works by adding a single instruction to the existing (highly optimized)
+<tt>atomic_t</tt> implementation that catches the case where the reference
+count goes negative (as happens when the counter overflows).
+
+The
+instruction is especially easy for the 
+processor's branch-prediction logic to guess correctly, so
+it performs well, as demonstrated by microbenchmark results posted with the
+patch set.  The standard <tt>atomic_t</tt> implementation ran the benchmark
+in 82.249&nbsp;billion cycles; the new <tt>refcount_t</tt> code, instead,
+took 82.211&nbsp;billion cycles — exactly the same within the margin of
+error, in other words.  The older <tt>refcount_t</tt> implementation
+requires 144.8&nbsp;billion cycles to run the test, for comparison.
+<p>
+The current patch set is for the x86 architecture only.  Since assembly
+work is required, each of the other architectures will need to be added
+individually when somebody gets around to doing it.  There do not appear to
+be significant obstacles to making this technique work on the other major
+architectures. 
+<p>
+There is a cost to this change, relative to the full <tt>refcount_t</tt>
+implementation: it no longer detects the "increment from zero" case.  If an
+object's reference count drops to zero, that object will normally be freed;
+a subsequent increment operation suggests that a reference still existed
+and the freed object may still be in use.  This, obviously, would be a good
+situation to catch, but nobody has found a way to do so without adding to
+the expense of increment operations.  Cook claimed in the patch set that the
+overflow case that the new <tt>refcount_t</tt> <i>does</i> catch is the
+most common, though, and cited two exploits published in 2016 (<a
+href="http://cyseclabs.com/page?n=02012016">CVE-2014-2851</a> and <a
+href="http://perception-point.io/2016/01/14/analysis-and-exploitation-of-a-linux-kernel-vulnerability-cve-2016-0728/">CVE-2016-0728</a>)
+that would have been blocked had that checking been in place.
+<p>
+There are still some developers who remain unenthusiastic about the
+<tt>refcount_t</tt> type; see <a href="/Articles/728684/">this
+complaint</a> from Eric Biederman (and <a href="/Articles/728685/">Cook's
+response</a>) for example.  The remaining disagreements seemed to be based
+on a couple of arguments: (1)&nbsp;<tt>refcount_t</tt> doesn't fix all
+reference-count-related problems, and (2)&nbsp;using it implies a
+presumption of bugginess that some developers find hurtful to their pride.
+But, with the performance issue seemingly solved, those other complaints
+seem unlikely to block the implementation of reference-count hardening in
+most of the kernel.  That can only be good news for those who are concerned
+about security.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Reference_counting">Reference counting</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Kernel_hardening">Security/Kernel hardening</a></td></tr>
+            <tr><td><a href="/Security/Index/">Security</a></td><td><a href="/Security/Index/#Linux_kernel">Linux kernel</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/728675/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor728696"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2017 23:36 UTC (Mon)
+                               by <b>ianmcc</b> (subscriber, #88379)
+                              [<a href="/Articles/728696/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <i>using it implies a presumption of bugginess that some developers find hurtful to their pride</i>
+<br><br>Any developer who thinks that shouldn't be allowed anywhere near any security related code.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728696/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728710"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 7:06 UTC (Tue)
+                               by <b>billev2k</b> (subscriber, #32054)
+                              [<a href="/Articles/728710/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"any security related code", i.e. *any* code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728710/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor728717"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 13:58 UTC (Tue)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/728717/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are only really two types of software: slow programs that prefer correctness over speed, and “fast” programs where you learn to react to each disaster they cause by adding more sandboxes, firewalls, service monitors, cleanup tools, etc.<br>
+<p>
+I don't know why any kernel developer would argue for the latter. Do they not run *anything* on top of their kernel besides toy microbenchmarks? Userspace is running the aground and there's a million tons of electron and containers spilling everywhere while they're complaining about the new lighthouse bulb needing 5 watts more than before.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728717/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728733"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 14:24 UTC (Tue)
+                               by <b>tao</b> (subscriber, #17563)
+                              [<a href="/Articles/728733/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The kernel developers themselves aren't the issue when it comes to micro-optimisations. Personally I run my kernel with tons of extra debugging enabled that slows the system down. But for the heavy-hitting users of the kernel (think 498 out of the 500 fastest super computers in the world, or Facebook, or Google) every cycle matters. Sad but true.<br>
+<p>
+For such users ensuring that security fixes, no matter how important they may be, doesn't introduce performance regressions is paramount.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728733/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728785"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 16:56 UTC (Tue)
+                               by <b>tlamp</b> (subscriber, #108540)
+                              [<a href="/Articles/728785/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Make the security enhancement opt out through kconfig then and we're done.<br>
+<p>
+Those who really need every cycle can disable it then and sane distros can ship their kernel with them, maybe ship even two versions.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728785/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor729714"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2017 9:41 UTC (Thu)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/729714/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yep. If you introduce a security fix on a path that nearly every single kernel call goes through, it's going to hurt no matter how much you try to sugar the pill. And these things have a habit of hurting in ways you didn't expect - like say the tiny increase in size bumping your code out of L1 cache and triggering cache misses all over the place ...<br>
+<p>
+Tight, correct, code is great. It's also generally very expensive.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729714/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor729792"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2017 18:36 UTC (Thu)
+                               by <b>tuna</b> (guest, #44480)
+                              [<a href="/Articles/729792/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe you have pretty hard timing and latency targets you want to reach, like 8.3 ms frame time with 3 frames total latency. Then you have to write code that does not do unnecessary operations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729792/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor728781"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 16:31 UTC (Tue)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/728781/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yet here we are. We have to deal with human nature as it is, not as we'd like it to be.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728781/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor728704"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 1:55 UTC (Tue)
+                               by <b>OrbatuThyanD</b> (guest, #114326)
+                              [<a href="/Articles/728704/">Link</a>] (18 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+kees continues to amaze.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728704/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728705"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 2:02 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/728705/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To be fair, the first time I've seen this approach was in a message from spender.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728705/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728706"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 2:23 UTC (Tue)
+                               by <b>OrbatuThyanD</b> (guest, #114326)
+                              [<a href="/Articles/728706/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+i'm impressed by spender too (despite him currently being on the outs with the linux community .. ?), but spender's never reviewed any of my code, so I feel more of a kinship with kees.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728706/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor728712"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 8:56 UTC (Tue)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/728712/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+hey, thanks for the compliments, the fast refcount code is also mine after all, not his (despite what this another not-paid-for LWN piece would imply ;).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728712/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728732"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 14:18 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/728732/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Oh, come on. The article said "It started with code from the PaX/grsecurity patch set", Kees specifically thanked you... what more do you want? Active abasement from everyone and admission that they are not fit to touch your code at all? Because that's not how development works *anywhere*.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728732/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728787"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 17:09 UTC (Tue)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/728787/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+can't speak for you but i'm fine with the truth ;). now you tell me who you think authored this fast 'single instruction overhead' refcount mechanism when you read "With his fast refcount overflow protection patch set, Kees Cook would indeed appear to have found that solution."<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728787/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728824"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 21:47 UTC (Tue)
+                               by <b>renox</b> (guest, #23785)
+                              [<a href="/Articles/728824/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well you can speak for me: given the lack of precision of the source of the improvement in the article, I thought that kees was the creator of the improvement.<br>
+<p>
+And this is not the first time that I'm disturbed by this kind of imprecision in lwn..<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728824/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor728880"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2017 13:37 UTC (Wed)
+                               by <b>mjthayer</b> (guest, #39183)
+                              [<a href="/Articles/728880/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was not wanting to get drawn into this, but did you try contacting Jon privately before posting, asking him to change the article to better reflect your part in this?  It might be worth trying, even if you are not very hopeful.  Perhaps it can even still be done for this article at this point in time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728880/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor728867"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2017 12:21 UTC (Wed)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/728867/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's, somewhat ironically, the ultimate outcome of KSPP: pretty soon nobody will have a reason to touch his code at all. We'll all be getting reverse-engineered, properly reviewed, protection-racket-free versions and his name can live on forever, at the bottom of a git commit message.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728867/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor728831"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credits and payments</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 22:40 UTC (Tue)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/728831/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      So, PaX...is $OTHER_PUBLICATION paying you nicely for repeatedly trashing our writing? :)
+<p>
+The <i>patch set</i> is described as coming from Kees Cook, based on work in PaX/grsecurity.  That is objectively true.  More to the point, that patch set contains a great deal of work to separate out the changes, make them acceptable to mainline, document them, run benchmarks, etc.  All part of the normal work required to get a change upstream.  You have, as is your right, declined to do that work.  But when somebody else does it for you, the result is their work as much as yours.
+<p>
+I write pretty routinely about patch sets here.  They often contain work from multiple people, often in ways that is hard to tell.  If I were to credit everybody who somehow influenced a patch set, the articles would be long indeed.  The current patch set originated in your work — which was noted in the article — but also contains contributions from Kees, Josh Poimboeuf, Ingo Molnar, Li Kun, and probably others, most of whom were not credited in the article.  But only you, who were actually credited, chose to publicly question my integrity (again).
+<p>
+The point is coming where I'm just not going to write about this work anymore, it's simply not worth the shitstorm that results every time.  There is a <i>lot</i> of other kernel work going on — work that your patch sets depend on — that I can write about without wishing I'd chosen a different line of work.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728831/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728833"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credits and payments</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 22:55 UTC (Tue)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/728833/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The point is coming where I'm just not going to write about this work anymore, it's simply not worth the shitstorm that results every time. There is a lot of other kernel work going on — work that your patch sets depend on — that I can write about without wishing I'd chosen a different line of work. </font><br>
+<p>
+That'd be sad - at least I appreciate them. And from my POV it seems that minimizing mainline security work is pretty much PaXTeam's goal. Reducing positive-ish coverage of such efforts seems like part of that.<br>
+<p>
+If necessary I'd rather see you disable comments on these articles, or just you putting PaXTeam on ignore.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728833/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor728834"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">the higher road</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 23:16 UTC (Tue)
+                               by <b>sfeam</b> (subscriber, #2841)
+                              [<a href="/Articles/728834/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Don't let the bastards wear you down.  The LWN kernel coverage benefits your subscribers and the larger community of readers. Publication of incessant sniping by PaXTeam does not.  The better choice is to continue the former and block the latter. There is no shame in choosing to killfile sources of predictable aggrevation. I know there is always a temptation to peek at messages in the spam bin, but resist it.  
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728834/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor728836"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credits and payments</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2017 0:25 UTC (Wed)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/728836/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; "With his fast refcount overflow protection patch set, Kees Cook would indeed appear to have found that solution."</font><br>
+<p>
+who do you think that attributes my very own ideas and work to if not Kees Cook? apparently i'm not the only person who noticed your deliberate and intentional attempt at misattribution and diminishing my work i invested 16+ years into. the same thing happened recently with the 'write rarely' article, remember? and when i point out all this, you play the drama queen and even defend your actions instead of admitting, never mind correcting, your error?<br>
+<p>
+<font class="QuotedText">&gt; You have, as is your right, declined to do that work.</font><br>
+<p>
+this lie just can't die, can it? i didn't "decline to do that work" as there was no offer to decline (and it can't be done in my free time, noone in the KSPP does it that way either). why do you keep spreading these lies coming from companies that chose competition over cooperation with us?<br>
+<p>
+<font class="QuotedText">&gt; But when somebody else does it for you, the result is their work as much as yours.</font><br>
+<p>
+first, copy-pasting code doesn't establish copyright (Intel tried with spender's code and didn't get away with it), second, i wish you attributed the work proportional to the effort invested into it (if you think it's 'work' to upstream our code, imagine how much more work it was to create and maintain it).<br>
+<p>
+<font class="QuotedText">&gt; The point is coming where I'm just not going to write about this work anymore, it's simply not worth the shitstorm that results every time.</font><br>
+<p>
+sadly, this would be good riddance at this point. your agenda to diminish the amount of effort and effect of our work we invested in over the past 16 years shows in every single KSPP/grsec/PaX related article and if you're unable to write objective (and let's not get started about being technically correct) articles about these topics, it's probably best to leave it for those who can.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728836/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728870"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credits and payments</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2017 12:35 UTC (Wed)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/728870/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; why do you keep spreading these lies coming from companies that chose competition over cooperation with us?</font><br>
+<p>
+Why do you choose to compete with mainline instead of cooperation with them?<br>
+<p>
+<font class="QuotedText">&gt; second, i wish you attributed the work proportional to the effort invested into it</font><br>
+<p>
+If maintenance is such a burden and upstreaming so easy, why is upstreaming not a net time savings from your side?<br>
+<p>
+<font class="QuotedText">&gt; if you're unable to write objective (and let's not get started about being technically correct) articles about these topics, it's probably best to leave it for those who can.</font><br>
+<p>
+So do you want to write articles covering KSPP and how everything they do is wrong and how PaX does it better? There's a link on the left about how to write for LWN yourself.<br>
+<p>
+Personally, I find it useful to know how things are changing in the kernel I actually use rather than some perfect, unattainable, pristine kernel you have now locked behind a paywall.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728870/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728872"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credits and payments</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2017 13:56 UTC (Wed)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/728872/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Why do you choose to compete with mainline instead of cooperation with them?</font><br>
+<p>
+you got that backwards, i didn't make that choice, the companies behind the KSPP did. let's also not forget upstream's lack of interest and often outright hostility towards anything security related that existed for a long time and it's debatable if that attitute has changed all that much. even with the KSPP around it feels like several kernel developers are dragging their feet and gnashing their teeth whenever something security related gets submitted.<br>
+<p>
+<font class="QuotedText">&gt; If maintenance is such a burden and upstreaming so easy, why is upstreaming not a net time savings from your side?</font><br>
+<p>
+because it's a strawman. first, (for me) maintenance is much easier compared to R&amp;D, second, upstreaming would be a waste of my free time that i'd rather spend on new development instead (never mind the family and other things people have in life). case in point, i extended my REFCOUNT feature to the refcount_t API in something like a day maybe whereas upstream's been working on it for what, over half a year now (not to mention the year beforehand on the original attempt that went to waste completely)? why do you think i'd have enough free time to do this when everyone else has to get paid in order to be able to do it?<br>
+<p>
+<font class="QuotedText">&gt; So do you want to write articles covering KSPP and how everything they do is wrong and how PaX does it better?</font><br>
+<p>
+not just 'want' but 'did': <a rel="nofollow" href="https://grsecurity.net/grsecurity_4_11_updates.php">https://grsecurity.net/grsecurity_4_11_updates.php</a> or <a rel="nofollow" href="https://grsecurity.net/an_ancient_kernel_hole_is_not_closed.php">https://grsecurity.net/an_ancient_kernel_hole_is_not_clos...</a> and there'll be more in the future. if you have suggestions for topics you'd like us to discuss in the future, you know where to contact us.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728872/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor728846"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credits and payments</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2017 7:50 UTC (Wed)
+                               by <b>patrick_g</b> (subscriber, #44470)
+                              [<a href="/Articles/728846/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The point is coming where I'm just not going to write about this work anymore</font><br>
+<p>
+Please don't.<br>
+I'm sure I'm not alone to think that your kernel articles are precious and much needed to try to understand what's going on in the kernel world.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728846/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor728851"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credits and payments</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2017 8:19 UTC (Wed)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/728851/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I also understood the article as saying that the original idea came from PaX/grsecurity, but that "The next step was to introduce a new refcount_t type" was by other kernel developers.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728851/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728852"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credits and payments</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2017 9:12 UTC (Wed)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/728852/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+note that i did not create the refcount_t abstraction myself (for various reasons, can elaborate if anyone cares, but i guess few do at this point ;) and it was the right move (at least conceptually speaking). you can check the kernel-hardening list about my contributions to that discussion where i explained how the actual refcount_t proposal was wrong on both the design (it doesn't expose/deal with references but low level plumbing instead) and implementation level (it's just a wrapper around atomic_t). given my experience with the latter (the PaX REFCOUNT feature works on atomic_t and variants) i also explained that the proposed implementation was a code size and performance disaster. did anyone heed my words? of course not as NIH raised its ugly head. predictably, my words proved to be true: first the code size problem forced the implementation to move out-of-line even before Linus would accept the code. this of course only exacerbated the already bad performance problem (the function call overhead in addition to the completely unnecessary open-coded cmpxchg loops) so the developers were forced to go back to my code once again. this is where the PaX REFCOUNT implementation comes into play which has always been optimized for both code size and performance (beyond its security goal of course, see the original version's description at <a rel="nofollow" href="https://forums.grsecurity.net/viewtopic.php?f=7&amp;t=4173#X86">https://forums.grsecurity.net/viewtopic.php?f=7&amp;t=417...</a>). it is this latter attribution (never mind technically correct explanation of what's done for what reason) that is lacking in these REFCOUNT articles you find on LWN.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728852/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor729069"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credits and payments</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2017 17:52 UTC (Thu)
+                               by <b>diederich</b> (subscriber, #26007)
+                              [<a href="/Articles/729069/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This has been a difficult situation for some time, and I appreciate you weathering it so far.<br>
+<p>
+I think what makes it so hard is a combination of PaX being generally, needlessly abrasive and that he is usually correct in the most technical, specific sense.<br>
+<p>
+<font class="QuotedText">&gt; The point is coming where I'm just not going to write about this work anymore, it's simply not worth the shitstorm that results every time.</font><br>
+<p>
+This kind of material draws me to LWN more than any other, so I hope you do continue.<br>
+<p>
+Here is a suggestion: write up a short, straightforward poster code of conduct (if one doesn't already exist), and announce it one week.  That code would specifically ban users who repeatedly post in an overtly negative, disruptive fashion.<br>
+<p>
+Then, after a few warnings, ban anybody who continues.  You will likely be accused of applying a double standard.  In the end, though, this will become a more positive, useful place.<br>
+<p>
+I have found myself visiting some parts of LWN less frequently because of the post behaviour of some.  I'm no delicate flower; far from it.  The older I get, the more I realize that dealing with such distractions is just not worth it.<br>
+<p>
+And for the record: I think that the work done by the PaX/grsecurity is and has been smart and innovative.  Further, I'd love to hear from those folks, here on LWN and elsewhere.  Just with a less negative tone.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729069/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor728734"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2017 15:12 UTC (Tue)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/728734/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+Related:  1) If the empty set of references is represented by a count of -2, then the "sign trick" also detects "increment from the empty set".  Of course there is ample opportunity to confuse "empty set of references" with "reference <b>counter</b> is 0".</p>
+
+<p>
+2) Runaway counts (bugs) can be detected sooner by scaling the counter.  Count 127, 126, or 64 at a time.  Those scale factors fit into a one-byte literal operand on x86*.  A scale factor divisible by a larger power of 2 eases detection of stale code that counts by 1.</p>
+
+<p>
+3) On x86*, the INC and DEC instructions do not write the Carry bit of the processor status word; the previous Carry is preserved.  This creates a dataflow dependency from the most-recent instruction which does write the Carry bit, and in theory resolving the dependency can require multiple machine cycles.  Perhaps in this case the latency is likely to be small (no recent long dependency chains that set Carry), or masked by the multiple-tens-of-cycles that are required by a LOCKed memory reference.  An explicit operand value such as "lock add $1,counter" avoids the dataflow dependency because ADD writes all the status bits.  It takes one more byte of instruction space, and instruction decode might take one more cycle if the chip implementation allows only one literal operand and/or address displacement to be decoded at a time.</p>
+
+<p>
+[I comment at LWN because: 1) I'm not subscribed to LKML, and I don't know how to Reply with a reference to the correct thread. 2) It's probably not that important.]</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728734/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728839"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2017 1:08 UTC (Wed)
+                               by <b>PaXTeam</b> (guest, #24616)
+                              [<a href="/Articles/728839/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+1. unfortunately the detection of use-after-free based on the 0 refcount is a pointless exercise as the first thing an exploit writer will make sure is that the underlying memory of the just freed object gets reused and thus the 0 refcount value disappears (remember, this is supposed to be a security feature meant to prevent the exploitation of a certain bug class).<br>
+<p>
+2. the problem with scaling is that it'd effectively put a lower overflow detection limit on the refcount and would thus further restrict the usable number of references (going from 4G to 2G made already some people worry as there're real life use cases which can get close to those limits and would force a move to atomic64_t or a not-yet-existing refcount64_t type).<br>
+<p>
+3. note that inc/dec are simply 'inherited' from the atomic_t type and its accessors used by the refcount_t API, which despite its name, isn't about references but merely a restricted wrapper over atomic_t.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728839/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor730553"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 11, 2017 9:32 UTC (Fri)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/730553/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <P>I have to say, "wow": I was unaware of the partial flag update weirdness on x86.  I had presumed Intel's processors were sophisticated enough to track the flag bits independently; however, Agner Fog's <A HREF="http://www.agner.org/optimize/microarchitecture.pdf">enormous doc</a> backs you up on this point.</P>
+<P>Basically, on some processors, a partial flag update incurs an additional μop for a read-modify-write operation, and more generally the partial update still has ordering constraints, likely in order to easily provide a consistent view of the FLAGS in case an interrupt or exception occurs.</P>
+<P>I noticed while fiddling around at godbolt.org that GCC avoids [code]ADD[/code] instructions if it can get the same effect with [code]LEA[/code], assuming it doesn't need the flags.  This makes sense, as [code]LEA[/code] sets no flags.</P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/730553/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor728854"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2017 9:26 UTC (Wed)
+                               by <b>mm7323</b> (subscriber, #87386)
+                              [<a href="/Articles/728854/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>I see the patch is using inline asm.  Wouldn't it be easier and cleaner to use the <a href="https://gcc.gnu.org/onlinedocs/gcc-7.1.0/gcc/Integer-Overflow-Builtins.html">GCC builtins</a> for this purpose?  The compiler will try to use hardware where supported:</p>
+
+<blockquote>"The compiler will attempt to use hardware instructions to implement these built-in functions where possible, like conditional jump on overflow after addition, conditional jump on carry etc. "</blockquote>
+
+<p>Or does the kernel not trust the compiler?</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728854/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728874"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2017 13:10 UTC (Wed)
+                               by <b>thestinger</b> (guest, #91827)
+                              [<a href="/Articles/728874/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+GCC doesn't have those builtins for atomics.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728874/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor728959"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2017 20:57 UTC (Wed)
+                               by <b>mm7323</b> (subscriber, #87386)
+                              [<a href="/Articles/728959/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, yes.  Thanks!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/728959/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor729202"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Faster reference-count overflow protection</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 29, 2017 12:20 UTC (Sat)
+                               by <b>eru</b> (subscriber, #2753)
+                              [<a href="/Articles/729202/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wouldn't it be simpler to just use a 64-bit refcount, at least on 64-bit machines? A back-of-the-envelope calculation suggests that with realistic worst-case incrementing rates, it would require centuries to overflow, an eternity for all practical purposes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/729202/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2017, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

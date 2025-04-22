@@ -1,0 +1,725 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The Btrfs inode-number epic (part 1: the problem) [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/866582/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/866757/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/866582/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The Btrfs inode-number epic (part 1: the problem)</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Please consider subscribing to LWN</b>
+<p>
+Subscriptions are the lifeblood of LWN.net.  If you appreciate this
+content and would like to see more of it, your subscription will
+help to ensure that LWN continues to thrive.  Please visit
+<a href="/Promo/nst-nag1/subscribe">this page</a> to join up and keep LWN on
+the net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 20, 2021</br>
+           </div>
+Unix-like systems — and their users — tend to expect all filesystems to
+behave in the same way.  But those users are also often interested in fancy
+new filesystems offering features that were never envisioned by the
+developers of the Unix filesystem model; that has led to a number of
+interesting incompatibilities over time.  Btrfs is certainly one of those
+filesystems; it provides a long list of features that are found in few
+other systems, and some of those features interact poorly with the
+traditional view of how filesystems work.  Recently, Neil Brown has been
+trying to resolve a specific source of confusion relating to how Btrfs
+handles inode numbers.
+<p>
+One of the key Btrfs features is <a
+href="/Articles/579009/">subvolumes</a>, which are essentially 
+independent filesystems maintained within a single storage volume.
+Snapshots are one commonly used form of subvolume; they allow the storage
+of copies of the state of another subvolume at a given point in time, with
+the underlying data shared to the extent that it has not been changed since
+each snapshot was taken.  There are other applications for subvolumes as
+well, and they tend to be heavily used; Btrfs filesystems can contain
+thousands of subvolumes.
+<p>
+Btrfs subvolumes bring some interesting quirks with them.
+They can be mounted independently, as if they
+were separate filesystems, but they also appear as a part of the filesystem
+hierarchy as seen from the root.  So one <i>can</i> mount subvolumes, but a
+subvolume can be accessed without being mounted if a higher-level directory
+<i>is</i> mounted.  Imagine, for example, that <tt>/dev/sda1</tt> contains
+a Btrfs filesystem that has been mounted on <tt>/butter</tt>.  One could
+create a pair of subvolumes with commands like:
+<p>
+<pre>
+    # cd /butter
+    # btrfs subvolume create subv1
+    # btrfs subvolume create subv2
+</pre>
+<p>
+The root of <tt>/butter</tt> will now appear to contain two directories
+(<tt>subv1</tt> and <tt>subv2</tt>):
+<p>
+<pre>
+    # tree /butter
+    /butter
+    ├── subv1
+    └── subv2
+
+    2 directories, 0 files
+</pre>
+<p>
+
+They behave like directories most of
+the time but, since they are actually subvolumes, there are some
+differences; one cannot rename a file from one to the other, for example.
+A suitably privileged user can now mount either <tt>subv1</tt> or
+<tt>subv2</tt> (or both) as independent filesystems.  But, as long as
+<tt>/butter</tt> remains mounted, <i>both</i> subvolumes are visible as if
+they were part of the same filesystem.  There are some interesting
+consequences from this behavior, as will be seen.
+<p>
+
+ Btrfs uses a subvolume ID number internally to identify
+subvolumes, but there is no way to make that number directly visible to
+user space.  Instead, the filesystem allocates a separate device number
+(the usual major/minor pair) for each
+subvolume;  that number can be seen with a system call like <a
+href="https://man7.org/linux/man-pages/man2/lstat.2.html"><tt>stat()</tt></a>.
+If the subvolumes are not explicitly mounted, though, numbers do not show
+up in files like 
+<tt>/proc/self/mountinfo</tt>, leading to inconsistent views of how the
+filesystem is put together.  [<b>Update</b>: as Brown pointed out to us
+privately, the numbers do not show up there even if the subvolumes
+<i>are</i> explicitly mounted.]
+A call to <tt>stat()</tt> on a file within a
+subvolume will return a device number that does not exist in files like
+<tt>mountinfo</tt>, a situation that occasionally confuses unaware
+applications.
+<p>
+It gets worse.  Since Btrfs has a unique internal ID for each subvolume, it
+feels no particular need to keep inode numbers unique across those
+subvolumes.  As a result, a process walking a Btrfs filesystem from the
+root may well encounter multiple files with the same inode number.  Tools
+like <tt>find</tt> use inode numbers as a way of tracking which files they
+have already seen and detecting filesystem loops.  For a locally mounted
+Btrfs filesystem, things mostly work as expected because, even though two
+files on different subvolumes may have the same inode number, they will
+have different device numbers and are thus distinct.
+<p>
+
+The kernel's NFS daemon, though, has a harder time of
+things.  It cannot present all of those artificial device numbers to NFS
+clients, because that would require all of the subvolumes — again, possibly
+thousands of them — to show up as
+separate mounts on the client.  So a Btrfs filesystem exported via NFS
+shows the same device number (the device number of the root) on
+all subvolumes.  That works most of the
+time, but it can make it impossible to use a tool like <tt>find</tt> on an
+NFS-mounted Btrfs filesystem with subvolumes.  The single device number
+makes it impossible to distinguish files with the same inode number on
+different subvolumes, causing <tt>find</tt> to abort with a message about
+filesystem loops.  This leads to occasional <a
+href="/ml/linux-btrfs/20210310074620.GA2158@tik.uni-stuttgart.de/">complaints</a>
+from users and a desire to somehow improve the situation.
+<p>
+These problems are not new; they have been known and understood for years.
+The level of complaints seems to be rising, though, perhaps as a
+consequence of increased use of Btrfs in production situations.  In theory,
+the way to solve these problems is understood as well — though not all
+developers have the same understanding, as Neil Brown found out when he
+took on the task of fixing Btrfs filesystems exported via NFS.  The <a
+href="/Articles/866709/">second 
+and last article in this series</a>, published on August&nbsp;23, explores
+various attempted solutions to this problem and why it turns out to be so
+hard to fix.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Btrfs">Filesystems/Btrfs</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/866582/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor866919"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2021 15:47 UTC (Fri)
+                               by <b>rvolgers</b> (guest, #63218)
+                              [<a href="/Articles/866919/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The rename behavior issue and persistent inode numbering problems also come up in the various union filesystems, for example:<br>
+<p>
+Unioning file systems: Architecture, features, and design choices (2009) - <a href="https://lwn.net/Articles/324291/">https://lwn.net/Articles/324291/</a><br>
+<p>
+Overlayfs issues and experiences (2015) - <a href="https://lwn.net/Articles/636943/">https://lwn.net/Articles/636943/</a><br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/866919/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor866925"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Union filesystems and other fun sources of EXDEV</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2021 16:49 UTC (Fri)
+                               by <b>tux3</b> (subscriber, #101245)
+                              [<a href="/Articles/866925/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This sometimes shows up inside docker containers. rename(2) will return an error if the source and destination folders happen to be on a different layer, which may be less than transparent to users unfamiliar with the specifics of docker&#x27;s default storage driver.<br>
+<p>
+This situation is made more confusing by the fact that some tools (like mv) handle this transparently (by recursive copy), while other tools appear to mysteriously work for some destination folders and fail for others.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/866925/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor866931"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 20, 2021 17:26 UTC (Fri)
+                               by <b>smfrench</b> (subscriber, #124116)
+                              [<a href="/Articles/866931/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This problem of how to expose subvolumes over a network file system is probably easier for SMB3 (e.g. Samba or ksmbd) to deal with because when you have a subvolume you can redirect the client transparently back to the subvolume with a DFS referral.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/866931/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor866973"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2021 2:02 UTC (Sat)
+                               by <b>jra</b> (subscriber, #55261)
+                              [<a href="/Articles/866973/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well we (Samba) do have problems with inode duplication. However, because we do all access via a user-pluggable VFS API we have modules like vfs_fileid:<br>
+<p>
+<a href="https://www.samba.org/samba/docs/current/man-html/vfs_fileid.8.html">https://www.samba.org/samba/docs/current/man-html/vfs_fil...</a><br>
+<p>
+that allow fileid (inode in Windows) manipulation in user space.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/866973/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor866972"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2021 1:35 UTC (Sat)
+                               by <b>Fowl</b> (subscriber, #65667)
+                              [<a href="/Articles/866972/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So the problem is that NFS doesn’t support nested mountpoints - and btrfs makes them more common? Or that those mountpoints don’t appear in the list of mounts and this confuses the NFS server?<br>
+<p>
+I guess we’ll find out in part two! Cliffhanger <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/866972/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867037"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2021 11:48 UTC (Sun)
+                               by <b>rincebrain</b> (subscriber, #69638)
+                              [<a href="/Articles/867037/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+AIUI what is being described is that:<br>
+<p>
+* Btrfs subvols _can_ be mounted independently of their &quot;parent&quot;, but do not show up as distinct mounted filesystems unless you do that<br>
+* They don&#x27;t promise unique inode numbers between them, so this would break far more things, except dev_id is unique, so most things notice that<br>
+* Mounting over NFS doesn&#x27;t expose the dev_id being unique any more, resulting in fire<br>
+<p>
+I look forward to seeing what expectations various solutions break, as I&#x27;d probably default to wanting the subvols to have to be explicit mounts, but if someone was relying on not needing crossmnt or similar, they might be surprised one day...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867037/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor867056"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2021 22:49 UTC (Sun)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/867056/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I disagree with the assertion (commonly held) that btrfs subvols are &quot;essentially independent filesystems&quot;.<br>
+ - they cannot be independently synced with syncfs()<br>
+ - statfs() does not provide different information for different subvols  (except the f_fsid) - so they are identical in &quot;df&quot;.<br>
+ - they do NOT appear in /proc/mounts.  The entries that appear in /proc/mounts are no different to bind-mounts for some arbitrary directory within the filesystem<br>
+  <br>
+btrfs &quot;subvolumes&quot; are much more like project-quota trees as found in xfs, ext4, and f2fs, which also prevent renames from one tree to another and so are, in some sense, independent subtrees.<br>
+The particular value-add of btrfs &quot;subvolumes&quot; is that you can effectively create a reflink to one.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867056/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor867080"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2021 8:33 UTC (Mon)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/867080/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sounds to me as if btrfs is pretty much unusable in any place where correctness matters (so 99% of use cases in practice) without giving it another 20 years for each and every tool to work around its idiosyncrasies.<br>
+<p>
+The question is then, what does btrfs bring to the table that makes it useful enough for everyone to invest that much effort into it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867080/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867117"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2021 14:21 UTC (Mon)
+                               by <b>Paf</b> (subscriber, #91811)
+                              [<a href="/Articles/867117/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As comments above indicate, this is also a problem with the various union file systems.  Are they also unusable in production?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867117/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867164"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2021 17:29 UTC (Mon)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/867164/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+All those people running Docker containers would probaby be intrigued to hear about that.
+</p>
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867164/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor867165"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2021 17:49 UTC (Mon)
+                               by <b>niner</b> (subscriber, #26151)
+                              [<a href="/Articles/867165/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can of course wait for another 20 years before using btrfs.<br>
+Meanwhile we continue to enjoy btrfs detecting and fixing otherwise silent data corruption via its checksums, live migrations, almost instant snapshots locally and very fast offsite backups via send/receive and keep wondering what those correctness problems could be that keep you from doing the same.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867165/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor867078"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2021 13:17 UTC (Mon)
+                               by <b>zblaxell</b> (subscriber, #26385)
+                              [<a href="/Articles/867078/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Btrfs uses a subvolume ID number internally to identify subvolumes, but there is no way to make that number directly visible to user space</font><br>
+<p>
+There&#x27;s no generic VFS (or NFS) way to do it, but there is an ioctl that returns the subvol ID number of an open fd on btrfs (INO_LOOKUP on the constant subvol root inode number).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867078/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor867270"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2021 19:16 UTC (Tue)
+                               by <b>dullfire</b> (guest, #111432)
+                              [<a href="/Articles/867270/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  Imagine, for example, that /dev/sda1 contains a Btrfs filesystem that has been mounted on /butter.</font><br>
+<p>
+<p>
+Jonathan, sorry to have to point this out, but you always mount btrfs on /bread<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867270/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867307"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 25, 2021 9:33 UTC (Wed)
+                               by <b>sdalley</b> (subscriber, #18550)
+                              [<a href="/Articles/867307/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Well, I mount it on <code>/toast</code> and make sure it contains files <code>marmalade</code> and <code>melted-cheese</code>...
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867307/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867605"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 27, 2021 12:12 UTC (Fri)
+                               by <b>alonz</b> (subscriber, #815)
+                              [<a href="/Articles/867605/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Both at the same time??? Man, you have weird tastes ;-)
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867605/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor867640"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 27, 2021 15:08 UTC (Fri)
+                               by <b>sdalley</b> (subscriber, #18550)
+                              [<a href="/Articles/867640/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      You bet. And copying <code>peanut-butter</code> prior to the other two makes it even nicer...
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867640/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor867708"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 29, 2021 1:22 UTC (Sun)
+                               by <b>ghane</b> (guest, #1805)
+                              [<a href="/Articles/867708/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+May I point out the flame-wars you get if you use the O_MARMITE flag?  And there is a similar, but incompatible, O_VEGEMITE flag as well.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867708/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor867855"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The Btrfs inode-number epic (part 1: the problem)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 31, 2021 14:21 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/867855/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      I'd swap <tt>melted-cheese...</tt> for <tt>sausage</tt> (and <tt>toast</tt> for <tt>fried-bread</tt>).
+<p>
+Cheers,<br>Wol
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/867855/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2021, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

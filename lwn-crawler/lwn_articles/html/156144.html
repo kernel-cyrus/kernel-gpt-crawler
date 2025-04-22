@@ -1,0 +1,279 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>What's holding up 2.6.14: two difficult bugs [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/156144/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/155523/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/156144/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>What's holding up 2.6.14: two difficult bugs</h1>
+<div class="Byline">[Posted October 18, 2005 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+Linus was set on releasing the 2.6.14 kernel on October&nbsp;17, when a
+little issue came up.  Serge Belyshev <a
+href="/Articles/156145/">discovered</a> that it is easy to cause the system
+to stop opening files for user-space applications.  He posted a program
+which, in essence, does the following:
+<p>
+<pre>
+    while (1) {
+        int fd = open("/dev/null", O_RDONLY);
+	close(fd);
+    }
+</pre>
+<p>
+After some 50,000 iterations, the open fails with a "too many open files in
+system" message.  This behavior can be problematic in more realistic
+situations; it evidently can cause highly-parallel kernel builds to fail,
+and it also exposes the system to local denial of service attacks.  So it
+is worth tracking down.
+<p>
+The kernel places a limit on the number of files which are allowed to be
+open simultaneously.  That limit is not normally expected to include files
+which have been closed, however.  The problem, as it turns out, is a
+virtual filesystem scalability patch which was merged in September.
+That patch eliminates some locking around <tt>file</tt> structures in the
+kernel, and, to that end, defers certain tasks (such as file cleanup) to
+the <a href="http://lwn.net/Articles/37889/">read-copy-update</a>
+mechanism.  For this particular case, <tt>file</tt> 
+structures corresponding to closed files are building up in the RCU
+callback list, and RCU is not getting around to freeing them in time.
+<p>
+
+Initially, it was thought that the culprit was another patch which put a
+limit on the processing of the RCU callback lists.  Those lists can get
+quite long, and lengthy callback processing was causing latency problems
+elsewhere in the kernel.  So a "batch size" of ten was imposed; after ten
+callbacks have been processed, the RCU subsystem defers the rest until
+later.  It seemed that this limit was causing the freeing of <tt>file</tt>
+structures to languish.  Raising the batch limit to 10,000 seemed to
+improve the situation, so Linus merged a patch to that effect.
+<p>
+
+But, in fact, the higher batch limit did not solve the problem for real.
+RCU callbacks cannot be called immediately after being queued.  They must,
+instead, wait until every processor on the system has scheduled at least
+once.  This "quiescence" requirement is the kernel's way of ensuring that no
+references to the freed structure remain; it's a key part of how RCU
+works.  If a process chews through <tt>file</tt> structures quickly enough,
+they will accumulate while the kernel waits for the grace period to run
+out, and no changes to the batch limits will help.  The only way to be able
+to process those callbacks - and free the associated structures - is to
+force every processor to schedule.
+<p>
+
+A couple of patches have been posted in an attempt to deal with this
+problem.  One of them simply changes the way <tt>file</tt> structures are
+accounted for - they are removed from the count of open files when the RCU
+callback is queued, rather than when it is executed.  This patch stops
+programs from running into the maximum open file limit, but does nothing to
+stop the growth of the RCU callback queues.  So the patch which got merged,
+instead, is <a href="/Articles/156160/">this one from Eric Dumazet</a>,
+which keeps track of the length of the callback list.  Should the list get
+to be too long (where "too long" is wired at 10,000 entries), a reschedule
+is forced so that the callbacks can be processed.  This patch appears to
+have dealt with the problem well enough to allow 2.6.14 to come out, though
+more refinement may be required afterward.
+<p>
+
+Unfortunately for those who are waiting for 2.6.14, another problem turned
+up.  Some 64-bit architectures which 
+lack I/O memory management units must be very careful in setting up DMA
+areas.  A number of devices can only reliably deal with 32-bit DMA
+addresses, so DMA areas must be allocated in the lower part of memory.  To
+that end, the x86-64 and ia64 architectures use a mechanism called the
+"software I/O translation buffer", or swiotlb.  It is simply a large chunk
+of low memory, allocated at boot time, which is used as a bounce buffer for
+DMA operations involving 64-bit-challenged devices.
+<p>
+
+It <a href="/Articles/156162/">was noted</a> that the 2.6.14-rc4 kernel can
+allocate the swiotlb area in high memory, which defeats the entire
+purpose.  This revelation led to a long discussion of how swiotlb memory
+should be allocated.  It turns out that there is no easy way of finding the
+low memory on the system.  Once upon a time, that memory would belong to
+CPU&nbsp;0, but on <a href="/Articles/156163/">some contemporary NUMA
+systems</a>, the low memory might be elsewhere.  So the real solution
+appears to iterate through all CPUs on the system, try to allocate from
+each of them, and test to see if the resulting memory is within the DMAable
+range.  If not, the memory is freed and the next processor is tried.  A
+couple of patches implementing this approach are circulating; none has been
+merged as of this writing.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Read-copy-update">Read-copy-update</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#swiotlb">swiotlb</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/156144/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor157327"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What's holding up 2.6.14: two difficult bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 27, 2005 12:20 UTC (Thu)
+                               by <b>markryde</b> (guest, #33361)
+                              [<a href="/Articles/157327/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Hello,<br>
+<p>
+<font class="QuotedText">&gt;it evidently can cause highly-parallel kernel builds</font><br>
+<p>
+Sorry for my ignorance: can someone explain in few sentences<br>
+what are highly-parallel kernel builds ? <br>
+-- R<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/157327/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor157361"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What's holding up 2.6.14: two difficult bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 27, 2005 16:27 UTC (Thu)
+                               by <b>klossner</b> (subscriber, #30046)
+                              [<a href="/Articles/157361/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Building the kernel on a multi-CPU system with `make -j' so that many processors are used, each compiling a few source files.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/157361/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor157714"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">This incident</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 31, 2005 15:16 UTC (Mon)
+                               by <b>Baylink</b> (guest, #755)
+                              [<a href="/Articles/157714/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Is going to crop up in arguments about "software engineering" WRT the kernel.<br>
+<p>
+I'm not sure what part it will play, or what the right answer will be, but I know we'll hear about it in the trade press in the next 6 months, probably as a quote from some "analyst".<br>
+<p>
+We ought to give a little thought to capsulizing what the answer will be.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/157714/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2005, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

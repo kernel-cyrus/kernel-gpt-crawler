@@ -1,0 +1,524 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>An (unsigned) long story about page allocation [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/669015/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/668321/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/669015/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>An (unsigned) long story about page allocation</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>December 23, 2015</br>
+           </div>
+The kernel project is famously willing to change any internal interface as
+needed for the long-term maintainability of the code.  Effects on
+out-of-tree modules or other external code are not generally deemed to be 
+reasons to keep an interface stable.  But what happens if you want to
+change one of the oldest interfaces found within the kernel — one with
+many hundreds of call sites?  It turns out that, in 2015, the appetite for
+interface churn may not be what it once was.
+<p>
+If one looks at <a
+href="https://github.com/zavg/linux-0.01/blob/master/mm/memory.c"><tt>mm/memory.c</tt></a>
+in the Linux&nbsp;0.01 release, one finds that a page of memory is
+allocated with:
+<p>
+<pre>
+    unsigned long get_free_page(void);
+</pre>
+<p>
+From the memory-management point of view, the system's RAM can be seen as
+a linear array of pages, so it can make a certain amount of sense to think
+of addresses as integer types — indexes into the array, essentially.
+Integers can also be used for arbitrary arithmetic; pointers in C can be
+used that way too, but one quickly gets into "undefined behavior" territory
+where an overly enthusiastic compiler may feel entitled to create all kinds
+of mayhem.  So <tt>unsigned long</tt> was established as the return type
+from <tt>get_free_page()</tt> and, in general, as the way that one refers
+to an address that may appear in any place in memory.
+<p>
+Fast-forward to the 4.4-rc6 release and dig through a rather larger body of
+code, and one finds that pages are allocated with:
+<p>
+<pre>
+    unsigned long __get_free_pages(gfp_t gfp_mask, unsigned int order);
+    unsigned long __get_free_page(gfp_t gfp_mask);
+</pre>
+<p>
+The latter is a macro calling the former with an <tt>order</tt> of zero.
+Note that, more than 24 years after the 0.01 release, <tt>unsigned
+long</tt> is still used as the return type from
+<tt>__get_free_pages()</tt>.  There are other variants
+(<tt>alloc_pages()</tt>, for example) that return <tt>struct page</tt>
+pointers, but much of low-level, page-oriented memory management in Linux
+is still done with <tt>unsigned long</tt> values.
+<p>
+The only problem is that, often, the kernel must deal with a page of memory
+as <i>memory</i>, modifying its contents.  That requires a pointer.  So
+even back in 0.01, one can find code like:
+<p>
+<pre>
+    p = (struct task_struct *) get_free_page();
+</pre>
+<p>
+The <tt>unsigned long</tt> return value is immediately cast into the
+pointer value that is actually needed.
+Al Viro did a survey of <tt>__get_free_pages()</tt> users in current
+kernels and <a href="/Articles/669016/">concluded</a> that "<q>well
+above 90%</q>" of the callers were using the return value as a pointer.
+That turns out to be a lot of casts, suggesting that the type of the
+return value for this function is not correct.  So, he suggested, it might
+make sense to change it:
+<p>
+<div class="BigQuote">
+	In other words, switching to void * for return values of allocating
+	and argument of freeing functions would reduce the amount of
+	boilerplate quite nicely.  What's more, fewer casts means better
+	chance for typechecking to catch more bugs.
+</div>
+<p>
+Some of those bugs, he pointed out, he found simply by looking at the code
+with this kind of transformation in mind.  Ten days later, he showed up
+with <a href="/Articles/668852/">a patch set</a> making the change and
+asked for a verdict from Linus.
+<p>
+One might find various faults with <a href="/Articles/669017/">Linus's
+response</a>, but a lack of clarity will not be among them.  He left no
+doubt that there was no place in the mainline for this particular patch
+set.  The diffstat in Al's patch (568 files changed, 1956 insertions, 2202
+deletions) was clearly frightening — enough, in its own right, to rule
+out the change.  A patch this wide-ranging would create conflicts
+throughout the tree and make life difficult for those backporting patches.
+This interface, it seems, is too old and too entrenched for this kind of
+flag-day change; as Linus put it: "<q>No way in hell do we suddenly
+change the semantics of an interface that has been around from basically
+day&nbsp;#1.</q>"
+<p>
+Still, as he <a href="/Articles/669018/">clarified</a> afterward, Linus
+isn't arguing for leaving everything exactly as it is.  He accepted that
+most callers likely want a pointer value.  But the way forward isn't to
+thrash up an interface like <tt>__get_free_pages()</tt>; instead, there are
+two approaches that, he said, could be taken.
+<p>
+The first of these would be to create a new, pointer-oriented interface
+that exists in parallel with <tt>__get_free_pages()</tt>.  Then call sites
+could be converted at leisure over the course of what would probably be
+years.
+<p>
+The alternative, Linus said, is that code needing pointers could just
+allocate memory with <tt>kmalloc()</tt> instead.  Once upon a time, that
+would not necessarily have been a good idea, since <tt>kmalloc()</tt>
+(implemented by the slab allocators) adds overhead to the page allocator
+and might have expanded the size of the returned memory beyond one page.
+Indeed, there was a period where an allocation of exactly one page would
+have consumed two physically contiguous pages when the slab housekeeping
+information was added.  But those days are long in the past.  In current
+kernels, <tt>kmalloc()</tt> is fast and requires little memory beyond that
+which is actually allocated.  Indeed, Linus pointed out, <tt>kmalloc()</tt>
+may actually be faster than <tt>__get_free_pages()</tt> due to its use of
+per-CPU object caches.
+<p>
+So <tt>kmalloc()</tt> is probably the best option for many of the
+call sites currently using <tt>__get_free_pages()</tt>.  The places where
+it is still inappropriate will be those needing multiple-page allocations
+and those needing allocations that are not only page-sized but
+page-aligned.  In those cases, Linus said, the <tt>unsigned long</tt>
+return type might not be a bad thing, since "<q>it's clearly not just a
+random pointer allocation if the bit pattern of the pointer
+matters.</q>"
+<p>
+After this discussion took place, Al did <a href="/Articles/669020/">a
+pass over</a> the <tt>__get_free_pages()</tt> call sites in the filesystem
+code and concluded that almost all of them truly would would be better off
+using <tt>kmalloc()</tt>.  So the 
+end result of this work may be a slow shift in that direction and, perhaps,
+the creation of a new document telling kernel developers which memory
+allocator they should be using in which setting.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Internal_API">Memory management/Internal API</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/669015/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor669091"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An (unsigned) long story about page allocation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2015 3:05 UTC (Thu)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/669091/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; and those needing allocations that are not only page-sized but page-aligned. </font><br>
+<p>
+kmalloc(PAGE_SIZE) will always return a whole page - properly page aligned.<br>
+<p>
+Linus' comment about alignment:<br>
+<p>
+<font class="QuotedText">&gt; And if the code really explicitly wants a page (or set of aligned pages) </font><br>
+<p>
+is about alignment of a *set* of pages.  kmalloc(PAGE_SIZE * 2) with return a pair of pages, properly page-aligned, but it may not be 2-page aligned.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/669091/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor669094"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An (unsigned) long story about page allocation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2015 3:24 UTC (Thu)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/669094/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Please, show me what in mm/sl*b*.c would guarantee that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/669094/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor669721"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An (unsigned) long story about page allocation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 31, 2015 7:51 UTC (Thu)
+                               by <b>vbabka</b> (subscriber, #91706)
+                              [<a href="/Articles/669721/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+True. The current implementation does align, and it's hard to think of sensible implementation that wouldn't for page size alloc. But article suggests it wasn't like this before, and there's no stated guarantee AFAIK. <br>
+<p>
+BTW, page allocator also has per cpu caches, so that's not advantage of kmalloc. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/669721/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor669130"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An (unsigned) long story about page allocation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2015 13:30 UTC (Thu)
+                               by <b>ghane</b> (guest, #1805)
+                              [<a href="/Articles/669130/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Once again, Linus' response demonstrates the lack of civility in LKML, which is driving away experienced middle-aged white hackers from our community.  When will someone stand up for them?  Surely Gnome or the Mozilla Foundation can start a project?<br>
+<p>
+-- Sanjeev "how do you markup tounge-in-cheek" Gupta<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/669130/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor669173"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An (unsigned) long story about page allocation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 24, 2015 23:04 UTC (Thu)
+                               by <b>Arch-TK</b> (guest, #103811)
+                              [<a href="/Articles/669173/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What are you on about?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/669173/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor669180"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An (unsigned) long story about page allocation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 25, 2015 1:28 UTC (Fri)
+                               by <b>pr1268</b> (subscriber, #24648)
+                              [<a href="/Articles/669180/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>I sense some sarcasm in Sanjeev's (ghane's?) post.  That being said, everyone please note the context of Linus' curt retort&mdash;he was replying to Al Viro in particular.  I'm sure the two of them would feel right at home lobbing insulting messages back and forth to each other.</p>
+
+<p>[ducks for cover]</p>
+
+<p><em><b>NOT</b></em> meant to impugn Mr. Viro's work, or that of Linus.  Hopefully readers will equally sense the sarcasm in <em>my</em> post. ;-)</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/669180/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor669965"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">An (unsigned) long story about page allocation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 3, 2016 9:07 UTC (Sun)
+                               by <b>jospoortvliet</b> (guest, #33164)
+                              [<a href="/Articles/669965/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It does seem Linus is unnecessarily rude. As he points out he might not know how many ways there are to say NO but I am sure he can find a slightly less strong and harsh one. Al tried something he believed was worthwhile, Linus disagreed. No reason to start yelling right away...<br>
+<p>
+Al might not mind but as often - others watch and might not be interested in getting yelled at like that so that super clever cleanup/optimization they were thinking about might never be proposed. And that is a waste for no reason.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/669965/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor669182"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unsigned longs and void*s</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 25, 2015 1:55 UTC (Fri)
+                               by <b>pr1268</b> (subscriber, #24648)
+                              [<a href="/Articles/669182/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Perhaps I'm confused...</p>
+
+<blockquote><font class="QuotedText">The <tt>unsigned long</tt> return value is immediately cast into the pointer value that is actually needed.</font></blockquote>
+
+<p>Isn't it already a pointer?  I thought that the C language standard specifies that memory addresses (physical <em>or</em> virtual) be represented as an unsigned long integral primitive type<sup>1</sup>.  Plus, Mel Gorman's <a href="https://www.kernel.org/doc/gorman/html/understand/understand009.html">documentation on these functions</a> even states that these functions return a &quot;virtual address&quot; (&sect; 6.2).</p>
+
+<p>Perhaps I'm needlessly arguing English language semantics here instead of C.  The gist of my post is that an <tt>unsigned long</tt> and a <tt>void *</tt> are the same thing to the compiler, but if they're not, then all these casts exist merely to shut up the compiler.</p>
+
+<p><sup>1</sup> I may be wrong on this; apparently <a href="https://en.wikibooks.org/wiki/C_Programming/Reference_Tables#Table_of_Data_Types">ANSI/C89</a> makes no mention of storage of memory address types (i.e. pointers) as a primitive type, but instead as a <em>derived</em> type.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/669182/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor669190"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unsigned longs and void*s</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 25, 2015 5:55 UTC (Fri)
+                               by <b>viro</b> (subscriber, #7872)
+                              [<a href="/Articles/669190/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+address != pointer.<br>
+<p>
+"The following type designates an unsigned integer type with the property that any valid pointer to void can be converted to this type, then converted back to pointer to<br>
+void, and the result will compare equal to the original pointer: uintptr_t<br>
+These types [intptr_t and uintptr_t] are optional"<br>
+<p>
+IOW, not only they are different (hell, try to compile something like 2 * &amp;n and see where the compiler tells you to shove it), they are not even guaranteed to be possible to convert back and forth.<br>
+<p>
+On all architectures supported by Linux, such a type exists and happens to be unsigned long.  So casts back and forth are possible.  But void * and unsigned long are certainly *not* the same thing - the sets of operations valid for them are quite different.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/669190/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor669624"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Unsigned longs and void*s</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 30, 2015 13:08 UTC (Wed)
+                               by <b>eru</b> (subscriber, #2753)
+                              [<a href="/Articles/669624/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Those who have worked with segmented memory models have learned this the hard way. The MS-DOS and 16-bit Windows "large" memory model was an easy introduction, since there far pointers and longs are still the same size, even though the pointer is not a simple linear number. But then I encountered a 32-bit segmented Intel system, where pointers are 6 bytes (2 byte selector, 4 byte offset), but longs still 4 bytes... Teaches one to take C prototype declarations seriously.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/669624/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

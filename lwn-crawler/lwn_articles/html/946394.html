@@ -1,0 +1,1114 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Rethinking multi-grain timestamps [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/946394/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/946627/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/946394/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Rethinking multi-grain timestamps</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Benefits for LWN subscribers</b>
+<p>
+The primary benefit from <a href="/Promo/nst-nag5/subscribe">subscribing to LWN</a>
+       is helping to keep us publishing, but, beyond that, subscribers get
+       immediate access to all site content and access to a number of extra
+       site features.  Please sign up today!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 9, 2023</br>
+           </div>
+One of the significant features added to the mainline kernel during the 6.6
+merge window was multi-grain timestamps, which allow the kernel to
+selectively store file modification times with higher resolution without
+hurting performance.  Unfortunately, this feature also caused some
+surprising regressions, and was quickly ushered back out of the kernel as a
+result.  It is instructive to look at how this feature went wrong, and how
+the developers involved plan to move forward from here.
+<p>
+Filesystems maintain a number of timestamps to record when each file was
+modified, had its metadata changed, or was accessed (though access-time
+updates are often turned off for performance reasons).  The resolution of
+these timestamps is relatively coarse, measured in milliseconds; that is
+usually good enough for users of that information.  In certain cases,
+though, higher resolution is needed; a prominent case is serving files via
+NFS.  Modern NFS protocols can cache file contents aggressively for
+performance, but those caches must be discarded when the underlying file is
+modified.  One way of informing clients of modifications is through the
+modification timestamp, but that only works if the resolution of the
+timestamp is sufficient to reflect frequent changes.
+<p>
+In theory, recording timestamps at higher resolutions is straightforward,
+as long as filesystems have space for the extra data.  The strength of
+higher-resolution data is also a problem, though; a low-resolution
+timestamp will change relatively infrequently, but a timestamp that changes
+more often must be written back to the filesystem more often.  That can
+increase I/O rates, especially for filesystems that perform journaling,
+where each metadata update must go through the journal as well.  The cost
+of increased resolution is significant, which is especially problematic
+since the higher-resolution data will almost never be used.
+<p>
+The solution was <a
+href="/ml/linux-kernel/20230503142037.153531-1-jlayton@kernel.org/">multi-grain
+timestamps</a>, where higher-resolution timestamps for a file are only
+recorded if somebody is actually paying attention.  Normally, timestamp
+data is only stored at the current, relatively low resolution, meaning that
+a lot of metadata updates can be skipped for a file that is being written
+to frequently.  If somebody (a process or the kernel NFS server, for
+example) queries the modification time for a specific file, though, a
+normally unused bit in the timestamp field will be set to record the fact
+that the query took place.  The next timestamp update will then be done at
+high resolution on the theory that the modification times for that file are
+of active interest.  As long as somebody keeps querying the modification
+time for that file, the kernel will continue to update that time in high
+resolution.
+<p>
+That is the functionality that was merged for 6.6.  The problem is that
+this algorithm can give misleading results regarding the relative
+modification times of two files.  Imagine the following sequence of events:
+<p>
+<ol>
+<li> <tt>file1</tt> is written to.
+<li> The modification time for <tt>file2</tt> is queried.
+<li> <tt>file2</tt> is written to.
+<li> The modification time for <tt>file2</tt> is queried (again).
+<li> <tt>file1</tt> is written again.
+<li> The modification time for <tt>file1</tt> is queried.
+</ol>
+<p>
+After this sequence, the modification time for <tt>file1</tt>, obtained in
+step&nbsp;6 above, should be later than that for <tt>file2</tt> — it was
+the last file written to, after all.  But, since its modification time had
+not been queried, the modification timestamp will be stored in
+low-resolution.  Meanwhile, since there had been queries regarding
+<tt>file2</tt> (step&nbsp;2 in particular), its modification timestamp (set
+in step&nbsp;3 and queried in step&nbsp;4) will use the higher resolution.
+That can cause <tt>file2</tt> to appear to have been changed <i>after</i>
+<tt>file1</tt>, contrary to what actually happened.  And that, in turn, can
+confuse programs, like <tt>make</tt>, that are interested in the relative
+modification times of files.
+<p>
+Once it became clear that this problem existed, it also became clear that
+multi-grain timestamps could not be shipped in 6.6 in their initial form.
+Various options were <a
+href="/ml/linux-kernel/20230920-raser-teehaus-029cafd5a6e4@brauner/">considered</a>,
+including hiding the feature behind a mount option or just disabling it for
+now.  In the end, though, as <a
+href="/ml/linux-kernel/20230921-umgekehrt-buden-a8718451ef7c@brauner/">described</a>
+by Christian Brauner, the decision was made to simply revert the feature
+entirely:
+<p>
+<blockquote class="bq">
+	While discussing various fixes the decision was to go back to the
+	drawing board and ultimately to explore a solution that involves
+	only exposing such fine-grained timestamps to nfs internally and
+	never to userspace.
+<p>
+	As there are multiple solutions discussed the honest thing to do
+	here is not to fix this up or disable it but to cleanly revert.
+</blockquote>
+<p>
+The feature was duly <a
+href="https://git.kernel.org/linus/b5cbe7c00aa0">reverted</a> from the
+mainline for the 6.6-rc3 release.
+<p>
+The shape of what comes next might be seen in <a
+href="/ml/linux-kernel/20230922-ctime-v8-0-45f0c236ede1@kernel.org/">this
+series from Jeff Layton</a>, the author of the multi-grain timestamp work.
+It begins by adding the underlying machinery back to the kernel so that
+high-resolution timestamps can be selectively stored as before.  Timestamps
+are carefully truncated before being reported to user space, though, so
+that the higher resolution is not visible outside of the virtual filesystem
+layer.  That should prevent problems like the one described above.
+<p>
+The series also contains a change to the XFS filesystem, which is the one
+that benefits most from higher-resolution timestamps when used in
+conjunction with NFS (other popular filesystems have implemented "change
+cookie" support to provide the information that NFS clients need to know
+when to discard caches).  With this change, XFS will use the timestamp
+information to create its own change cookies for NFS; the higher resolution
+will ensure that the cookies change when the file contents do.
+<p>
+Layton indicated that he would like to see these changes merged for the 6.7
+release.  They have been applied to the virtual filesystem tree, and are
+currently showing up in linux-next, so chances seem good that it will
+happen that way.  If so, high-resolution timestamps will not be as
+widely available as originally thought, but there is no real indication
+that there is a need for that resolution in user space in any case; Linus
+Torvalds was <a
+href="/ml/linux-kernel/CAHk-=wjGJEgizkXwSWVCnsGnciCKHHsWg+dkw2XAhM+0Tnd0Jw@mail.gmail.com/">somewhat
+critical</a> of the idea that this resolution would be necessary or useful.
+But the most pressing problem — accurate change information for NFS — will
+hopefully have been solved at last.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems">Filesystems</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/946394/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor947140"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2023 15:55 UTC (Mon)
+                               by <b>tux3</b> (subscriber, #101245)
+                              [<a href="/Articles/947140/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;Timestamps are carefully truncated before being reported to user space, though, so that the higher resolution is not visible outside of the virtual filesystem layer. That should prevent problems like the one described above. </span><br>
+<p>
+I may be confused, but is it really enough?<br>
+<p>
+Say I write file 1 from userspace, locally, I do steps 2, 3, 4 on file 2 from NFS.<br>
+Now, a local program watches file 2, sees that it has been written, and responds by updating write file 1 (locally).<br>
+<p>
+On the other side of the NFS, maybe I am waiting to see a file 1 update, because I expect the watcher program to respond.<br>
+Can it happen that I see file 1 written before file 2, because file 1 got a low-res timestamp, but NFS still returns me a high-resolution file 2 timestamp, and so I wait forever?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947140/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947237"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2023 13:54 UTC (Tue)
+                               by <b>spacefrogg</b> (subscriber, #119608)
+                              [<a href="/Articles/947237/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This could only be a problem under the assumption that both modifications are less time apart than the lower time resolution (less precise timestamp). In such cases (last I know of is FAT), timestamps must be considered unreliable and disregarded or treated in an application-specific way.<br>
+<p>
+Without knowing any specifics, I don't think that this is an issue, here.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947237/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor947142"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2023 16:29 UTC (Mon)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/947142/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This may be a daft comment, but if the problem is that file1's modification data has been stored in low-res, surely the fix is to at least cache it in hi-res?<br>
+<p>
+If you're caching all modifications in hi-res in the VFS, would that help? Then you do the usual thing of dropping cache on an LRU basis, quite possibly bunching files on an "equal low-res modification time" to drop. You could always specify when to drop based on an aging basis rather than a cache full basis, so a system with loads of space to cache that can stay on top of it for a while (or will that make huge holes in kernel ram?).<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947142/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947154"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2023 18:12 UTC (Mon)
+                               by <b>smoogen</b> (subscriber, #97)
+                              [<a href="/Articles/947154/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wouldn't caching it in VFS work only for non-networked filesystems. If you have a cluster going, each one is going to have different cached VFS timestamps but it might be A which writes to file1 and B which writes to file2.. the cached high res in B would not get to C (the nfs server)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947154/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947163"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2023 20:30 UTC (Mon)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/947163/">Link</a>] (13 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At which point, don't you now get caught by relativity? :-)<br>
+<p>
+Two events, happening separated by space, you just can NOT always tell which happened first. End of. Tough.<br>
+<p>
+I think as soon as you have events happening to the same file system, from different computers, you just have to accept that knowing for sure which one happened first is a fool's errand. Some times you just have to accept that the Universe says NO!<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947163/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947165"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2023 20:39 UTC (Mon)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/947165/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To add, if the time between two events is less than the time for a photon to travel between the locations, then the question "which came first" does not make sense.<br>
+<p>
+Surely, if the latency of a message passing between two computers is greater than the time between two events, one happening on one computer, and the other event on the other computer, it's exactly the same. Asking "which came first" is a stupid question, even if the speed of light does mean that an answer is possible (which is not guaranteed).<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947165/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947170"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2023 22:13 UTC (Mon)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/947170/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; To add, if the time between two events is less than the time for a photon to travel between the locations, then the question "which came first" does not make sense.</span><br>
+<p>
+If the light from a distant supernova reaches me shortly after I've taken a sip of tea, I can pretty confidently assert that the supernova happened first even though the time between the two events was less than the time for a photon to travel between the locations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947170/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947195"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2023 12:21 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/947195/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But as far as the photon is concerned, you sipped the tea before the supernova happened.<br>
+<p>
+From its reference frame, no time elapsed between the supernova exploding, and it arriving at yours.<br>
+<p>
+So you must have sipped the tea before the star exploded.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947195/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor947260"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2023 14:27 UTC (Tue)
+                               by <b>Baughn</b> (subscriber, #124425)
+                              [<a href="/Articles/947260/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+First from your frame of reference, sure, but there'll be a frame of reference in which the events are reversed.<br>
+<p>
+In the supernova case those are all far away from you in phase space, but for high-frequency networking there's a lot more chance of ambiguity.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947260/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor947295"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2023 20:30 UTC (Tue)
+                               by <b>ianmcc</b> (subscriber, #88379)
+                              [<a href="/Articles/947295/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>If two events are separated in space by a distance that is more than <i>cΔt</i>, where <i>Δt</i> is the difference in time between the events and <i>c</i> is the speed of light, then it is known as a "space-like interval".  The events are closer together in time than they are in space such that it is not possible for light to travel from one event to the other, and there is no causal connection between the events (i.e. it is not possible to say that event 1 caused event 2, or vice versa).
+<p>
+It is a theorem in special relativity that if two events are space-like separated, then there exists a (possibly moving) reference frame where the two events are simultaneous.  Moreover there are also reference frames where event 1 occurs before event 2, and reference frames where event 2 occurs before event 1.
+<p>
+Although different observers will genuinely disagree about the order of events, since there is no causal connection between them there is ultimately no ambiguity in observable effects.  I.e. both observers would be able to calculate and agree that event 1 could not have caused event 2, and vice versa.  So although there will be a reference frame where you sip your tea before the supernova explodes, you can rest assured that you didn't cause it.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947295/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947339"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2023 9:59 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/947339/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The events are closer together in time than they are in space such that it is not possible for light to travel from one event to the other, and there is no causal connection between the events (i.e. it is not possible to say that event 1 caused event 2, or vice versa).</span><br>
+<p>
+Just to throw a spanner into the works, quantum mechanics would beg to differ :-) That was Einstein's "Spooky action at a distance", which appears to be a real thing.<br>
+<p>
+Just like (if I've got it right) quantum mechanics says black holes can't exist.<br>
+<p>
+The latest I knew, we have some evidence that says relativity is correct, we have some evidence that says quantum mechanics is correct, and we have loads of evidence that they can't both be right. Where do we go from here :-) Has somebody found the GUT? Or the TOE?<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947339/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947341"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2023 11:07 UTC (Wed)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/947341/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's still no causality broken in QM with entanglement. You can observe some measurement of an entangled entity and know what result would occur if measured somewhere else at the same moment (and outside the light cone), but causality is not broken because to *use* the information, you must actually communicate with the other side (as you cannot influence the result without breaking entanglement; you're just learning things at the same time as elsewhere).<br>
+ Note that the "interpretations" (e.g., Copenhagen, many worlds, etc.) are about *how* entangled particles do this.<br>
+<p>
+QM doesn't have anything to say about black holes as it does not have a model for gravity at all. The problems are that black holes represent a situation where gravity is strong enough to matter (heh) on the QM scales.<br>
+<p>
+And yes, there are gaps in the theories for what happens here. We don't know what it is.<br>
+<p>
+PBS Space Time is a good source of information on these topics: <a href="https://www.youtube.com/c/pbsspacetime/videos">https://www.youtube.com/c/pbsspacetime/videos</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947341/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor947178"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2023 2:45 UTC (Tue)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/947178/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; At which point, don't you now get caught by relativity? :-)</span><br>
+<p>
+Not yet. The next logical step down from 1 ms resolution is 100 µs resolution, but as long as both machines are within thirty kilometers[1] of each other, the events in question are separated by a timelike interval, and so all observers will agree about the order in which they happen.<br>
+<p>
+That's not to say this never becomes a problem (obviously there are pairs of computers that are separated by more than thirty kilometers), but there are several objections to the "relativity" argument:<br>
+<p>
+* The average LAN is way too small for this to be a problem, so LAN users can disregard relativity altogether unless we want to go to hundreds-of-nanoseconds precision or better.<br>
+* Even when relativity is a problem, you always have the option of selecting an arbitrary reference frame (like, say, the ITRF[2]), and declaring that to be the "right" reference frame, applying local corrections as needed, so you can still have a total ordering on events. Some observers will disagree with that ordering, but...<br>
+* ...in practice, the observers who disagree with your chosen ordering are either moving relative to your chosen reference frame, or they are experiencing a different level of gravity (because they're in space and your reference frame is not, or something along those lines). Data centers on Earth are not really moving relative to each other at significant speed, and surface variations in the Earth's gravity are quite small as well, so data centers will generally agree on the order in which events happen, even if they are separated by large distances. The "local corrections" that we need to do are entirely trivial, and amount to backsolving for the light-speed delay. Admittedly, this is a much harder problem if you want to build a data center on the Moon, or Mars, but we're not doing that yet.<br>
+* If all else fails, you adopt the TrueTime[3] data model and report time intervals instead of time stamps (i.e. instead of saying "it is exactly 14:00:00.000," you report something like "it is no earlier than 14:00:00.000 and no later than 14:00:00.007"). You can then account for all relativity of simultaneity by including it as part of the uncertainty (and always reporting relative to some arbitrary fixed reference frame, regardless of what the local reference frame looks like). This probably does make performance somewhat worse in some deployment scenarios (e.g. on Mars), but it has already been widely deployed as part of Spanner, so we know that it correctly solves the general "I don't know exactly what time it is" problem, regardless of whether that problem comes from relativity, clock skew, or some combination of the two.<br>
+<p>
+[1]: <a href="https://www.wolframalpha.com/input?i=distance+light+travels+in+100+microseconds">https://www.wolframalpha.com/input?i=distance+light+trave...</a><br>
+[2]: <a href="https://en.wikipedia.org/wiki/International_Terrestrial_Reference_System_and_Frame">https://en.wikipedia.org/wiki/International_Terrestrial_R...</a><br>
+[3]: <a href="https://static.googleusercontent.com/media/research.google.com/en//archive/spanner-osdi2012.pdf">https://static.googleusercontent.com/media/research.googl...</a><br>
+<p>
+Disclaimer: I work for Google, and the service I manage uses Spanner as a backend.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947178/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947187"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2023 7:24 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/947187/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; &gt; At which point, don't you now get caught by relativity? :-)</span><br>
+<p>
+<span class="QuotedText">&gt; Not yet. The next logical step down from 1 ms resolution is 100 µs resolution, but as long as both machines are within thirty kilometers[1] of each other, the events in question are separated by a timelike interval, and so all observers will agree about the order in which they happen.</span><br>
+<p>
+Fascinating! Yes really. But I think maybe I should have used the word "causality" rather than "relativity". My bad ...<br>
+<p>
+But what I was trying to get at, is that if that distance is greater than your thirty kilometers, either you don't actually need to know the order, or any attempt to assign an order is essentially throwing dice at random. (I think about that with regard to distributed databases, and I'd certainly try to localise the problem to avoid those network effects ...)<br>
+<p>
+At the end of the day, humans don't like it when the people who know say "it's unknowable". And in the example we appear to be discussing here, "make" running across a distributed file system, I find it hard to grasp how you can make the required sequential determinism work over the randomness of parallel file saves. If the system is running fast enough, or the network is large enough, the results will by the laws of physics be random, and any attempt to solve the problem is doomed to failure.<br>
+<p>
+From what you're saying, we're nowhere near that limit yet, but we might get better results if we planned for hitting it, rather than pretending it's not there.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947187/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947189"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2023 7:43 UTC (Tue)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/947189/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; But what I was trying to get at, is that if that distance is greater than your thirty kilometers, either you don't actually need to know the order, or any attempt to assign an order is essentially throwing dice at random.</span><br>
+<p>
+No, that is not what relativity says. Relativity says that the order is *arbitrary*, not that it is random. There is no randomness introduced by events separated by spacelike intervals - you can and should just pick your favorite reference frame, and use Lorentz transformations to correct all observations in other frames to match it. This is an entirely deterministic mathematical process which will produce a total ordering of all events (unless your chosen reference frame says they are exactly simultaneous, which can be disregarded since your measurements are not perfectly precise anyway).<br>
+<p>
+<span class="QuotedText">&gt; At the end of the day, humans don't like it when the people who know say "it's unknowable". And in the example we appear to be discussing here, "make" running across a distributed file system, I find it hard to grasp how you can make the required sequential determinism work over the randomness of parallel file saves. If the system is running fast enough, or the network is large enough, the results will by the laws of physics be random, and any attempt to solve the problem is doomed to failure.</span><br>
+<p>
+Yes, but this is not about relativity. This is about "I don't know how fast my network/SSD/whatever runs," or "I don't know how wrong my clock is." Those are much older problems, which have been well-understood in the world of distributed systems for decades. The most common approach is to use something like Paxos, Raft, or CRDTs, all of which explicitly establish "happens-before" relationships as a natural part of their consensus/convergence algorithms. Or, to put it in even simpler terms: The way you make sure X happens before Y is to have the computers responsible for X and Y talk to each other and arrange for that to be the case.[1]<br>
+<p>
+[1]: It should be acknowledged that this is harder than it sounds. If you only have two computers, it may well be completely intractable, for some definitions of "talk to each other" - see the "two generals problem." But there are versions of this problem which are more tractable, and modern distributed systems are built around solving those versions of the problem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947189/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947196"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2023 12:33 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/947196/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;  you can and should just pick your favorite reference frame, and use Lorentz transformations to correct all observations in other frames to match it.</span><br>
+<p>
+I'm thinking humans here. And stock markets. Where $billions could hang on the precise ordering of events. :-) <br>
+<p>
+And yes, I know that in our macro world all reference frames are - to all intents and purposes - the same. But as soon as you say "pick your favourite frame", you're going to get people fighting for the one that is to their personal advantage.<br>
+<p>
+Which is my point. As clocks get faster (the point of this article) and distances get greater (we're talking about a network), the greater the importance of the chosen reference frame, which is a matter of politics not maths. Which means we cannot appeal to logic for a solution.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947196/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947273"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2023 16:11 UTC (Tue)
+                               by <b>wittenberg</b> (subscriber, #4473)
+                              [<a href="/Articles/947273/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At this point, you need some old guy to point out the definitive discussion of this:  Time, Clocks, and the Ordering of Events in a Distributed System <br>
+  <a href="https://lamport.azurewebsites.net/pubs/time-clocks.pdf">https://lamport.azurewebsites.net/pubs/time-clocks.pdf</a> (1978) by Leslie Lamport.  As you would expect from him, it's beautifully written.  Everybody concerned with this issue should read it.<br>
+<p>
+--David<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947273/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor947182"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2023 6:07 UTC (Tue)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/947182/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; At which point, don't you now get caught by relativity? :-)</span><br>
+<p>
+"Relativity" is not some pixie dust you can sprinkle over your argument to handwave away the need to think, unfortunately.<br>
+<p>
+To actually answer the question, yes at some point you need to take relativistic effect into account if you need really accurate time synchronization. Gravitational time dilation, meaning that your clock ticks faster or slower depending on the altitude (strength of the gravitational field), is a thing. Likewise, if two clocks are moving at significant velocity with respect to each other (say, GPS satellites) you start seeing relativistic effects.<br>
+<p>
+But just signals propagating between fixed locations A and B at finite speed does not need any relativity. If you can measure the propagation delay between the two locations, you can agree on a common reference time. That's how e.g. TAI (<a href="https://en.wikipedia.org/wiki/International_Atomic_Time">https://en.wikipedia.org/wiki/International_Atomic_Time</a> ) works, with super accurate atomic clocks spread out all over the world agreeing on a common reference time scale. (Just to clarify, the atomic clocks participating in TAI do account for gravitational time dilation; my point is that fixed clocks separated by some distance is not some unsolvable relativistic mystery.)<br>
+<p>
+<span class="QuotedText">&gt; Two events, happening separated by space, you just can NOT always tell which happened first. End of. Tough.</span><br>
+<p>
+From your, no doubt, extensive studies of relativity you should know that is an ill posed statement. What relativity actually tells us is that there is no absolute time scale in the universe, it's all, drumroll, relative. However, for any particular observer, the order in which the observer sees events IS well defined. And thus two observers, knowing their distance and velocity with respect to each other can agree on a common time scale and they can calculate in which order, and when, the other sees events (which might not be the same in which it itself sees them).<br>
+<p>
+<span class="QuotedText">&gt; I think as soon as you have events happening to the same file system, from different computers, you just have to accept that knowing for sure which one happened first is a fool's errand. Some times you just have to accept that the Universe says NO!</span><br>
+<p>
+Practically speaking, the problem is not so much that relativity is this mysterious force that prevents us from knowing, but rather that things like computers themselves as well as signal propagation in computer networks is subject to a lot of timing variation. Time synchronization protocols like NTP and PTP do a lot of clever filtering etc. to reduce that noise, but obviously can't reduce it to zero.<br>
+<p>
+Another practical problem wrt ordering events is that if you have a bunch of timestamped events (which, as mentioned above, we can agree to a common timescale to a relatively high accuracy) coming in from a number of sources, one must wait for at least the propagation delay before one can be certain about the relative ordering of the events. Well, there are a numbers of approaches to dealing with agreeing upon a common event ordering in a distributed system, like the Google Spanner mentioned in a sibling comment, two-phase commit, and whatnot. They all tend to have drawbacks compared to a purely local system that doesn't need to care about such issues.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947182/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor947150"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2023 17:38 UTC (Mon)
+                               by <b>jlayton</b> (subscriber, #31672)
+                              [<a href="/Articles/947150/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; The shape of what comes next might be seen in this series from Jeff Layton, the author of the multi-grain timestamp work.</span><br>
+<p>
+This set is probably also defunct, as it means that you could use utimensat() to set a timestamp and then not get the same value back when you fetched it. My current approach is to try to advance the apparent coarse grained time whenever a fine grained time is handed out. That should mitigate the problem of seeing out-of-order timestamps that Jon descrbed. This is a major rework though, and probably won't be ready for v6.7.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947150/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947268"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2023 15:47 UTC (Tue)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/947268/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don’t think advancing the apparent coarse grained time will work, that will just replace one set of time comparaison errors with another.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947268/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947312"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 10, 2023 22:24 UTC (Tue)
+                               by <b>jlayton</b> (subscriber, #31672)
+                              [<a href="/Articles/947312/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think it will work.<br>
+<p>
+Whenever we stamp a file with a fine-grained timestamp, that time will now become the floor for any further timestamp that is handed out. The revised draft I have of this series works, and it now passes the testcase that was failing before, but it's still quite rough and needs further testing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947312/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947334"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2023 7:52 UTC (Wed)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/947334/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That’s very nice to learn thank you for the info!<br>
+<p>
+But won’t that make any file which timestamp is read after the fine-grained timestamp, newer than files which timestamp has been read before, even though in coarse timestamp world they would have the same timestamp, and may have even been written in a different order ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947334/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947340"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2023 10:25 UTC (Wed)
+                               by <b>jlayton</b> (subscriber, #31672)
+                              [<a href="/Articles/947340/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I probably didn't explain this very well. When I say "handed out" I meant the clock value being stamped onto the inode, not given out via stat() and friends.<br>
+<p>
+Basically, when we go to update any of the inode's timestamps we'll always grab the coarse-grained timestamp in the kernel for the update, unless someone has viewed it recently, in which case we'll grab a fine-grained timestamp instead. The idea is to update the coarse grained timestamp whenever we hand out a fine-grained one. That avoids the problem described in the article where the timestamps on files updated later appear to be earlier than the fine grained update.<br>
+<p>
+That does make issuing a fine-grained timestamp a bit more expensive though, so some of my current effort is in trying to improve that, and minimizing the number of fine-grained updates that are needed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947340/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947483"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2023 22:55 UTC (Wed)
+                               by <b>nijhof</b> (subscriber, #4034)
+                              [<a href="/Articles/947483/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How would that work up with multiple coarse - fine - coarse - fine... updates in close succession? If each would have to be later than the previous one, then each coarse timestamp would have to be advanced. And so you could end up with timestamps in the future?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947483/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor947485"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 11, 2023 23:18 UTC (Wed)
+                               by <b>jlayton</b> (subscriber, #31672)
+                              [<a href="/Articles/947485/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+When we talk about a fine grained timestamp, what we mean is one that comes directly from the kernel's internal high-resolution timekeeping. That generally has very fine resolution (~100ns or better) and monotonically increases. We grab that value, calculate and fix up the wallclock time from it and give it out. The coarse grained timestamp is updated approximately every jiffy (once per timer tick) and is just a snapshot of the fine grained timestamp at that time.<br>
+<p>
+So to answer your question, there should be no problem. The idea is to update the apparent coarse-grained timestamp _source_ before returning any fine-grained timestamp. Any later fetch from the timestamp source (coarse or fine), will always be later than or equal to the last fine grained timestamp handed out. That should be good enough to keep "make" happy.<br>
+<p>
+(Note that it's a bit more complex with the way that times are tracked in the timekeeping code, so I'm glossing over some details here.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947485/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor947153"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Timestamp should be a range</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2023 18:07 UTC (Mon)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/947153/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The right interface would be to provide timestamp as a range from earliest possible value to latest possible.  Then make(1) could work out conservatively what it needs to do.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947153/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor947166"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2023 21:01 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/947166/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One light-nanosecond is just 30 centimeters. At this point, it makes no sense to talk about precision. Even 10ns is just 3 meters.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947166/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor947168"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 9, 2023 21:37 UTC (Mon)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/947168/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It seems like what NFS wants is an mtime value such that if you do:<br>
+<p>
+mtime1 = mtime<br>
+content1 = content<br>
+mtime2 = mtime<br>
+<p>
+and see that mtime1 == mtime2, then later, if mtime == mtime1, content was still content1 when you last looked at mtime. This doesn't work at millisecond granularity, because there could be another modification in the same millisecond after the one that led to mtime2, and there could have been a modification leading to mtime1 in the same millisecond before a second one between reading the content and mtime2. Of course, the additional precision beyond a millisecond doesn't have to reflect when in the millisecond the modifications happened; it just has to increase with each different content. The excessive precision is really just ensuring that multiple modifications can't happen without getting a different mtime, but you also need to deal with still having this property if the file gets evicted from the cache at various points, which is the tricky part.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/947168/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor948161"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Rethinking multi-grain timestamps</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 19, 2023 9:49 UTC (Thu)
+                               by <b>LyonJE</b> (guest, #139567)
+                              [<a href="/Articles/948161/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Talking about a performance trade-off has me thinking that simply using a low-res timestamp works fine? It looks like we are only talking about fail-to-use-cache for a millisecond. (On the occasions that happens.) I suppose media is faster these days, but then also why isn't a layer closer to the media doing that work for the millisecond in the cases where it matters?<br>
+<p>
+Maybe I'm missing something, but nanosecond caching at a higher FS level maybe isn't the right place to do that, especially if it means introducing a swathe of finer-grained changes and adaptations, as has clearly been seen to be problematic?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/948161/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

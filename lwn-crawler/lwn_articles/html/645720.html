@@ -1,0 +1,1522 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A tale of two data-corruption bugs [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/645720/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/645410/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/645720/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A tale of two data-corruption bugs</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 24, 2015</br>
+           </div>
+There have been two bugs causing filesystem corruption in the news
+recently.  One of them, a bug in ext4, has gotten the bulk of the
+attention, despite the fact that it is an old bug that is hard to trigger.
+The other, however, is recent and able to cause data loss on
+filesystems installed on a RAID&nbsp;0 array.  Both are interesting
+examples of how things can go wrong, and, thus, merit a closer look.
+<p>
+<h4>Extent confusion in ext4</h4>
+<p>
+Like many reasonably modern filesystems, ext4 includes a number of
+performance-enhancing features.  One of those is delayed allocation,
+wherein the filesystem will not immediately allocate specific blocks on the
+disk for data that an application has just written.  By delaying that
+allocation, the filesystem gives itself some time to see if more data will
+be written in the near future.  If so, space for all of the written data
+can be allocated contiguously, improving future I/O performance.  Delayed
+allocation works, but it does leave some written data (the "delayed
+extent") in a sort of limbo 
+state for a brief period where it has no fixed home on the disk.
+Obviously, when the time comes to flush that data out to persistent
+storage, the task of allocating the destination blocks can be delayed no
+further.
+<p>
+Another performance feature is unwritten extents.  An application can
+increase the size of a file with system calls like <tt>truncate()</tt> or
+<tt>fallocate()</tt>.  These calls do not actually write data to any new
+extents added to the file.  Allowing anybody to read blocks that have not
+been written to is clearly a bad idea; at best, the result will be garbage,
+while, at worst, another user's sensitive information could be disclosed.
+The filesystem could avoid this problem by writing zeroes to all new blocks
+once they are allocated, but that's an inefficient use of CPU time and I/O
+bandwidth, given that the blocks are ordinarily going to be overwritten
+with real data in the near future.  The alternative is to mark the new
+blocks as being explicitly unwritten until that real data comes along.
+Attempts to read unwritten blocks will just result in a zero-filled buffer.
+<p>
+Ext4 keeps track of both delayed and unwritten extents in a data structure
+called the "extent status tree".  Something interesting happens, though, if
+an unwritten extent is added when there are already delayed allocation
+blocks in the same block range.  The entire unwritten extent ends up being
+marked 
+as delayed as well, because the extent status tree can't track the fact
+that only part of the extent is delayed.
+<p>
+For example, consider a file that is currently 100 blocks long — blocks
+0-99 are written and present on disk.  The application writes blocks
+100 and 101; the filesystem responds by putting them into the extent status tree as
+delayed-allocation blocks.  The application then uses <tt>fallocate()</tt>
+to tell the filesystem to allocate blocks 100-109.  Those unwritten blocks
+also go into the tree, but, since there are already two delayed blocks in
+that range, the entire range 100-109 is marked delayed as well.
+<p>
+A delayed extent is removed from the tree when the delayed buffers are
+actually written to disk.  But, in this case, there <i>are</i> no delayed
+buffers for blocks 102-109; as a result, the extent remains as a
+delayed extent in the tree, even after the actual delayed portion (blocks
+100 and 101) has been
+allocated and written out.  There it will stay until another write to one
+of the affected blocks comes along.  At that point, the entire block will
+be reallocated (because it is still marked as delayed), losing the
+previously delayed data that had already been written.  That is 
+about the point where alcohol consumption by both administrators and users
+increases unhealthily.
+<p>
+This bug has been present in the ext4 filesystem for some time; nobody
+seems to be quite sure when it was introduced.  It has remained
+undetected because it is quite hard to hit; the process, as <a
+href="/Articles/645723/">described</a> by Ted Ts'o, is:
+<p>
+<div class="BigQuote">
+	It requires the combination of (a) writing to a portion of a file
+	that was not previously allocated using buffered I/O, (b) an
+	fallocate of a region of the file which is a superset of region
+	written in (a) before it has chance to be written to disk, (c)
+	waiting for the file data in (a) to be written out to disk (either
+	via fsync or via the writeback daemons), and then (d) before the
+	extent status cache gets pushed out of memory, another random write
+	to a portion of the file covered by (a) -- in which case that
+	specific portion of (a) could be replaced by all zeros.
+</div>
+<p>
+Nonetheless, corruption bugs are bad news.  This one has been fixed by 
+<a href="/Articles/645722/">this patch</a> from Lukas Czerner which was
+merged for 4.1-rc2.  The fix also found its way into the 4.0.3, 3.18.14,
+3.14.42, and 3.10.78 stable updates.
+<p>
+<h4>Discard discrepancies</h4>
+<p>
+About the time the above bug was being fixed, some users started reporting
+problems with RAID&nbsp;0 arrays based on ext4; many assumed that they had
+been a victim of that bug.  The truth of the matter was somewhat worse than
+that, though; they had found a nastier, easier-to-trigger bug that was the
+result of an overly hasty fix.
+<p>
+Back in April, Joe Landman <a href="/Articles/645725/">reported</a> a
+problem with RAID&nbsp;0 volumes on the XFS filesystem.  After some
+back-and-forth, Neil Brown <a href="/Articles/645726/">tracked it down</a>
+to <a
+href="http://git.kernel.org/linus/20d0189b1012a37d2533a87fb451f7852f2418d1">a
+change</a> merged for the 3.14 release.  The code in question 
+calculates the number of sectors that fit in the next RAID&nbsp;0 chunk — in
+other words, the portion of the I/O request that maps to a single
+underlying drive.  In simplified form, this calculation looks like:
+<p>
+<pre>
+    unsigned sectors = chunk_sects - sector_div(sector, chunk_sects);
+</pre>
+<p>
+The call to <tt>sector_div()</tt> returns the remainder of the division.
+What it also does, though, may be surprising: it replaces the value of
+<tt>sector</tt> with <tt>sector/chunk_sects</tt>.  In other words,
+<tt>sector_div()</tt> is a macro that modifies one of its arguments.  The
+code did not take that modification into account, with the result that it
+used the wrong value of <tt>sector</tt> from then on.  Neil's fix was to
+simply reinitialize <tt>sector</tt> from the <tt>bio</tt> structure
+describing the operation in question.
+<p>
+There was only one little problem: by then the <tt>bio</tt> pointer had
+been advanced, so the new <tt>sector</tt> value was wrong.  When the
+RAID&nbsp;0 code then proceeded to map the sector in the RAID device to a
+sector in one of the underlying physical devices, it would end up in the
+wrong place — likely as not, on the wrong device entirely.  In practice,
+the code path that goes wrong in this way would be executed relatively rarely; it
+requires an I/O operation that crosses multiple RAID&nbsp;0 chunks.  So it
+is perhaps not entirely surprising that it seems to manifest itself most
+often with "discard" requests, which can be applied to an entire file at once.
+<p>
+Discard is a mechanism for telling a storage device that a particular range
+of blocks no longer contains needed data.  Its use can improve performance
+on solid-state drives, which can benefit from the knowledge that a certain
+range of blocks does not need to be preserved during wear-leveling
+operations.  If told to do so, the ext4 filesystem will generate DISCARD
+requests when a file is deleted, and the RAID&nbsp;0 code will pass those
+requests down to the underlying drives.  When this particular bug hits,
+though, the discard request will go to the wrong place, resulting in the
+discarding of some random, unrelated data.
+<p>
+This unfortunate "fix" was merged into the mainline during the 4.1 merge
+window.  If it had 
+stayed with the 4.1 kernel, its impact would have been limited; 4.1 has
+still not seen an official release.  But this patch also went into the 4.0.2,
+3.19.8, 3.18.14, and 3.14.41 stable updates.  The <a
+href="http://git.kernel.org/linus/a81157768a00e8cf8a7b43b5ea5cac931262374f">fix
+to the fix</a> (written by Eric Work) has been pulled into the mainline
+kernel, but has not, as of this writing, found its way into any stable
+updates.  One assumes that will happen soon, but it is worth noting that
+3.19.8 is the end of the 3.19 stable series, so there may be no updated
+kernel for 3.19 users.
+<p>
+The good news is that the problem was caught reasonably quickly; there
+should not be huge numbers of users who have updated to one of the affected
+kernels.  The bad news is that, for those users who are affected, there
+could be silent data corruption that will not be discovered for some time.
+Anybody who is running one of the affected kernels will — after moving to a
+safe kernel, of course — want to check the contents of their RAID&nbsp;0
+arrays against a backup.
+<p>
+Keeping data safely is one of the fundamental obligations of an operating
+system kernel, so data-corruption bugs can shake one's confidence in the
+whole structure.  But, as has been seen here, bugs happen.  Sometimes they
+lurk for years without causing trouble, and sometimes they make their
+presence known quickly.  Such bugs are, fortunately, rare with Linux; with
+luck, these are the last we will see for a while.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-ext4">Filesystems/ext4</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#RAID">RAID</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/645720/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor645751"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2015 14:29 UTC (Sun)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/645751/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;     unsigned sectors = chunk_sects - sector_div(sector, chunk_sects);</font><br>
+<p>
+<font class="QuotedText">&gt; The call to sector_div() returns the remainder of the division. What it also does, though, may be surprising: it replaces the value of sector with sector/chunk_sects. In other words, sector_div() is a macro that modifies one of its arguments.</font><br>
+<p>
+I'm surprised nobody has posted a patch yet to turn sector_div into a static inline and get rid of this in-place modification.  It's easy enough to write something like sector = sector_div(sector, chunk_sects); if that's really what you want.  And it's completely reasonable that someone wouldn't take in-place modification of a non-pointer argument into account, by an apparent function that isn't even named in all-caps to say "HEY, I'M A MACRO!"<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645751/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645760"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2015 20:03 UTC (Sun)
+                               by <b>xtifr</b> (guest, #143)
+                              [<a href="/Articles/645760/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Changing the behavior of an existing name is fraught with danger. You have to inspect every use of the name to see if it relies on the behavior being changed. Which might not sound <em>that</em> bad until you realize that this has to be done <em>separately</em>, not only for each branch, but for third-party forks as well. In other words, you've really gone beyond patch territory at that point, and are into "update procedure". Not a happy place to be.
+</p><p>
+A more reasonable approach might be to create an new static inline with a new name (e.g. sector_divide), and then either keep the current name for a macro that calls the inline and then does the extra assignment, or add a new macro with an all-caps name, and make the current name into a macro that uses #error to inform people that their code needs to be updated.
+</p><p>
+(The second approach causes more short-term pain, but less long-term. It does involve an update procedure, but one that can't be accidentally overlooked, which is the biggest danger with the naive approach.)
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645760/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645782"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 8:34 UTC (Mon)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/645782/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Right, so you change the name and the behaviour at the same time.  Then it will be obvious if there is any leftover code using the old name and expecting the old semantics.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645782/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor645817"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 17:09 UTC (Mon)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/645817/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Which might not sound that bad until you realize that this has to be done separately, not only for each branch, but for third-party forks as well.</font><br>
+<p>
+Nope.  This is exactly why the Linux kernel has a stated policy of not caring about out-of-tree drivers.  Just change the macro to a function, convert all callers in the kernel, and delete the old macro.<br>
+<p>
+<font class="QuotedText">&gt; A more reasonable approach might be to create an new static inline with a new name (e.g. sector_divide)</font><br>
+<p>
+Agreed, changing the name makes it easier to detect callers and avoid reintroducing new callers with that expectation (such as from patches in flight).<br>
+<p>
+<font class="QuotedText">&gt; and then either keep the current name for a macro that calls the inline and then does the extra assignment, or add a new macro with an all-caps name, and make the current name into a macro that uses #error to inform people that their code needs to be updated. </font><br>
+<p>
+No macro needs to exist, nor does the kernel keep around compatibility interfaces that nothing in the kernel uses.  Also, macros can't call #error, but there's a simpler solution to produce a compiler error for code that needs updating: just delete the macro, and attempted callers will get a compile time error saying sector_div does not exist.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645817/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645836"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 20:50 UTC (Mon)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/645836/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <P>I guess for a function like this, which effectively returns two values (in this case,<TT> sector_div </TT>is a specialized divmod function), you'd replace it with a static inline that requires you to take the address of the left argument?  ie. something like this?</P>
+<PRE>
+/* Compute bar / baz and bar % baz.  Put bar / baz into bar, and return bar % baz. */
+foo = divmod( &amp;bar, baz );
+</PRE>
+<P>With inlining, the reference/dereference will get optimized away, most certainly, and the required &amp; would make the in-out characteristic of<TT> bar </TT> more obvious.</P>
+<P>I have to admit, the in-out nature of<TT> sector_div </TT>would <I>not</I> have been apparent to me.  I sat up in my chair and shoot my head when I read the bug description in the article.</P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645836/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645837"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 21:49 UTC (Mon)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/645837/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><I>I have to admit, the in-out nature of<TT> sector_div </TT>would not have been apparent to me. I sat up in my chair and shoot my head when I read the bug description in the article.</I></blockquote>
+<P>err... I meant to say:  <I>I have to admit, the in-out nature of</i> <u>the first parameter to</u> <I><TT> sector_div </TT>would not have been apparent to me. I sat up in my chair and </I><u>shook</u><I> my head when I read the bug description in the article.</I></P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645837/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor645772"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 1:07 UTC (Mon)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/645772/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe it's a "div/mod" kind of macro, that is, it returns *both* the division result and its remainder. Since in C you have only one return value, the other return value has to go into one of the arguments. IIRC, it's also a *very old* macro, from way before the 2.0 days, perhaps even from before the 1.0 days.<br>
+<p>
+IMHO the best way would be to keep it as a macro (with a different name of course), but with *no* return value (that is, make it a "do {...} while(0)" kind of statement), and with *no* "in/out" arguments: each argument should be either an input or an output (which means 4 arguments). That should make it move up in Rusty's classic API quality scale (<a href="http://ozlabs.org/~rusty/index.cgi/tech/2008-03-30.html">http://ozlabs.org/~rusty/index.cgi/tech/2008-03-30.html</a> and <a href="http://ozlabs.org/~rusty/index.cgi/tech/2008-04-01.html">http://ozlabs.org/~rusty/index.cgi/tech/2008-04-01.html</a>).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645772/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645796"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing sector_div</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 12:57 UTC (Mon)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/645796/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The best fix from the viewpoint of safety and reliability is two new static functions sector_quo and sector_rem, along with changing the definition of macro sector_div so that its expansion causes a compile-time error which refers the programmer to sector_quo and sector_rem.<br>
+<p>
+Even then, we are not done yet.  There must be an audit to detect and evaluate all similar instances: any macro with arguments that is not equivalent to the obvious C-language function of those same arguments.  There are valid uses of such macros, but they must be prominently documented because of the high risk of confusion with functions.  Among other checks: correct use of parentheses, brackets and braces "()[]{}"; no use of any argument as an lvalue; no use of any identifier which is not in scope at time of definition.  Automate the detection phase of the audit using help from your favorite shell, editor and compiler.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645796/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645801"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing sector_div</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 14:06 UTC (Mon)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/645801/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The best fix from the viewpoint of safety and reliability is two new static functions sector_quo and sector_rem, along with changing the definition of macro sector_div so that its expansion causes a compile-time error which refers the programmer to sector_quo and sector_rem.</font><br>
+<p>
+The whole point of that macro is to avoid doing the same division twice. Replacing it with a single macro with a different calling convention would be acceptable, replacing it with two separate operations would be a harder sell.<br>
+<p>
+<font class="QuotedText">&gt; There must be an audit to detect and evaluate all similar instances: any macro with arguments that is not equivalent to the obvious C-language function of those same arguments.</font><br>
+<p>
+They're quite common in the kernel; the spin_lock_irqsave/irqrestore() pair is a popular example, and nobody ever gets confused by it. The problem is not "pass by reference" arguments; the problem is using the same argument for both an input and an output. In the spin_lock example, the argument to the spin_lock_irqsave() macro is always an output, and the argument to the spin_lock_irqrestore() macro is always an input.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645801/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645805"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing sector_div</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 14:50 UTC (Mon)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/645805/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I find it hard to believe that integer division and modulo operations could ever be a bottleneck (unless perhaps in a hashing function or cryptography).  The performance loss from doing them separately must be imperceptible.  I'd love to find out if I am wrong, however.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645805/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645839"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing sector_div</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 22:37 UTC (Mon)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/645839/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I find it hard to believe that integer division and modulo operations could ever be a bottleneck (unless perhaps in a hashing function or cryptography).</font><br>
+<p>
+Linux was developed on a 386. A quick search shows that the DIV instruction took 38 cycles. At a generous 16 MHz, that's 2.375 μs. Since it's part of the disk processing, it might have been used in an interrupt, where latency is important.<br>
+<p>
+When connected to a fast modem, the CPU might have only around 3800 cycles to process each character. 38 cycles is 1% of that. Every cycle counts.<br>
+<p>
+<font class="QuotedText">&gt; The performance loss from doing them separately must be imperceptible.</font><br>
+<p>
+Perhaps today in desktop CPUs with fast dividers. Definitely not the case back when the do_div macro was probably designed as a direct wrapper to the DIV instruction.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645839/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645849"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing sector_div</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2015 7:00 UTC (Tue)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/645849/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Back in the 386 days hard disks were far slower too, so I still doubt that it could have made a practical difference to anything.  Though as you say if used in an interrupt things become more interesting.  But I was talking about current systems.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645849/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645936"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing sector_div</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2015 17:03 UTC (Tue)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/645936/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Even in those dark days, compilers were smart enough to recognize a pair of divide and modulus operations on the same arguments and combine them.  There never was an excuse for this macro as written.  Putting it in lower case to conceal its nature was doubly wrong.<br>
+<p>
+Probably instead of leaving delayed-write blocks in limbo, they should be referred to scratch blocks and then re-targeted when the time comes to sync them out.  In a pinch, the actual scratch blocks can take the data, reliably.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645936/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645946"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing sector_div</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2015 19:32 UTC (Tue)
+                               by <b>bcopeland</b> (subscriber, #51750)
+                              [<a href="/Articles/645946/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; There never was an excuse for this macro as written.</font><br>
+<p>
+My guess, without having looked at history, is that sector_div() is that way because of do_div(), but even it has been recognized as a trap for the unwary going back quite a while (see e.g.: <a href="http://lkml.iu.edu/hypermail/linux/kernel/0308.0/0617.html">http://lkml.iu.edu/hypermail/linux/kernel/0308.0/0617.html</a>)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645946/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645958"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing sector_div</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2015 23:42 UTC (Tue)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/645958/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Not very many people should use "do_div()" directly (and a quick grep shows that not very many people do). It's generally a mistake to do so, I suspect. The thing was originally written explicitly for "printk()" and nothing else.</font><br>
+<p>
+That might explain why it's that way. The printk() family of functions is used in a lot of places.<br>
+<p>
+And yeah, sector_div() is do_div() if CONFIG_LBDAF (large block devices) is set, otherwise it's a normal rem/div pair.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645958/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor645816"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing sector_div</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 17:01 UTC (Mon)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/645816/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  The whole point of that macro is to avoid doing the same division twice. Replacing it with a single macro with a different calling convention would be acceptable, replacing it with two separate operations would be a harder sell.</font><br>
+<p>
+Compilers are smart enough to notice and coalesce div and mod on the same operands and implement them with a single instruction on architectures with such an instruction.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645816/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor645767"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2015 20:55 UTC (Sun)
+                               by <b>ivuk</b> (guest, #102574)
+                              [<a href="/Articles/645767/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Regarding the 3.19 kernel, hasn't Canonical picked up its maintenance? I'd expect them to include the patch in their future releases.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645767/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645768"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 24, 2015 22:34 UTC (Sun)
+                               by <b>tonyblackwell</b> (subscriber, #43641)
+                              [<a href="/Articles/645768/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Mageia pushed the patches a couple of days ago, for 3.19.8 (in M5) and 3.14 (M4)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645768/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor645780"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 7:28 UTC (Mon)
+                               by <b>tajyrink</b> (subscriber, #2750)
+                              [<a href="/Articles/645780/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, it seems to be in the queue for the next ckt update: <a href="http://kernel.ubuntu.com/git/ubuntu/linux.git/commit/?h=linux-3.19.y-queue&amp;id=89a04b3ea8684931c81bfb9a4560338ffcfd3c03">http://kernel.ubuntu.com/git/ubuntu/linux.git/commit/?h=l...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645780/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor645771"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 0:54 UTC (Mon)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/645771/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>That is about the point where alcohol consumption by both administrators and users increases unhealthily.</blockquote>
+<p>To be precise, the alcohol isn't actually consumed until someone tries to read the blocks and finds that they don't have the right data. The alcohol consumption does become necessary at the time when the data is lost, however, but it is delayed...</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645771/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor645778"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 6:41 UTC (Mon)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/645778/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It has remained undetected because it is quite hard to hit;</font><br>
+<p>
+I'm curious: was it possible to add a corresponding test case anyway?<br>
+<p>
+More generally I'd really like to hear about how filesystems get tested. They're possibly the most critical kernel feature. For instance: does test code live mostly in user space or kernel? Are there many unit tests? etc.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645778/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645793"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 25, 2015 11:57 UTC (Mon)
+                               by <b>jan.kara</b> (subscriber, #59161)
+                              [<a href="/Articles/645793/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So filesystems are usually tested using xfstests these days. That is a (quite big) collection of various tests (in userspace). Test for this particular bug has been added (as test generic/086) shortly after the kernel bug was fixed to make sure we don't reintroduce it :). See <a href="https://git.kernel.org/cgit/fs/xfs/xfstests-dev.git/commit/?id=76990371ca8308ee60a1f285b6e79794282c208e">https://git.kernel.org/cgit/fs/xfs/xfstests-dev.git/commi...</a> <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645793/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor645855"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2015 10:39 UTC (Tue)
+                               by <b>alankila</b> (guest, #47141)
+                              [<a href="/Articles/645855/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Would probably be good idea to go through the kernel source tree now and replace every lowercase macro name with uppercase version.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645855/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645860"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2015 12:57 UTC (Tue)
+                               by <b>JdGordy</b> (subscriber, #70103)
+                              [<a href="/Articles/645860/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Switching to uppercase wouldn't solve anything in this case....<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645860/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor645930"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2015 15:41 UTC (Tue)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/645930/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the macro name had been uppercase from the start, the original code probably wouldn't have had the bug of changing sector. And the way to avoid that bug that the author chose would probably not have been to reload it, since the author was more likely at that time to know that bio had changed than Neil Brown was recently.<br>
+<p>
+It's also easier to catch the second problem in review with it being new code than as a change to old code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/645930/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor646158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 27, 2015 20:05 UTC (Wed)
+                               by <b>alankila</b> (guest, #47141)
+                              [<a href="/Articles/646158/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Macros can do strange things, such as appear to manipulate values which are not passed as a pointer. Syntactically, it is better if they are different from functions.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor646195"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 27, 2015 23:00 UTC (Wed)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/646195/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Syntactically, it is better if they are different from functions.</font><br>
+<p>
+Interestingly, the Rust language does precisely that: macros always have a ! suffix (like format!(...)).<br>
+<p>
+But I agree with the parent comment: making it obvious that it's a macro (all-uppercase, special suffix, etc) would have made no difference. If a programmer sees macro called SECTOR_DIV, receiving a sector number and a sector size, what would the programmer think? "It's a macro which does whatever magic is necessary to divide a sector number by a sector size." The programmer would not expect it to overwrite the sector size passed in! The kernel is full of function-like macros (or functions which are macros in some kernel configurations), no matter how they're named people will expect them to behave like normal functions.<br>
+<p>
+Now suppose the macro had one extra parameter, like "... = SECTOR_DIV(sector, sector, sector_size)". The programmer would question, "why is sector passed twice? Clearly one of them must be an output, or some other arcane trickery; I must look into its definition," and the bug wouldn't happen.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646195/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor646216"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 28, 2015 0:24 UTC (Thu)
+                               by <b>alankila</b> (guest, #47141)
+                              [<a href="/Articles/646216/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I can't believe that I have to argue such an obvious point.<br>
+<p>
+I assert that chances of mistakes like these are almost definitely increased when macros look like function calls. If sector_div had actually been a function, it couldn't have altered the input argument given the way it was called. Because it looks like a function, it dupes programmers with a false expectation. To crystallize, things that are different in behavior should also look different. Therefore, having upper-case named macros is prudent (especially when they do macroy stuff that is impossible for functions to do) and it would increase the likelihood that someone checks the implementation because a macro can really do very strange things that break syntactic expectations. You don't know about a C macro where exactly the argument is expanded, or how many times it will be evaluated.<br>
+<p>
+Anyway, macros are evil and should die, especially macros for which inline functions are a perfectly acceptable substitute.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646216/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor647395"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 7, 2015 14:17 UTC (Sun)
+                               by <b>parcs</b> (guest, #71985)
+                              [<a href="/Articles/647395/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thankfully C++ makes this strange behavior a feature of normal functions.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/647395/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor647441"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2015 13:22 UTC (Mon)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/647441/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Which means that as a C++ programmer you realize that you always need to check the function declaration. Always.<br>
+<p>
+It isn't a bad idea to do it for C either. Sure you can see that you are using the &amp; to create a pointer and pass it to a function. What do you do for the second level function that passes that pointer to a third level? No visual indicator there at all.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/647441/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor646441"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 28, 2015 23:28 UTC (Thu)
+                               by <b>lacos</b> (guest, #70616)
+                              [<a href="/Articles/646441/">Link</a>] (13 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've just made three stunning discoveries.<br>
+<p>
+(1) In all of the above discussion about "how this divmod interface should look like", noone mentions that the standard C library provides div(), ldiv(), lldiv(), and imaxdiv(), all of which return small *structures*. Obviously the kernel doesn't use the standard C library, but for the same functionality, the interface should be the same, preferably.<br>
+<p>
+(2) So we have three commits here:<br>
+<p>
+* 20d0189b1012 -- original commit. Introduces the original bug. Seven people on CC, no Acked-by or Reviewed-by tags. Whoever the maintainer was just pulled / applied the patch without reviews from the community.<br>
+<p>
+* 47d68979cc96 -- first fix. Replaces the original bug with another bug. No Acked-by or Reviewed-by tags.<br>
+<p>
+* a81157768a00 -- fix to the fix. Supposed to solve the most recent bug. Surprise: no Acked-by or Reviewed-by tags. Notice a pattern?<br>
+<p>
+The QEMU community has a policy that *no patch is applied* until it gets at least one Reviewed-by. Edk2 (EFI Development Kit II) follows the same policy.<br>
+<p>
+(3) Icing on the cake: the article states that the latest fix was written by Eric Work. Indeed the "author" metadata field on a81157768a00 carries his name. But, that's not enough. The primary / first author should always be named by the first Signed-off-by tag in the commit message. Reviewers and/or the maintainer should have immediately pointed out that Eric's S-o-b was missing from his patch email.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646441/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor646449"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 29, 2015 0:12 UTC (Fri)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/646449/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Your point about the lack of review is well made.  But it is not a new point, nor one that applies only to this case.<br>
+I would love more review.  I don't know how to get it.<br>
+<p>
+However your final issue about a missing s-o-b from Eric is something I can say something useful about.<br>
+Signed-off-by is primarily a statement about copyright ownership.  It is tightly tied to the "Developers Certificiate of Origin"<br>
+When I added my Signed-off-by, I was attesting that I was satisfied that the person I received the patch from had the right to give it to me under the terms of the GPL, and was doing so.   I was satisfied because I could see the history of how he developed it and his general attitude to how it should be used was clear.  Also it was a trivial patch with no creative content and hence nothing that was copyrightable.  I would have happily accepted a s-o-b from Eric, but it seemed pointless to ask for one.  When someone has done me a favour with useful testing and analysis and created a patch, sending it back to have some 'i's crossed and 't's dotted seems impolite.<br>
+<p>
+But maybe that is why I have trouble getting people to review my code - I'm too polite :-)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646449/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor646451"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 29, 2015 0:50 UTC (Fri)
+                               by <b>lacos</b> (guest, #70616)
+                              [<a href="/Articles/646451/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for your prompt answer!<br>
+<p>
+I think for such bugs it should be possible to "forcefully elicit" some reviews -- you could say you wouldn't apply the patch (hence, you'd delay the fix for the issue) until someone gave a Reviewed-by. Faking / rushing a Reviewed-by is usually a greater psychological obstacle for pepole than ignoring a patch, so I think getting a Reviewed-by would prove at least *some* level of attention to the patch.<br>
+<p>
+I do realize that lack of reviews is a general plight.<br>
+<p>
+Regarding the S-o-b -- I fully agree that when a patch goes through a maintainer's tree / pull req it should get a new S-o-b from that maintainer. But that S-o-b tag should come under the original author's own, first, S-o-b.<br>
+<p>
+Also, I believe this issue could be handled without a full patch round-trip. I think I'd just ask the submitter publicly, in the thread of his patch, if he was okay with me supplementing his missing S-o-b, in my tree. When confirmed (publicly), just rebase the patch locally and add the tag, similarly to any Reviewed-by or Acked-by tags posted by reviewers.<br>
+<p>
+Regarding copyright -- I prefer to err on the safe side. "No creative content and hence nothing that was copyrightable" is not a statement that I'd ever like to have to defend. :) Especially if the submitter provided the patch as a result of work-for-hire (ie. from a company email address, more or less). I do realize this was likely not the case here.<br>
+<p>
+Thanks!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646451/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor646455"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 29, 2015 1:24 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/646455/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+demanding that the first author approve patches to the code just isn't going to work. The first author may not be around any longer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646455/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor646525"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 29, 2015 11:24 UTC (Fri)
+                               by <b>lacos</b> (guest, #70616)
+                              [<a href="/Articles/646525/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think you may have misunderstood my point about the original author's S-o-b. I'm not proposing that the original author review all further patches that modify his original code; that would just be futile. What I'm proposing is: if a contributor posts a patch without his own S-o-b, then the maintainer with jurisdiction should immediately point out that fact, and either ask for a resubmission, or (if the patch is otherwise okay) ask for permission to add the S-o-b to the commit on the maintainer side.<br>
+<p>
+In this regard, lack of the S-o-b in the original patch is just a bug, like any other bug that can be present in a patch. The contributor is definitely around during the week or so after posting his patch; how would he expect to react to any review comments otherwise? A maintainer or reviewer saying "thanks for your patch, but it's missing your S-o-b, please submit a corrected version, or authorize me to supplement it in my tree" is no different from a maintainer or reviewer saying "thanks for your patch, but it introduces an integer overflow, please submit a corrected version".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646525/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor646512"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 29, 2015 9:22 UTC (Fri)
+                               by <b>johannbg</b> (guest, #65743)
+                              [<a href="/Articles/646512/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"I would love more review. I don't know how to get it."<br>
+<p>
+With training an reviewer/coders with the associated cost ( of time ) of doing so.<br>
+<p>
+People in opensource projects have a tendency to skip this step ( for one reason or another like they dont like to hand hold people etc ) then complain about lack of reviews, followed by company's that now are depended on that projects code either to hire *experienced* developers to review/code ( and those dont grow on trees ) and or fund that procedure collectively.   <br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646512/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor646664"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 30, 2015 0:08 UTC (Sat)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/646664/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; With training an reviewer/coders with the associated cost ( of time ) of doing so.</font><br>
+<p>
+I have invested in a number of people over the years, and it has been rewarding in the short term.  In the longer term they seem to disappear, either vanish from the community or get caught up in more interesting projects with related technologies.  I can't say I blame them.<br>
+<p>
+The people who do hang around are the "users" rather than "developers" - there are a number of people on linux-raid who routinely help people out with various configuration problems so I don't need to do much of that any more - and I am extremely grateful (should probably say so more often).  But they aren't kernel developers and I don't expect them to review code.<br>
+<p>
+Maybe we do need to pay someone competent to become interested, but I'd rather paying someone who was interested to become competent...<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646664/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor646847"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2015 13:39 UTC (Mon)
+                               by <b>johannbg</b> (guest, #65743)
+                              [<a href="/Articles/646847/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Here's where upstream attitude and presentation matters.<br>
+<p>
+On top of that keeping people engaged and interested with hardware depended projects is tricky so I'm not surprised if you are working in that field that you have lost quite few members from that community in the long run since you need to continuously to be supplying those committed with the relevant hardware for the times and that project, for that to work.<br>
+<p>
+And I agree paying someone who was interested, engaged and part of the community to become competent is the better choice than the alternative which has negative effects on existing participants of the community.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646847/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor647082"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2015 15:15 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/647082/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If upstream attitude helped, Neil would have dozens of helpers (it is pretty uncontroversial there are few more helpful and all-around pleasant people in the community). It's not enough :(<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/647082/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor647107"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2015 17:00 UTC (Wed)
+                               by <b>johannbg</b> (guest, #65743)
+                              [<a href="/Articles/647107/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Upstream attitude matters and I'm pretty sure if it has not been as good as it has been it would have fewer participants but it's not the only thing that matters when dealing with hardware depended communities since it's users need to poses or have access to ( and the ability to test as well ) the required hardware necessary to be able to participate. <br>
+<p>
+Once participating individual stops owning or otherwise have access to the relevant hardware for his participation, his participation gradually starts to decline and he's gone in 6 months to an year. <br>
+<p>
+Maintaining a healthy community full of capable participants dedicating their free time to help out is alot of work due to constant struggle with the competition, evolution or both. <br>
+<p>
+It's truly said when you see upstream communities with developers that either ignore and or take those resources for granted.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/647107/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor647143"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 3, 2015 20:14 UTC (Wed)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/647143/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The required hardware? None. Well, a storage device. (You can test using multiple sparse loopback devices...)<br>
+<p>
+This is not hardware RAID, after all. It's software! Anyone with more than one disk and *without* expensive hardware will probably be looking at md.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/647143/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor647224"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2015 18:12 UTC (Thu)
+                               by <b>ksandstr</b> (guest, #60862)
+                              [<a href="/Articles/647224/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Here's where upstream attitude and presentation matters.</font><br>
+<p>
+It might. I've not seen the evidence, only heard the stories of such evidence existing -- though the storyteller rarely claims to have laid eyes on it for themselves. They're just very sure, somehow; and anyway they've heard the story quite often.<br>
+<p>
+On the other hand, I've got anecdotal evidence that suggests there's currently a smaller pool of potential contributors to Linux for the reason that the GNU/Linux and Free software scene is apparently replete with and/or defenseless with regard to the worst kind of militant progressive activist. Given choice between a loose association that's so naïvely accepting of vile lunatic filth[0], and eight hours per day of one that lies somewhere between oppressively corporate, frothy-mouthed and cult-like (startup companies, Apple), and just a humdrum trade below the line of equitability (everything else), it's easy to pick one where the individual developer's mortgage doesn't hang on the appetites of various extremist pundits and their compliant political officers.<br>
+<p>
+<p>
+[0] all in the name of "decency", of course. what else would it be?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/647224/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor647231"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">parse: bailing out at line ~#?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 4, 2015 18:52 UTC (Thu)
+                               by <b>sdalley</b> (subscriber, #18550)
+                              [<a href="/Articles/647231/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Golly. You sound as if you could do with a lie down.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/647231/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor646843"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A tale of two data-corruption bugs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 1, 2015 12:38 UTC (Mon)
+                               by <b>pm215</b> (subscriber, #98099)
+                              [<a href="/Articles/646843/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+"The QEMU community has a policy that *no patch is applied* until it gets at least one Reviewed-by."<br>
+<p>
+That's overstating things somewhat. We would like all patches to get a reviewed-by, but that's an ideal, not a flat requirement. If you look through QEMU's git history it's easy to find patches which didn't get a reviewed-by tag.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/646843/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

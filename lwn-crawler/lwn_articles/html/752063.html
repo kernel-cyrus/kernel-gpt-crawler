@@ -1,0 +1,1984 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>PostgreSQL's fsync() surprise [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/752063/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/751652/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/752063/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>PostgreSQL's fsync() surprise</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Benefits for LWN subscribers</b>
+<p>
+The primary benefit from <a href="/Promo/nst-nag5/subscribe">subscribing to LWN</a>
+       is helping to keep us publishing, but, beyond that, subscribers get
+       immediate access to all site content and access to a number of extra
+       site features.  Please sign up today!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 18, 2018</br>
+           </div>
+Developers of database management systems are, by necessity, concerned
+about getting data safely to persistent storage.  So when the PostgreSQL
+community found out that the way the kernel handles I/O errors could result
+in data being lost without any errors being reported to user space, a fair
+amount of unhappiness resulted.  The problem, which is exacerbated by the
+way PostgreSQL performs buffered I/O, turns out not to be unique to Linux,
+and will not be easy to solve even there.
+<p>
+Craig Ringer first <a href="/Articles/752093/">reported the problem</a> to
+the pgsql-hackers mailing list at the end of March.  In short, PostgreSQL
+assumes that a successful call to <tt>fsync()</tt> indicates that all data
+written since the last successful call made it safely to persistent
+storage.  But that is not what the kernel actually does.  When a buffered
+I/O write fails due to a hardware-level error, filesystems will respond
+differently, but that behavior usually includes discarding the data in the
+affected pages and marking them as being clean.  So a read of the blocks that
+were just written will likely return something other than the data that was
+written.
+<p>
+What about error status reporting?  One year ago, the Linux Filesystem,
+Storage, and Memory-Management Summit (LSFMM) included <a
+href="/Articles/718734/">a session</a> on error reporting, wherein it was
+described as "a mess"; errors could easily be lost so that no
+application would ever see them.  <a href="/Articles/724307/">Some
+patches</a> merged during the 4.13 development cycle improved the situation
+somewhat (and 4.16 had some changes to improve it further), but there are
+still ways for error notifications to be lost, as
+will be described below.  If
+that happens to a PostgreSQL server, the result can be silent corruption of
+the database.
+<p>
+PostgreSQL developers were not pleased.  Tom Lane <a
+href="/Articles/752096/">described</a> it as "<q>kernel brain
+damage</q>", while  Robert Haas <a href="/Articles/752097/">called it</a>
+"<q>100% unreasonable</q>".  In the early part of the discussion, the
+PostgreSQL developers were clear enough on what they thought the kernel's
+behavior should be: pages that fail to be written out should be kept in
+memory in the "dirty" state (for later retries), and the relevant file
+descriptor should be put into a permanent error state so that the
+PostgreSQL server cannot miss the existence of a problem.
+<p>
+<h4>Where things go wrong</h4>
+<p>
+Even before the kernel community came into the discussion, though, it
+started to become clear that the situation was not quite as simple as it
+might seem.  Thomas Munro <a href="/Articles/752098/">reported</a> that
+Linux is not unique in behaving this way; OpenBSD and NetBSD can also fail
+to report write errors to user space.  And, as it turns out, the way that
+PostgreSQL handles buffered I/O complicates the picture considerably.
+<p>
+That mechanism was <a href="/Articles/752101/">described in detail</a> by
+Haas.  The PostgreSQL server runs as a collection of processes, many of
+which can perform I/O to the database files.  The job of calling
+<tt>fsync()</tt>, however, is handled in a single "checkpointer" process,
+which is concerned with keeping on-disk storage in a consistent state that
+can recover from failures.  The checkpointer doesn't normally keep all of
+the relevant files open, so it often has to open a file before calling
+<tt>fsync()</tt> on it.  That is where the problem comes in: even in 4.13
+and later kernels, the checkpointer will not see any errors that happened
+before it opened the file.  If something bad happens before the
+checkpointer's <tt>open()</tt> call, the
+subsequent <tt>fsync()</tt> call will return successfully.  There are a
+number of ways in which an I/O error can happen outside of an
+<tt>fsync()</tt> call; the kernel could encounter one while performing
+background writeback, for example.  Somebody calling <tt>sync()</tt> could
+also encounter an I/O error — and consume the resulting error status.
+<p>
+Haas described this behavior as failing to live up to what PostgreSQL
+expects: 
+<p>
+<div class="BigQuote">
+	What you have (or someone has) basically done here is made an
+	undocumented assumption about which file descriptors might care
+	about a particular error, but it just so happens that PostgreSQL
+	has never conformed to that assumption.  You can keep on saying the
+	problem is with our assumptions, but it doesn't seem like a very
+	good guess to me to suppose that we're the only program that has
+	ever made them.
+</div>
+<p>
+Joshua Drake eventually <a href="/Articles/752103/">moved the
+conversation</a> over to the ext4 development list, bringing in part of the
+kernel development community.  Dave Chinner quickly <a
+href="/Articles/752104/">described</a> this behavior as "<q>a recipe for
+disaster, especially on cross-platform code where every OS platform behaves
+differently and almost never to expectation</q>".  Ted Ts'o, instead, <a
+href="/Articles/752105/">explained</a> why the affected pages are marked
+clean after an I/O error occurs; in short, the most common cause of I/O
+errors, by far, is a user pulling out a USB drive at the wrong time.  If
+some process was copying a lot of data to that drive, the result will be an
+accumulation of dirty pages in memory, perhaps to the point that the system
+as a whole runs out of memory for anything else.  So those pages cannot be
+kept if the user wants the system to remain usable after such an event.
+<p>
+Both Chinner and Ts'o, along with others, said that the proper solution is
+for PostgreSQL to move to direct I/O (DIO) instead.  Using DIO gives a
+greater level of control over writeback and I/O in general; that includes
+access to information on exactly which I/O operations might have failed.
+Andres Freund, like a number of other PostgreSQL developers, has <a
+href="/Articles/752107/">acknowledged</a> that DIO is the best long-term
+solution.  But he also noted that getting there is "<q>a metric ton of
+work</q>" that isn't going to happen anytime soon.  Meanwhile, he <a
+href="/Articles/752108/">said</a>, there are other programs (he mentioned
+<tt>dpkg</tt>) that are also affected by this behavior.
+<p>
+<h4>Toward a short-term solution</h4>
+<p>
+As the discussion went on, a fair amount of <a
+href="/Articles/752110/">attention</a> was paid to the
+idea that write failures should result in the affected pages being kept in
+memory, in their dirty state.  But the PostgreSQL developers had quickly
+moved on from
+that idea and were not asking for it.  What they really need, in the end,
+is a reliable way to know that something has gone wrong.  Given that, the
+normal PostgreSQL mechanisms for dealing with errors can take over; in its
+absence, though, there is little that can be done.
+<p>
+One idea that came up a few times was to respond to an I/O error by marking
+the file itself (in the inode) as being in a persistent error state.  Such
+a change, though, would take Linux behavior further away from what POSIX
+mandates and would raise some other questions, including: when and how
+would that flag ever be cleared?  So this change seems unlikely to happen.
+<p>
+At one point in the discussion, Ts'o <a
+href="/Articles/752112/">mentioned</a> that Google has its own mechanism
+for handling I/O errors.  The
+kernel has been instrumented to report I/O errors via a netlink socket; a
+dedicated process gets those notifications and responds accordingly.  This
+mechanism has never made it upstream, though.  Freund <a
+href="/Articles/752113/">indicated</a> that this kind of mechanism would be
+"<q>perfect</q>" for PostgreSQL, so it may make a public appearance
+in the near future.
+<p>
+Meanwhile, Jeff Layton <a href="/Articles/752114/">pondered</a> another
+idea: setting a flag in the filesystem superblock when an I/O error
+occurs.  A call to <tt>syncfs()</tt> would then clear that flag and return
+an error if it had been set.  The PostgreSQL checkpointer could make an
+occasional <tt>syncfs()</tt> call as a way of polling for errors on the
+filesystem holding the database.  Freund <a
+href="/Articles/752115/">agreed</a> that this might be a viable solution to
+the problem.
+<p>
+Any such mechanism will only appear in new kernels, of course; meanwhile,
+PostgreSQL installations tend to run on old kernels maintained by
+enterprise distributions.  Those kernels are likely to lack even the
+improvements merged in 4.13.  For such systems, there is little that can be
+done to help PostgreSQL detect I/O errors.  It may come down to running a
+daemon that scans the system log, looking for reports of I/O errors there.
+Not the most elegant solution, and one that is complicated by the fact that
+different block drivers and filesystems tend to report errors differently,
+but it may be the best option available.
+<p>
+The next step is likely to be a discussion at the 2018 LSFMM event, which
+happens to start on April&nbsp;23.  With luck, some sort of solution will
+emerge that will work for the parties involved.  One thing that will not
+change, though, is the simple fact that error handling is hard to get
+right.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Block_layer-Error_handling">Block layer/Error handling</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/752063/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor752204"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2018 18:03 UTC (Wed)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/752204/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; A call to syncfs() would then clear that flag and return an error if it had been set. The PostgreSQL checkpointer could make an occasional syncfs() call as a way of polling for errors on the filesystem holding the database.</font><br>
+<p>
+What if two programs did that?<br>
+<p>
+PostgreSQL calls syncfs() and receives no error indication; an error happens, but another process calls syncfs() and clears the flag; PostgreSQL calls syncfs() and receives no error indication again. Oops!<br>
+<p>
+It would be better to have a per-filesystem error counter, instead of a flag: if the error count didn't increase when PostgreSQL checks it again, no error occurred in the meantime, no matter how many other processes have checked for errors.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752204/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752210"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2018 18:41 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/752210/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      The counter is probably how it will actually be implemented, from my (re)reading of the discussion.  I didn't quite describe the mechanism correctly — I think.  It's hard to tell for sure since no patches have actually been posted yet.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752210/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752209"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2018 18:43 UTC (Wed)
+                               by <b>jlayton</b> (subscriber, #31672)
+                              [<a href="/Articles/752209/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think Jon may have misunderstood what I was proposing (and in truth, Willy first proposed it upstream).<br>
+<p>
+In practice, we'd want to keep an errseq_t in the superblock instead of a flag. That would allow us to ensure that we report an error to syncfs only once per file description. The big issue there though is that we also need another 32-bits per file description (aka struct file) to act as its "cursor" in the error stream, or we need to figure out some way to share the file-&gt;f_wb_err field that we use for fsync.<br>
+<p>
+I proposed a draft patch earlier this week (which I meant to send as an RFC) that does the latter. It's based on Willy's suggestion to only report errors from the errseq_t when the fd is an O_PATH open. You can't call fsync on an O_PATH open, so that should be safe (though it is horribly non-obvious from a userland API standpoint):<br>
+<p>
+     <a href="https://www.spinics.net/lists/linux-fsdevel/msg124527.html">https://www.spinics.net/lists/linux-fsdevel/msg124527.html</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752209/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor752211"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Déjà vu?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2018 18:50 UTC (Wed)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/752211/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Asynchronous execution is:<br>
+<p>
+- a concurrency nightmare<br>
+- an error reporting nightmare<br>
+- not so greatly supported by programming languages and systems<br>
+- critical for acceptable performance...<br>
+<p>
+Error handling generally has:<br>
+- near zero test coverage<br>
+<p>
+:-(<br>
+<p>
+PS: the quality and clarity of this article are stunning. Made me feel once again good paying my own subscription (as opposed to just use my company's)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752211/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752234"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Déjà vu?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2018 21:23 UTC (Wed)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/752234/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+SQLite has abnormally comprehensive test coverage. For both OOM and I/O errors it tests the immediate error path after every possible failure point. See Section 3, Anomaly Testing, at <a href="https://www.sqlite.org/testing.html">https://www.sqlite.org/testing.html</a> . Unfortunately, it can't simulate errors in the kernel code itself.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752234/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752306"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Déjà vu?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 14:27 UTC (Thu)
+                               by <b>ringerc</b> (subscriber, #3071)
+                              [<a href="/Articles/752306/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It could, to a degree. When testing this, I used dmsetup and the 'error' target to introduce errors. The dmsetup 'flakey' target is also spectacularly useful.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752306/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor752366"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Déjà vu?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 7:46 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/752366/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  error reporting nightmare</font><br>
+<p>
+By the way Java makes a decent attempt with "Futures"<br>
+<a href="https://docs.oracle.com/javase/7/docs/api/java/util/concurrent/Future.html">https://docs.oracle.com/javase/7/docs/api/java/util/concu...</a><br>
+<p>
+Java was also the first language to have a formal memory model. These "performance" features may explain why Java was more successful on the server side than in embedded for which it was targeted initially.<br>
+<p>
+Ugly[*] and not fun but doing the job!<br>
+<p>
+[*] <a href="https://steve-yegge.blogspot.com/2006/03/execution-in-kingdom-of-nouns.html">https://steve-yegge.blogspot.com/2006/03/execution-in-kin...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752366/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor753523"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Déjà vu?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 4, 2018 4:53 UTC (Fri)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/753523/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Java was also the first language to have an unimplementable memory model. Oops!<br>
+<p>
+They tried, bless their hearts.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753523/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor753618"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Déjà vu?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2018 1:46 UTC (Sun)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/753618/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed it took Java a long time between trying and succeeding - to be expected when you're first to do... both? Years before others started to merely express a decent level of interest for formalization and standardization?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753618/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor752227"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2018 20:30 UTC (Wed)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/752227/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;Such a change, though, would take Linux behavior further away from what POSIX mandates and would raise some other questions [...]</font><br>
+I don't think that's necessarily a bad thing. POSIXly correct filesystems have surprised users in unpleasant ways in the past; recall early ext4 eating people's DE config files, all because the standard had some undefined behaviour around file writes and renames.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752227/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752237"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2018 21:35 UTC (Wed)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/752237/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+POSIX is a *standard*. Standards include standard pitfalls--whether presently known or not. The alternative is yet another standard (de facto or otherwise) or even more chaos and unpredictability. Also, specifying undefined behavior is significantly different than deviating from mandatory semantics.<br>
+<p>
+The fact that these issues have gone undiscovered and subsequently unattended for so long should disabuse people of the notion that there's sufficient interest or resources in supplanting POSIX as a standard. How many file systems have come and gone. ext4 is the closest thing to a de facto standard in Linux but it has survived precisely because of it's simplicity and by having POSIX compliance as a guide star (intentionally or not), as opposed to chasing new ideas.<br>
+<p>
+The biggest hurdle for any large or complex project is coordinating effort and maintaining focus. Standards help immensely in this regard, even flawed ones.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752237/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752287"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 12:12 UTC (Thu)
+                               by <b>eru</b> (subscriber, #2753)
+                              [<a href="/Articles/752287/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why not a a flag to enable the nonstandard error behaviour for a particular file? It is not like Linux already didn't have lots of flags enabling interesting nonstandard features.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752287/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752377"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 10:19 UTC (Fri)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/752377/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+POSIXly correct filesystems have surprised users in unpleasant ways in the past; recall early ext4 eating people's DE config files, all because the standard had some undefined behaviour around file writes and renames.
+</blockquote>
+
+If a standard does not define something, it's up to the implementation to do it; i.e., it's their responsibility.  Sufficiently bloody-minded implementors produce unpleasant surprises, and then point to standards or benchmarks as an excuse; but as long as the standard does not require the unpleasant behaviour (in which case it would be defined, not undefined), the implementator has the choice, and therefore the responsibility.  Of course, implementors who blame the standard don't want you to recognize this, and often argue as if lack of definition in the standard required them to behave unpleasantly.  It doesn't.
+
+<p>I wonder if the "what POSIX mandates" in the article really refers to a mandate by POSIX, or another case of lack of definition that an implementator sees as a welcome opportunity for an unpleasant surprise.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752377/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752420"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 18:12 UTC (Fri)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/752420/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If the user-friendly, pleasant behavior is expected then it should be in the standard. If it isn't, there's a reason for that and implementors should be able to be as bloody-minded as they please.<br>
+<p>
+If everyone is expected to be nice instead of following the standards, then there's no point in the current standard and it should be replaced with the "be nice" version.<br>
+<p>
+For example, there are people who expect TCP/IP to deliver their packets in the same sized chunks they were sent. These people are simple wrong. But by the "be nice" standard we'd have to write stupid networking stacks because some people expect behavior that isn't required.<br>
+<p>
+Maybe it's time for a POSIX 2020 standard. But if it isn't in there, don't expect it to work like anything else.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752420/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752452"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 21, 2018 14:54 UTC (Sat)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/752452/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Yes, ideally standards would be complete.  In practice, they tend to specify just the intersection of the behaviour of the existing implementations (in line with the requirement that a standard should standardize common practice), as well as considering various constraints on outlier systems; e.g., "We want this standard to be implementable on a system with 64KB RAM, and mandating the pleasant behaviour would cost several KB for this subfeature alone, so we leave the behaviour unspecified."  And then a bloody-minded implementor for systems that use multiple GBs of RAM uses the lack of specification as justification to implement unpleasant behaviour.  
+
+<p>And don't forget that standards are decided through consensus in the committee, so it takes just a few bloody-minded implementors on the standards committee to block any progress towards pleasantness.
+
+<blockquote>If everyone is expected to be nice instead of following the standards</blockquote>
+
+That's an excellent example of what I mean with "hiding behind the standard", and why I suspect that "what POSIX mandates" is in reality different from what was claimed in the discussion described in the arcticle.  If the standards do not specify what the implementation should do ("undefined behaviour" or somesuch), there is nothing in the standard that the implementation could follow, and it's the sole responsibility of the implementor to choose a particular behaviour.  If, in such a situation, the implementor chooses to implement unpleasant behaviour, it's his fault, and his fault alone; the standard did not make him do it.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752452/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752688"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 24, 2018 16:32 UTC (Tue)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/752688/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; If the standards do not specify what the implementation should do ("undefined behaviour" or somesuch), there is nothing in the standard that the implementation could follow, and it's the sole responsibility of the implementor to choose a particular behaviour. If, in such a situation, the implementor chooses to implement unpleasant behaviour, it's his fault, and his fault alone; the standard did not make him do it.</font><br>
+<p>
+All true, of course, but "unpleasant behavior" can still be a reasonable choice. Any application which *relied* on system-specific "pleasant" behavior would necessarily be non-portable. If "pleasant" behavior is desirable then, IMHO, the right solution is to standardize the behavior so that applications can be written against the standard and not one particular implementation. In the meantime, the most productive choice when undefined behavior is detected is to complain as loudly as possible, or even terminate the process, rather than allow the application to silently continue in an undefined state. This ensures that the application developer is made aware of the issue and has both the opportunity and incentive to fix it. (However, this outcome should remain *undefined* behavior so that this can be changed in the future if and when more pleasant behavior is standardized.) Going out of one's way to make undefined behavior "pleasant" is a form of attractive nuisance, in that it tends to encourage non-portable code.<br>
+<p>
+In the end, an application which relies on a specific implementation of undefined behavior, pleasant or unpleasant, is broken. A particular installation may do the right thing for certain known inputs; one may even be able to prove that it does the right thing for all possible inputs given perfect knowledge of the implementation in use on a particular system. However, the third layer of software[1]—design/logic—is missing: since the application is not in compliance with the standard, one cannot prove that it will work on any standard-compliant system, including future versions of the same system.<br>
+<p>
+[1] <a href="http://www.pathsensitive.com/2018/01/the-three-levels-of-software-why-code.html">http://www.pathsensitive.com/2018/01/the-three-levels-of-...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752688/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752869"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2018 16:22 UTC (Thu)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/752869/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>All true, of course, but "unpleasant behavior" can still be a reasonable choice.</blockquote>
+
+Yes, as mentioned, when implementing on a system with 64KB, you may not be able to afford the pleasantness.  But we would not be discussing this topic if all cases of unpleasant behaviour were reasonable.
+
+<blockquote>
+Any application which *relied* on system-specific "pleasant" behavior would necessarily be non-portable.
+</blockquote>
+
+It would be *potentially* non-portable, not necessarily.  It would become actually non-portable if an unpleasant implementation appears.  But so what?  I am pretty keen on portability, but life's too short for unreasonably unpleasant implementations.  If your program does not run in 64KB anyway, there is no need to cater to that reasonable unpleasantness; and if you want to cater to unreasonable unpleasantness, it's your time and money to waste (after all, some people write programs in Brainfuck), but I would not recommend it to anyone else.
+
+<blockquote>
+ If "pleasant" behavior is desirable then, IMHO, the right solution is to standardize the behavior so that applications can be written against the standard and not one particular implementation.
+</blockquote>
+
+If you think so, go ahead and work on standardizing pleasant behaviours.  But as mentioned, there is the issue of constrained systems where you cannot afford the pleasantness.  One solution is to specify several levels of the standard.  The minimal level allows unpleasantness that is reasonable on constrained systems; a higher level specifies more pleasantness.  However, if you have unreasonable implementors in the standards committee, you will be out of luck in your standardization effort.
+
+<p>Concerning reporting when undefined behaviour is performed, that's a relatively pleasant way to deal with the situation.  It's not appropriate when the application developer actually wants to rely on a specific behaviour and does not want to "fix" it, but it certainly makes it clear that your implementation is not pleasant enough to run this application.
+
+<blockquote>
+In the end, an application which relies on a specific implementation of undefined behavior, pleasant or unpleasant, is broken.
+</blockquote>
+
+No, it isn't.  If it behaves as intended in a specific setting, it's working, not broken.  It may be unportable, but that does not make it broken.
+
+<blockquote>since the application is not in compliance with the standard, one cannot prove that it will work on any standard-compliant system
+</blockquote>
+
+Most programmers do not formally verify their programs, but instead test them.  There is no way to prove that a program is in compliance with a standard by testing, even if the programmer intends to avoid undefined behavior.  But even the few programmers that actually use formal verification for their programs cannot prove that their programs comply with most standard (e.g., POSIX), because most standard are not formally specified.  So this whole proof issue is a red herring.
+
+<blockquote>including future versions of the same system.</blockquote>
+
+Any system worth using (e.g., <a href="https://felipec.wordpress.com/2013/10/07/the-linux-way/">Linux</a>) maintains in future versions the pleasantness it has supported in earlier versions.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752869/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752879"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2018 17:06 UTC (Thu)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/752879/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Any system worth using (e.g., Linux) maintains in future versions the pleasantness it has supported in earlier versions. </font><br>
+<p>
+No, because that is an unreasonable limit.<br>
+<p>
+Simply because of implementation limits, ext3 serialized file and directory updates in a certain way and for many years. So people got used to it. But it never applied to ext2, XFS or FAT or literally ANY other filesystem. Not to mention BSD's UFS or Hammer2, or Apple's HFS. Heck, it didn't even apply to ext3 in certain configurations.<br>
+<p>
+And then people tried to require that ext4 work the same way. And btrfs. And even wanted to go back to force XFS to work that way too.<br>
+<p>
+The correct answer is to fsync() everything, which would show how bad ext3 was at that particular operation. All those fsyncs make things slower for people using ext3, but that does not mean fsync is the wrong answer. It just means ext3 was a filesystem with a terrible fsync() implementation that people got used to using.<br>
+<p>
+"Pleasant behavior" is often simply what programmers have become used to. It doesn't make it correct or actually pleasant.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752879/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752898"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2018 22:42 UTC (Thu)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/752898/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It would be *potentially* non-portable, not necessarily. It would become actually non-portable if an unpleasant implementation appears.</font><br>
+<p>
+See, you're talking about level 2 (particular implementations). Portable program *design* happens at level 3 (design/logic). If your program relies on behavior which is undefined according to the standard then it is non-portable, regardless of whether other implementations behave the same way. You can't say "this program works on any POSIX-compatible system", for example. You know that it works on Linux version X and maybe BSD version Y, but if someone puts together a new OS which follows all the relevant standards neither you nor they can be confident that your program will work on it unmodified.<br>
+<p>
+<font class="QuotedText">&gt; Most programmers do not formally verify their programs, but instead test them.</font><br>
+<p>
+Formal verification in this context is a red herring. Tests are also a form of proof, albeit in the weaker courtroom-style, balance-of-evidence sense rather than the strict mathematical sense. The point is that without a standard you don't have a sound basis for reasoning "I called the function with these arguments, therefore the implementer and I both know that it should do this." Standards are how users and implementers of an API communicate. Relying on undefined behavior in your program is like speaking gibberish and expecting the listener to guess what you meant; there is a breakdown in communication, and the problem isn't on the implementer's end.<br>
+<p>
+<font class="QuotedText">&gt; Any system worth using (e.g., Linux) maintains in future versions the pleasantness it has supported in earlier versions.</font><br>
+<p>
+As zlynx already explained, that is an unreasonable expectation and even Linux doesn't always operate that way.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752898/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor779860"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 14, 2019 21:21 UTC (Thu)
+                               by <b>dvdeug</b> (guest, #10998)
+                              [<a href="/Articles/779860/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A POSIX-compliant system could have malloc just return an error for all calls. A POSIX system that could be reasonable in some circumstances could have malloc return an error for any malloc over a megabyte; the first port of Unix was the Interdata 8/32, with 256kb of memory. There is no non-trivial Unix program that doesn't make assumptions about the POSIX system it's running on.<br>
+<p>
+<font class="QuotedText">&gt; if someone puts together a new OS which follows all the relevant standards neither you nor they can be confident that your program will work on it unmodified.</font><br>
+<p>
+Even POSIX-compatible systems aren't perfectly interchangable. In the case of a program like PostgreSQL, it's usually important not just that it runs, but it runs well, and POSIX can not and does not guarantee speed constraints; even Linux alone can store its filesystems in many different ways on many different media, and some of those combinations may not work in practice for PostgreSQL.<br>
+<p>
+<font class="QuotedText">&gt; Standards are how users and implementers of an API communicate.</font><br>
+<p>
+In theory, but not in reality. Most of the APIs a major program depends on are implemented by one library and have but vague descriptions of how it works outside the source code and behavior of that library. There were many Unixes before POSIX, many C and C++ compilers before the first standard was written down. Many people still depend on specialized features of GNU C, enough that several compilers have to copy those unstandardized features. Standards are wonderful if they're followed, but many are underspecified or just usually ignored. New versions of the C, C++ and Scheme standard have removed features that older standards have mandated because they were not well supported.<br>
+<p>
+A huge example is the fact that most of these standards are written in English, an unstandardized language, not Lojban or even French. How can we know what a standard means if the language it is written in is unstandardized? But, for the most part, we manage.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/779860/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor780095"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 18, 2019 20:09 UTC (Mon)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/780095/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; A POSIX-compliant system could have malloc just return an error for all calls. ... Even POSIX-compatible systems aren't perfectly interchangable.</font><br>
+<p>
+True, but irrelevant. I only mentioned POSIX as an example. No one is expecting a complex project like PostgreSQL to work equally well under all POSIX-compliant operating systems; there will be other dependencies. <br>
+<p>
+Regarding the first point, a POSIX-compliant program would check for malloc() errors and either recover or terminate in a well-defined way. The program is portable as long as the behavior is well-defined for all conforming implementations; this is a separate consideration from being *useful*.<br>
+<p>
+<font class="QuotedText">&gt;&gt; Standards are how users and implementers of an API communicate.</font><br>
+<font class="QuotedText">&gt; In theory, but not in reality. Most of the APIs a major program depends on are implemented by one library and have but vague descriptions of how it works outside the source code and behavior of that library.</font><br>
+<p>
+What you are describing is a failure to communicate. Programs written this way are inherently non-portable because they are written to fit the specifics of particular implementations. Any change to an implementation can cause any program to break in unspecified ways. This is the problem which standards exist to solve. They allow implementers and users of an interface to agree on roles and responsibilities; implementers can improve their code without worrying about breaking standards-compliant users, and users know which parts of the interface they can rely on and which parts may vary from one implementation (or version) to the next.<br>
+<p>
+<font class="QuotedText">&gt; How can we know what a standard means if the language it is written in is unstandardized?</font><br>
+<p>
+"How can digital logic exist when all electronic components have analog characteristics?" This is bordering on abstract philosophy in the "can two people ever truly communicate" sense, but I'll try to answer it seriously anyway: We distinguish between parts of the language we can rely on for clear communication and parts which, while perhaps useful in other contexts, fail to clearly convey our intent, and build up more complex constructs from elements of the first set. The subset of natural language used for formal standards is actually pretty tightly constrained compared to literature in general. Even so, the dependency on natural language for formal specifications is a weak point and communication does occasionally break down as a result. We have feedback mechanisms in place to detect such breakdowns and correct them by issuing clarifications or revising the standards.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/780095/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor780141"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 19, 2019 0:42 UTC (Tue)
+                               by <b>dvdeug</b> (guest, #10998)
+                              [<a href="/Articles/780141/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Of what interest is a portable program that is not useful? It's trivial to write a portable program; just check uname at the start and exit out on any but the system you're written for. Nobody does that, because it's not useful.<br>
+<p>
+As for which parts may vary from version to version, version 3 may adhere to an entirely different standard than version 2. The fact that there is a standard may do you no good if it's evolving rapidly along with the software.<br>
+<p>
+From the other side, even if you are standards conforming, that may not be enough. A user can expect that qsort sorts, but can they expect that it does so reasonably quickly? How often can you call fsync to maintain a reasonable balance between speed and safety? That's never going to be defined by the standard, but an understanding needs to be reached by the authors of a program like PostgreSQL.<br>
+<p>
+I don't believe it's a question of abstract philosophy. It's one thing if standards were a tool used some places and not others in the computer world, that at their best were understood not to be sufficient to be binding on either implementer or user, then it would be reasonable to use unstandardized language in writing standards. But if _all_ APIs should depend on standards, then using an unstandardized language, when, again, formal languages like Lojban or simply standardized ones like French exist.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/780141/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor780291"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 19, 2019 22:39 UTC (Tue)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/780291/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Of what interest is a portable program that is not useful?</font><br>
+<p>
+It's not a matter of either/or. Programs should be both portable *and* useful.<br>
+<p>
+<font class="QuotedText">&gt; A user can expect that qsort sorts, but can they expect that it does so reasonably quickly? How often can you call fsync to maintain a reasonable balance between speed and safety? That's never going to be defined by the standard...</font><br>
+<p>
+Why not? Standards do sometimes specify things like algorithmic complexity. C doesn't specify that for qsort(), unfortunately, but C++ does require std::sort() to be O(n log n) in the number of comparisons. What constitutes a "reasonable balance" is up to the user, but there is no reason in principle why there couldn't be a standard for "filesystems useable with PostgreSQL" which defines similar timing requirements for fsync().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/780291/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor752878"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2018 16:29 UTC (Thu)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/752878/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I wonder if the "what POSIX mandates" in the article really refers to a mandate by POSIX, or another case of lack of definition that an implementator sees as a welcome opportunity for an unpleasant surprise. </font><br>
+<p>
+As I understand it, POSIX explicitly *avoids* what happens when things go wrong, precisely because POSIX has no idea what's happened.<br>
+<p>
+So a linux standard that says "this is the way we handle errors" will be completely orthogonal to POSIX. And would be a good thing ...<br>
+<p>
+The trouble with POSIX is it's an old standard, that is out-of-date, and while I believe there is some effort at updating it, there is far too much undefined behaviour out there.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752878/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor752230"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2018 20:47 UTC (Wed)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/752230/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm a little disappointed there's been no response to my suggestion that we're actually doing worse than we were before errseq_t went in, from a PostgreSQL PoV.<br>
+<p>
+Before, we would mark the inode as having a writeback error and then at least one caller of fsync would receive that error. So if nobody other than checkpointer was calling fsync and the inode wasn't evicted from memory, checkpointer would see the error.<br>
+<p>
+Now, we assume that anybody opening the file isn't interested in historical errors or they would have had the fd open. Clearly not true for PostgreSQL. What I suggested was that *if* nobody has seen the error yet, then the error is not so historical after all, and we should report it to the new opener.<br>
+<p>
+As I alluded earlier, we can still lose errors this way if the inode was evicted under memory pressure. It just restores some of the earlier behaviour we had.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752230/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752284"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 11:12 UTC (Thu)
+                               by <b>jlayton</b> (subscriber, #31672)
+                              [<a href="/Articles/752284/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not sure I agree that it's really worse. Offering different behavior based on whether the inode got evicted from the cache is pretty nasty, as userland has no way to detect whether that has happened.<br>
+<p>
+That said, I'm not opposed to re-enabling the ability to see unreported errors that occurred prior to the open (and your scheme to do that was pretty clever) if the Pg folks think it's of value in the near term. Maybe we could make that behavior opt-in based on a sysctl or something?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752284/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor752235"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2018 21:20 UTC (Wed)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/752235/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Will you even see I/O errors that happen between open() and fsync(), if said I/O errors are caused by writes done in another process?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752235/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752238"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2018 21:29 UTC (Wed)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/752238/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, and jlayton's errseq_t work makes this better; every open fd will see every writeback error.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752238/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752240"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 18, 2018 21:33 UTC (Wed)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/752240/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hm, I wonder if I heard something about Windows Vista improving I/O error reporting… Who knows what Postgres on Windows experiences.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752240/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor752258"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Failed writeback to removable devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 6:36 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/752258/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>The most common cause of I/O errors, by far, is a user pulling out a USB drive at the wrong time. If some process was copying a lot of data to that drive, the result will be an accumulation of dirty pages in memory, perhaps to the point that the system as a whole runs out of memory for anything else.</blockquote>
+That suggests that removable devices should be handled a little differently for writeback.  The number of dirty pages should be more strictly capped (perhaps ten megabytes per USB drive, or some other heuristic) so that writing becomes closer to synchronous.  This is also a usability improvement: when copying files around on the hard disk, I don't care if they are still dirty pages in memory to be flushed to disk later.  Once the file copy has 'completed' I can go on to the next task.  But if copying to a USB stick, 99% of the time it's because you want to take the USB stick out of the computer and take the data somewhere else (or possibly to then boot from that device).  Here the user really does need to wait for the data to be written to the device, and it doesn't help if the file copy dialogue box (or 'cp' command) appears to finish but the writeback happens in the background, with no indication to the user of progress so far or a notification when it completes.  As the article notes, that can also lead users to remove the USB stick before the pages are flushed, thinking that the operation has completed -- and if lecturing users about this worked, we wouldn't still have the problem after twenty years.
+<p>
+So I suggest for the most common kinds of removable devices that can be identified as such, the kernel should keep a lid on writeback, both for the total number of dirty pages and how long they can hang around before being written out (I suggest one second is reasonable for USB sticks).  For non-removable devices which can be identified as such, the kernel could be a bit more careful and not blithely clear the dirty bit on pages that couldn't be flushed because of I/O errors.  Yes, I know that in principle you may not be able to tell in advance which devices are removable and which aren't, but this is more a theoretical than a practical concern: it would be sufficient to treat USB-attached drives as removable and ATA/SCSI/whatever ones as non-removable.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752258/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752260"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Failed writeback to removable devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 7:07 UTC (Thu)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/752260/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+One problem with any attempt to keep data around after a write failure is that it will upset memory allocation.<br>
+Memory management is predicated on the fact that  dirty pages can be cleaned, and clean pages can be freed - in deterministic time.  If you mess with that, then deadlocks are just around the corner.  Possibly you could set a quota of unwriteable pages and keep pages around as long as there are fewer than the limit, but I doubt that would really end up being helpful.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752260/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752275"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Failed writeback to removable devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 9:24 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/752275/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Right, but if writing to one of the main system disks fails with I/O errors then I think you have bigger problems and will soon need to reboot anyway?<br>
+<p>
+For removable devices, the data does have to be thrown away after a write error (assuming that the error was due to unplugging the device).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752275/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752373"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Failed writeback to removable devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 9:24 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/752373/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Can unflushable dirty pages be "poisoned" instead? Just re-use the hwpoison mechanism to kill all the processes that might refer to them. Perhaps make this killing optional through some prctl() option.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752373/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752379"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Failed writeback to removable devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 11:43 UTC (Fri)
+                               by <b>ringerc</b> (subscriber, #3071)
+                              [<a href="/Articles/752379/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From a PostgreSQL point of view that's actually nearly ideal, so long as we can protect the postmaster. Since it doesn't do much regular I/O that should be fine. Plus, on systemd systems the postmaster will get restarted if killed.<br>
+<p>
+We'd receive SIGCHLD for the killed user backend worker(s)/checkpointer/etc, which would trigger crash recovery where we kill all other backends then execute redo. That's perfect. Something portable would be better, of course, but something that covers 95% of users is pretty darn good.<br>
+<p>
+I was unaware of the hwpoison mechanism.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752379/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor752292"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Failed writeback to removable devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 13:20 UTC (Thu)
+                               by <b>NRArnot</b> (subscriber, #3033)
+                              [<a href="/Articles/752292/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Um. Won't a dirty pages cap have horrible performance implications for those of us who use Terabyte USB3 disk drives with rsync for making backups to removeable media? <br>
+<p>
+(Yes, they are fairly crappy by disk drive standards, but they have the advantage over any form of backup across a network that as soon as you pull the USB cable, the data is no longer vulnerable to hostile actors elsewhere on the internet. So as a secondary, last-resort backup of an entire system, they are valuable.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752292/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752311"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Failed writeback to removable devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 15:07 UTC (Thu)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/752311/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Ideally, you'd be able to tune the dirty pages cap to match the throughput the target can handle in a sensible timescale - say 100 ms for removable devices. That way, your device still has a lot of data to handle compared to its throughput, but it'll block applications when they're able to generate dirty pages far faster than your device can handle - no more application finished with 60 seconds of data left to write out to your USB device.
+<p>Something like <a href="https://lwn.net/Articles/682582/">less-annoying background writeback</a> definitely takes you in the right direction…
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752311/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752921"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Failed writeback to removable devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 27, 2018 10:39 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/752921/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Dunno what relevance this has to my use case - I regularly do multi-gigabyte network copies (24MP raw camera images, HD video etc) - but this absolutely kills my laptop performance.<br>
+<p>
+On a twin-core machine, load average will hit 4 or 5 or 6, and system response basically goes through the floor. Actually, the cause could well be that RAM is flooded, but whatever the cause, it's rather frustrating.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752921/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor752329"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Failed writeback to removable devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 16:43 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/752329/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+External USB drives also have the advantage that they can be swapped out for offsite backup, without blowing your network usage cap trying to back up to some cloud service you don't control. (Also, you can be fairly sure you can get them *back* again, unlike some cloud service you don't control.)<br>
+<p>
+Honestly, I suspect most of us here are doing last-ditch USB drive backups of *something*, at least.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752329/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor841490"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Failed writeback to removable devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 31, 2020 15:13 UTC (Thu)
+                               by <b>andrit</b> (guest, #143916)
+                              [<a href="/Articles/841490/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder how FreeBSD (who keeps the pages dirty in memory on writeback failures) handles this...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/841490/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor752259"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 6:52 UTC (Thu)
+                               by <b>mjthayer</b> (guest, #39183)
+                              [<a href="/Articles/752259/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The first question which comes to my mind here (as always, hoping for educational corrections) is whether this should be PostgreSQL's problem at all.  How much more common is the situation described here to say, the data being correctly written but then the storage going bad, or the hardware reporting that the data was correctly written when it was not?  Perhaps the user should be responsible for providing a reliable layer under PostgreSQL?  I would more expect PostgreSQL to provide for being as resiliant as possible if data corruption does occur, which I am sure it does.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752259/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752263"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 7:16 UTC (Thu)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/752263/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In a lot of situations, EIO errors a unlikely and when they happen it probably means that the whole device is lost.  In those cases there isn't much postgresql could do except for rejecting all new requests.<br>
+<p>
+In other situations, errors are more likely and less fatal. Writes to NFS don't necessarily return ENOSPC immediately - you might not get that until fsync.  If you use thin-provisioning then (apparently) it is possible to get IO errors which will stop happening once the admin plugs in a new device.<br>
+<p>
+Quoting from the email thread:<br>
+<p>
+<font class="QuotedText">&gt; This also means AFAICS that running Pg on NFS is extremely unsafe, you MUST</font><br>
+<font class="QuotedText">&gt; make sure you don't run out of disk. Because the usual safeguard of space</font><br>
+<font class="QuotedText">&gt; reservation against ENOSPC in fsync doesn't apply to NFS. (I haven't tested</font><br>
+<font class="QuotedText">&gt; this with nfsv3 in sync,hard,nointr mode yet, *maybe* that's safe, but I</font><br>
+<font class="QuotedText">&gt; doubt it). The same applies to thin-provisioned storage. Just. Don't.</font><br>
+<p>
+However, the whole point of having an OS is to hide these details. You shouldn't *have* to care what sort of filesystem or storage you are using - behavior should be predictable.  Unfortunately, that isn't how it works in the real world.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752263/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor753619"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 6, 2018 6:04 UTC (Sun)
+                               by <b>ssmith32</b> (subscriber, #72404)
+                              [<a href="/Articles/753619/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hmmm. I dunno, I feel like if you're running a DB of any type, with data that you care about, you definitely should be thinking about your storage layer (whatever is below the OS - in today's world you may not know the actual physical setup, but you should know the performance &amp; reliability characteristics of it). <br>
+<p>
+It's not really the OS's job to make unreliable hardware reliable or slow hardware performant. <br>
+<p>
+And I do agree with the thin provisioning.. for critical data.. just don't.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753619/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor752874"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2018 16:18 UTC (Thu)
+                               by <b>ringerc</b> (subscriber, #3071)
+                              [<a href="/Articles/752874/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's tricky. PostgreSQL would like not to have to completely crash and burn if one file on one tablespace becomes impossible to properly flush, so something that gives it options would be nice.<br>
+<p>
+But it also needs to be able to know reliably that "all data from last successful flush is now fully flushed", so it can make decisions appropriately. Right now it turns out we can't know that.<br>
+<p>
+Nobody really wants a kernel panic or database crash because we can't fsync() some random session table that gets nuked by the app every 15 minutes anyway, after all. In practice that won't happen because the table is usually created UNLOGGED but there are always going to be tables you don't want to lose, but don't want the whole system to grind to a halt over either.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752874/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752884"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 26, 2018 18:02 UTC (Thu)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/752884/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  It's tricky. PostgreSQL would like not to have to completely crash and burn if one file on one tablespace becomes impossible to properly flush, so something that gives it options would be nice.</font><br>
+<p>
+FWIW, I don't agree that that's a useful goal. It'd be nice in theory, but it's not even remotely worth the sort of engineering effort it'd require.<br>
+<p>
+<p>
+<font class="QuotedText">&gt;  Nobody really wants a kernel panic or database crash because we can't fsync() some random session table that gets nuked by the app every 15 minutes anyway, after all.</font><br>
+<p>
+I don't think that's a realistic concern. If your storage fails, you're screwed. Continuing to behave well in the face of failing storage would require a *LOT* of work. We'd need timeouts everywhere, we'd need multiple copies of the data etc.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752884/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor752294"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 13:26 UTC (Thu)
+                               by <b>oseemann</b> (guest, #6687)
+                              [<a href="/Articles/752294/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In this context, a detailed and worthwhile writeup on file system error handling with links to the corresponding research papers can be found here:<br>
+<p>
+<a href="https://danluu.com/filesystem-errors/">https://danluu.com/filesystem-errors/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752294/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752307"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 14:32 UTC (Thu)
+                               by <b>ringerc</b> (subscriber, #3071)
+                              [<a href="/Articles/752307/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Before any users panic, note that you will only run into problems if your storage system fails in an abnormal way, OR you're running a few potentially unsafe configurations that may raise errors on writeback during normal operation.<br>
+<p>
+I suggest taking extra care and doing extra testing if you use:<br>
+<p>
+* Any sort of network block device<br>
+* Thin-provisioned storage<br>
+* multipath I/O (especially if you haven't set queue_if_no_path etc)<br>
+<p>
+Also, take care not to run out of space in your file system, or test disk-exhaustion behaviour in advance, if you use NFS. Or, preferably, don't do that.<br>
+<p>
+But while this is not cool, it's NOT going to be randomly corrupting PostgreSQL installations all over the place. It's also likely that PostgreSQL is far from the only thing affected.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752307/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752348"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 19, 2018 20:30 UTC (Thu)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/752348/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Andres Freund, like a number of other PostgreSQL developers, has acknowledged that DIO is the best long-term solution.</font><br>
+<p>
+Worth to note that that'll probably have to be an opt-in configuration. Using DIO one certainly has more control and can get higher performance, but it also requires that the database is more carefully configured. But a lot of people use PostgreSQL without configuring the size of it's own buffer cache at all - the OS adaptively providing a second level of caching makes that    OK for a lot of scenarios.  Postgres can't realistically figure out how much memory it should use on a given system. It doesn't, and shouldn't, have the information to make such a policy decision.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752348/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor752388"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 20, 2018 14:38 UTC (Fri)
+                               by <b>cornelio</b> (guest, #117499)
+                              [<a href="/Articles/752388/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It appears only FreeBSD got it (mostly) right.<br>
+<p>
+The advantage of keeping around the most experienced filesystem developer ever.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752388/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752571"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 23, 2018 21:00 UTC (Mon)
+                               by <b>helsleym</b> (guest, #92730)
+                              [<a href="/Articles/752571/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am not contesting your assertion but I am curious -- would you care to elaborate on what FreeBSD does that "[gets] it (mostly) right"?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752571/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor752573"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 23, 2018 21:19 UTC (Mon)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/752573/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's not optimal, but what freebsd appears to do is to just clear the error *and* mark the buffer as dirty again. So the error will be hit again and again (unless the device is gone):<br>
+<a href="https://github.com/freebsd/freebsd/blob/master/sys/kern/vfs_bio.c#L2633">https://github.com/freebsd/freebsd/blob/master/sys/kern/v...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752573/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor752742"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 25, 2018 14:12 UTC (Wed)
+                               by <b>xxiao</b> (guest, #9631)
+                              [<a href="/Articles/752742/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+what about mysql, does it use DIO and never touches fsync()? Maybe this is not just postgresql-specific?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/752742/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor754049"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 9, 2018 20:14 UTC (Wed)
+                               by <b>nilsmeyer</b> (guest, #122604)
+                              [<a href="/Articles/754049/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It can be configured in MySQL with variables like innodb_flush_method and sync_binlog, also MySQL uses a threading model instead of multiple processes so I suppose some of the issues regarding file descriptors don't crop up, and one would usually use direct io bypassing most other caches (O_DIRECT). Of course this assumes one runs InnoDB, I don't know how RocksDB/MyRocks behaves in this case. <br>
+<p>
+Basically MySQL / InnoDB will manage all the buffering and try to bypass the kernel buffering as much as possible. This is why you usually try to allocate most (like 75/80%) of the memory on a MySQL server to the InnoDB buffer pool. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/754049/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor753383"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 2, 2018 23:56 UTC (Wed)
+                               by <b>gerdesj</b> (subscriber, #5446)
+                              [<a href="/Articles/753383/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Perhaps it has been discussed to death before but why not put DBs on some sort of DB oriented storage instead of say xfs/ext{n}/btrfs/fat16?  <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753383/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor753385"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2018 0:03 UTC (Thu)
+                               by <b>andresfreund</b> (subscriber, #69562)
+                              [<a href="/Articles/753385/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Which would be?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753385/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor753405"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2018 6:20 UTC (Thu)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/753405/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Raw, unformatted blocks I would suppose. We could call it postgresfs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753405/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor771457"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2018 4:03 UTC (Mon)
+                               by <b>immibis</b> (guest, #105511)
+                              [<a href="/Articles/771457/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That is almost exactly the abstraction that a file is supposed to provide - except that it's a fixed size (and consequently you can't get ENOSPC because you are handling the space allocation yourself). You can still get EIO. Or EUSERPULLEDTHEDRIVEOUT.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/771457/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor753424"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2018 11:26 UTC (Thu)
+                               by <b>james</b> (subscriber, #1325)
+                              [<a href="/Articles/753424/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      That means you can only run them on systems with that sort of storage available -- which means<br>
+<tt>dnf install package-that-uses-postgresql-as-a-database-engine</tt>
+<br>
+doesn't have a chance of Just Working.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753424/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor753513"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise: Patched proposed</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 3, 2018 22:09 UTC (Thu)
+                               by <b>tech2018</b> (guest, #124143)
+                              [<a href="/Articles/753513/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Seems like a patch hast been already developed (April 24, 2018)<br>
+<a rel="nofollow" href="https://patchwork.kernel.org/patch/10358111/">https://patchwork.kernel.org/patch/10358111/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753513/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor754063"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">PostgreSQL's fsync() surprise</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 10, 2018 1:25 UTC (Thu)
+                               by <b>ringerc</b> (subscriber, #3071)
+                              [<a href="/Articles/754063/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Further reading at:<br>
+<p>
+* <a href="https://lwn.net/Articles/753650/">https://lwn.net/Articles/753650/</a><br>
+* <a href="https://lwn.net/Articles/752952/">https://lwn.net/Articles/752952/</a><br>
+* <a href="https://lwn.net/Articles/752613/">https://lwn.net/Articles/752613/</a><br>
+* <a href="https://www.postgresql.org/message-id/20180427222842.in2e4mibx45zdth5@alap3.anarazel.de">https://www.postgresql.org/message-id/20180427222842.in2e...</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/754063/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

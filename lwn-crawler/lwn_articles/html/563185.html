@@ -1,0 +1,599 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Optimizing preemption [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/563185/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/562638/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/563185/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Optimizing preemption</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 14, 2013</br>
+           </div>
+The kernel's lowest-level primitives can be called thousands of times (or
+more) every second, so, as one might expect, they have been ruthlessly
+optimized over the years.  To do otherwise would be to sacrifice some of
+the system's performance needlessly.  But, as it happens, hard-won
+performance can slip away over the years as the code is changed and gains
+new features.  Often, such performance loss goes unnoticed until a
+developer decides to take a closer look at a specific kernel subsystem.
+That would appear to have just happened with regard to how the kernel
+handles preemption.
+<p>
+<h4>User-space access and voluntary preemption</h4>
+<p>
+In this case, things got started when Andi Kleen decided to make the
+user-space data access routines — <tt>copy_from_user()</tt> and friends —
+go a little faster.  As he explained in <a href="/Articles/562936/">the
+resulting patch set</a>, those functions were once precisely tuned
+for performance on x86 systems.  But then they were augmented with calls to
+functions like <tt>might_sleep()</tt> and <tt>might_fault()</tt>.  These
+functions initially served in a debugging role; they scream loudly if they are
+called in a situation where sleeping or page faults are not welcome.  Since
+these checks are for debugging, they can be turned off in a production kernel,
+so the addition of these calls should not affect performance in situations
+where performance really matters.
+<p>
+But, then, in 2004, core kernel developers started to take latency issues a
+bit more seriously, and that led to an interest in preempting execution of
+kernel code if a higher-priority process needed the CPU.  The problem was
+that, at that time,  it was not exactly clear when it would be safe to preempt
+a thread in kernel space.  But, as Ingo Molnar and Arjan van de Ven
+noticed, calls to <tt>might_sleep()</tt> were, by definition,
+placed in locations where the code was prepared to sleep.  So a
+<tt>might_sleep()</tt> call had to be a safe place to preempt a thread
+running in kernel mode.  The result was the <a
+href="/Articles/93604/">voluntary preemption patch set</a>, adding a
+limited preemption mode that is still in use today.
+<p>
+The problem, as Andi saw it, is that this change turned
+<tt>might_sleep()</tt> and <tt>might_fault()</tt> into a part of the
+scheduler; it is no longer 
+compiled out of a kernel if voluntary preemption is enabled.  That, in
+turn, has slowed down user-space access functions by (on his system) about
+2.5µs for each call.  His patch set does a few things to try to make the
+situation better.  Some functions (<tt>should_resched()</tt>, which is
+called from <tt>might_sleep()</tt>, for example) are
+marked <tt>__always_inline</tt> to remove the function calling overhead.
+A new <tt>might_fault_debug_only()</tt> function goes back to the original
+intent of <tt>might_fault()</tt>; it disappears entirely when it is not
+needed.  And so on.
+<p>
+Linus had no real objection to these patches, but they clearly raised a
+couple of questions in his mind.  One of his first comments was <a
+href="/Articles/563187/">a suggestion</a> that, rather than optimizing the
+<tt>might_fault()</tt> call in functions like <tt>copy_from_user()</tt>, it
+would be better to omit the check altogether.  Voluntary preemption points are
+normally used to switch between kernel threads when an expensive operation
+is being performed.  If a user-space access succeeds without faulting, it
+is not expensive at all; it is really just another memory fetch.  If,
+instead, it causes a page fault, there will already be opportunities for
+preemption.  So, Linus reasoned, there is little point in slowing down
+user-space accesses with additional preemption checks.
+<p>
+<h4>The problem with full preemption</h4>
+<p>
+
+To this point, the discussion was mostly concerned about voluntary
+preemption, where a thread running in the kernel can lose access to the
+processor, but only at specific spots.  But the kernel also supports "full
+preemption," which allows preemption almost anywhere that preemption has
+not been explicitly disabled.  
+In the early days of kernel preemption, many users shied away
+from the full preemption option, fearing subtle bugs.  They may have been
+right at the time, but, in the intervening years, the fully preemptible
+kernel has become much more solid.  Years of experience, helped by tools
+like the locking validator, can work wonders that way.  So there is little
+reason to be afraid to enable full preemption at this point.
+<p>
+With that history presumably in mind, H. Peter Anvin entered the
+conversation with <a href="/Articles/563188/">a question</a>: should
+voluntary preemption be phased out entirely in favor of full kernel
+preemption?
+
+It turns out that there <i>is</i> still one reason to avoid turning on full
+preemption: as Mike Galbraith <a
+href="/Articles/563189/">put it</a>, "<q>PREEMPT munches
+throughput</q>".  Complaints about the cost of full preemption have been
+scarce over the years, but, evidently, it does hurt in some cases.  As long
+as there is a performance penalty to the use of full preemption, it is
+going to be hard to convince throughput-oriented users to switch to it.
+<p>
+There would not seem to be any fundamental reason why full preemption
+should adversely affect throughput.  If the rate of preemption were high, there
+could be some associated cache effects, but preemption should be a
+relatively rare event in 
+a throughput-sensitive system.  That suggests that something else is going
+on.  A clue about that "something else" can be found in Linus's <a
+href="/Articles/563190/">observation</a> that the testing of 
+the preemption count — which happens far more often in a fully preemptible
+kernel — is causing the compiler to generate slower code.
+<p>
+<div class="BigQuote">
+	The thing is, even if that is almost never taken, just the fact
+	that there is a conditional function call very often makes code
+	generation *much* worse. A function that is a leaf function with no
+	stack frame with no preemption often turns into a non-leaf function
+	with stack frames when you enable preemption, just because it had a
+	RCU read region which disabled preemption.
+</div>
+<p>
+So configuring full preemption into the kernel can make
+performance-sensitive code slower.  Users who are concerned about latency may
+well be willing to make that tradeoff, but those who want throughput will
+not be so agreeable.  The
+good news is that it might be possible to do something about this problem
+and keep both camps happy.
+<p>
+<h4>Optimizing full preemption</h4>
+<p>
+The root of the problem is accesses to the variable known as the
+"preemption count," which can be found in the 
+<tt>thread_info</tt> structure, which, in turn
+lives at the bottom of the kernel stack.  It is not just a counter, though;
+instead it is a 32-bit quantity that has been divided up into several
+subfields:
+<p>
+<ul>
+<li> The actual preemption count, indicating how many times kernel code has
+     disabled preemption.  This counter allows calls like
+     <tt>preempt_disable()</tt> to be nested and still do the right thing
+     (eight bits).
+<p>
+<li> The software interrupt count, indicating how many nested software
+     interrupts are being handled at the moment (eight bits).
+<p>
+<li> The hardware interrupt count (ten bits on most architectures).
+<p>
+<li> The <tt>PREEMPT_ACTIVE</tt> bit indicating that the current thread
+     is being (or just has been) preempted.
+</ul>
+<p>
+This may seem like a complicated combination of fields, but it has one
+useful feature: the preemptability of the currently-running thread can be
+tested by comparing the entire preemption count against zero.  If any of
+the counters has been incremented (or the <tt>PREEMPT_ACTIVE</tt> bit set),
+preemption will be disabled. 
+<p>
+It seems that the cost of testing this count might be reduced significantly
+with some tricky assembly language work; that is being hashed out as of
+this writing.  But there's another aspect of the preemption count that
+turns out to be costly: its placement in the <tt>thread_info</tt>
+structure.  The location of that structure must be derived from the kernel
+stack pointer, making the whole test significantly more expensive.
+<p>
+The important realization here is that there is (almost) nothing about the
+preemption count that is specific to any given thread.  It will be zero for
+every non-executing thread; and no executing thread will be preempted if
+the count is nonzero.  It is, in truth, more of an attribute of the CPU
+than of the running process.  And that suggests that it would be naturally
+stored as a per-CPU variable.  Peter Zijlstra has posted <a
+href="/Articles/563088/">a patch</a> that changes things in just that way.
+The patch turned out to be relatively straightforward; the only twist is
+that the <tt>PREEMPT_ACTIVE</tt> flag, being a true per-thread attribute,
+must be saved in the <tt>thread_info</tt> structure when preemption occurs.
+<p>
+Peter's first patch didn't quite solve the entire problem, though: there is
+still the matter of the <tt>TIF_NEED_RESCHED</tt> flag that is set in the
+<tt>thread_info</tt> structure when kernel code (possibly running in an
+interrupt handler or on another CPU) determines that the currently-running
+task should be preempted.  That flag must be tested whenever the preemption
+count returns to zero, and in a number of other situations as well; as long
+as that test must be done, there will still be a cost to enabling full
+preemption.
+<p>
+Naturally enough, Linus has <a href="/Articles/563195/">a solution to this
+problem</a> in mind as well.  The "need rescheduling" flag would move to
+the per-CPU preemption count as well, probably in the uppermost bit.  That
+raises an interesting problem, though.  The preemption count, as a per-CPU
+variable, can be manipulated without locks or the use of expensive atomic
+operations.  This new flag, though, could well be set by another CPU
+entirely; putting it into the preemption count would thus wreck that
+count's per-CPU 
+nature.  But Linus has a scheme for dancing around this problem.  The "need
+rescheduling" flag would only be changed using atomic operations, 
+but the remainder of the preemption count
+would be updated locklessly as before.  
+<p>
+Mixing atomic and non-atomic operations is normally a way to generate
+headaches for everybody involved.  In this case, though, things might just
+work out.  The use of atomic operations for the "need rescheduling" bit
+means that any CPU can set that bit without corrupting the counters.  On
+the other hand, when a CPU changes its preemption count, there is a small
+chance that it will race with another CPU that is trying to set the "need
+rescheduling" flag, causing that flag to be lost.
+That, in turn, means that the currently executing thread will
+not be preempted when it should be.  That result is unfortunate, in that it
+will increase latency for the higher-priority task that is trying to run,
+but it will not generate incorrect results.  It is a minor bit of
+sloppiness that the kernel can get away with if the performance benefits
+are large enough.
+<p>
+In this case, though, there appears to be a better solution to the problem.
+Peter came back with <a href="/Articles/563259/">an alternative
+approach</a> that keeps the <tt>TIF_NEED_RESCHED</tt> flag in the
+<tt>thread_info</tt> structure, but also adds a copy of that flag in the
+preemption count.  In current kernels, when the kernel sets
+<tt>TIF_NEED_RESCHED</tt>, it also
+signals an inter-processor interrupt (IPI) to inform the relevant CPU that
+preemption is required.  Peter's patch makes the IPI handler copy the flag
+from the <tt>thread_info</tt> structure to the per-CPU
+preemption count; since that copy is done by the processor that owns
+the count variable,  the per-CPU nature of that count is preserved and the
+race conditions go away.  As of this writing, that approach seems like the
+best of all worlds — fast testing of the "need rescheduling" flag without
+race conditions.
+<p>
+Needless to say, this kind of low-level tweaking needs to be done carefully
+and well benchmarked.  It could be that, once all the details are taken
+care of, the performance gained does not justify the trickiness and
+complexity of the changes.  So this work is almost certainly not 3.12
+material.  But, if it works out, it may be that much of the throughput cost
+associated with enabling full preemption will go away, with the eventual
+result that the voluntary preemption mode could be phased out.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Preemption">Preemption</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Voluntary_preemption">Voluntary preemption</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/563185/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor563401"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing preemption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2013 18:30 UTC (Wed)
+                               by <b>mst@redhat.com</b> (subscriber, #60682)
+                              [<a href="/Articles/563401/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm wondering about this patch-set.<br>
+might_fault() seems to be an empty inline macro in 3.11-rc3<br>
+unless you enable debugging features.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/563401/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor563452"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing preemption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2013 4:56 UTC (Thu)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/563452/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is an almost supernaturally comprehensible presentation, a triumph of clarity.  Has any operating-system design process ever been so well chronicled?  In centuries to come, will the AIs that will have taken over system design from fallible humans be trained up on LWN analyses?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/563452/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor563491"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing preemption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2013 12:03 UTC (Thu)
+                               by <b>martin.langhoff</b> (subscriber, #61417)
+                              [<a href="/Articles/563491/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I just want to know where Jon buys his coffee. Firing on all cylinders...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/563491/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor563506"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing preemption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2013 13:22 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/563506/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      In truth, if the article came out well, Jake deserves a lot of the credit for harassing me about the unclear parts until I fixed them...
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/563506/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor563610"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing preemption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 16, 2013 2:45 UTC (Fri)
+                               by <b>felixfix</b> (subscriber, #242)
+                              [<a href="/Articles/563610/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Would that make him the ... Jake brake?<br>
+<p>
+(<a href="http://en.wikipedia.org/wiki/Compression_release_engine_brake">http://en.wikipedia.org/wiki/Compression_release_engine_b...</a>)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/563610/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor563541"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing preemption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 15, 2013 15:22 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/563541/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Seconded. I didn't quite grasp the thread as it was in progress: this has clarified a number of things for me.<br>
+<p>
+Yet again LWN proves itself well worth the subscription! :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/563541/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor563849"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing preemption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 18, 2013 10:01 UTC (Sun)
+                               by <b>jospoortvliet</b> (guest, #33164)
+                              [<a href="/Articles/563849/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not even being a programmer, I really enjoy articles like these. Gives my brain a nice workout ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/563849/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor563903"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing preemption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2013 12:23 UTC (Mon)
+                               by <b>Thomas</b> (subscriber, #39963)
+                              [<a href="/Articles/563903/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed this article is a great summary of a complex subject - complex at least to me.  I see that the money I invested in the subscription is very hard at work.  :-)<br>
+<p>
+Well done!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/563903/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor563978"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing preemption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2013 20:15 UTC (Mon)
+                               by <b>naptastic</b> (guest, #60139)
+                              [<a href="/Articles/563978/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If throughput is that much more important than preemption, wouldn't "No Preemption" be a better choice for you anyway?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/563978/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor563983"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing preemption</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2013 21:31 UTC (Mon)
+                               by <b>jhoblitt</b> (subscriber, #77733)
+                              [<a href="/Articles/563983/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's not unusual for a workload to be both throughput and latency sensitive. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/563983/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2013, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

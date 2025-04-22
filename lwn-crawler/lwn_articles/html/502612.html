@@ -1,0 +1,737 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>msync() and subtle behavioral tweaks [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/502612/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/501976/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/502612/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>msync() and subtle behavioral tweaks</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Did you know...?</b>
+<p>
+LWN.net is a subscriber-supported publication; we rely on subscribers
+       to keep the entire operation going.  Please help out by <a
+       href="/Promo/nst-nag4/subscribe">buying a subscription</a> and keeping LWN on the
+       net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 19, 2012</br>
+           </div>
+Some kernel behavior is determined by standards like POSIX; others are
+simply a function of what the kernel developers implemented.  The latter
+type of behavior can, in theory, be changed if there is a good reason to do
+so, but there is always a risk of breaking an application that depended on
+the previous behavior.  Even worse, this kind of problem can be impossible
+to find during development and, indeed, may lurk until long after the new
+code has been deployed.  A system call patch currently under consideration
+shows how hard it can be to know when a change is truly safe.
+<p>
+The <tt>msync()</tt> system call exists to request that a file-backed
+memory region created with <tt>mmap()</tt> be written back to persistent
+storage.  Once upon a time, <tt>msync()</tt> was the only way to guarantee
+that modified pages would be saved to disk in any reasonable period of time;
+the kernel could not always detect 
+on its own that they had been changed by the application.  That problem has
+long since been dealt with, but <tt>msync()</tt> is still a good way to
+inform the kernel that now would be a good time to flush modified pages to
+disk. 
+<p>
+Paolo Bonzini recently posted <a href="/Articles/502616/">a small patch
+set</a> making a couple of changes to <tt>msync()</tt>.  The actual API
+does not change at all, but how the system call implements the API changes
+in subtle and interesting ways.
+<p>
+There are a few options to <tt>msync()</tt>, one of which
+(<tt>MS_ASYNC</tt>) asks that the writeback of modified pages be
+"scheduled," but not necessarily completed immediately.  It is meant to be
+a non-blocking system call that sets the necessary actions in motion, but
+does not wait for them to complete.  Current kernels will write back dirty
+pages as part of the normal writeback process; the system behaves, in other
+words, as if <tt>msync(MS_ASYNC)</tt> were being called on a regular basis
+on every mapping.  Writeback of dirty pages is already scheduled as soon as
+the page is dirtied.
+Given that, there's not much work for an explicit
+<tt>MS_ASYNC</tt> call from user space to do, and, indeed, the kernel
+essentially ignores such calls.
+<p>
+Paolo's patch causes the kernel to immediately start I/O on modified pages
+in response to <tt>MS_ASYNC</tt> calls.  The result is to get those pages
+to persistent storage a bit more quickly than would otherwise happen, but
+still avoid blocking the calling process.  The change seems reasonable,
+but Andrew Morton <a
+href="/Articles/502618/">worried</a> that this behavioral change might be a
+problem for some users:
+<p>
+<div class="BigQuote">
+	Means that people will find that their msync(MS_ASYNC) call will
+	newly start IO.  This may well be undesirable for some.  Also, it
+	hardwires into the kernel behaviour which userspace itself could
+	have initiated, with sync_file_range().  ie: reduced flexibility.
+</div>
+<p>
+Most users are unlikely to notice the change at all.  But it's entirely
+possible that somebody out there has a precisely-tuned system that will
+choke if the underlying I/O behavior changes.  Users complain about exactly
+this kind of change at times, but usually when the change shows up in a new
+enterprise kernel, years too late.
+
+That said, many patches make behavioral changes that can affect users in
+surprising ways.  The only thing that is different about this one is that
+the nature of the change is understood from the beginning.  Andrew's
+concerns were not echoed by others and may not be enough to keep this
+change from being merged.
+<p>
+The other change is potentially more troubling.  <tt>msync()</tt> takes two
+parameters indicating the offset and length of the memory area to be
+written back.  But the kernel has always ignored those parameters, choosing
+instead to just write back all modified pages in the file, and the related
+metadata as well.  Paolo's patch changes the implementation to only
+synchronize the specific pages requested by the user.
+<p>
+It would be hard to argue that the new behavior breaks the documented API;
+the offset and length parameters are there for a reason, after all.  Still,
+once again, Andrew <a href="/Articles/502620/">worried</a> that
+applications could break in especially unpleasant ways:
+<p>
+<div class="BigQuote">
+	Would be nice, but if applications were previously assuming that an
+	msync() was syncing the whole file, this patch will secretly and
+	subtly break them.
+</div>
+<p>
+No developer should have written a program with the assumption that
+<tt>msync()</tt> would write pages outside of the range it was given.  Any
+such program would clearly be buggy.  But, programs written that way will
+work under current kernels.  Changing <tt>msync()</tt> to not write some
+pages that it currently writes could cause such programs to fail in strange
+and difficult-to-reproduce ways.  
+<p>
+In general, the kernel tries not to break existing applications, even if
+those applications can be said to have been written in a buggy manner.  If
+something works now, it should continue to work with future kernels.  If
+the <tt>msync()</tt> changes described here break those programs, the
+changes should probably not be merged into the kernel.
+
+The problem, of course, is that it can be very difficult to know if
+a specific change will break somebody's application.  Any problems caused
+by subtle changes are relatively unlikely to turn 
+up before the changes are included in a released kernel.  So it is
+necessary to proceed with care.  That said, it is not practical to hold
+back every change that <i>might</i> break a badly-written program
+somewhere; kernel development would likely be slowed considerably by such a
+constraint.  So, probably, these changes will probably go in unless an
+affected user happens to notice a problem in the near future.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Development_model-User-space_ABI">Development model/User-space ABI</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/502612/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor502857"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2012 14:39 UTC (Thu)
+                               by <b>mikemol</b> (guest, #83507)
+                              [<a href="/Articles/502857/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just a guess, but if you change MS_ASYNC to immediately being syncing, wouldn't that reduce the kernel's ability to defer syncing in, e.g. mobile and low-power environments?<br>
+<p>
+If my spinning platters started spinning more frequently (or failed to spin down as often), I know I'd be annoyed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502857/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor504877"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2012 12:40 UTC (Tue)
+                               by <b>philomath</b> (guest, #84172)
+                              [<a href="/Articles/504877/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In that case, why the MS_ASYNC at all?  just leave it for the kernel.<br>
+In general, it doesn't make sense to have a flag that does nothing, just because it has never done anything.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/504877/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor502864"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2012 15:51 UTC (Thu)
+                               by <b>Yorick</b> (guest, #19241)
+                              [<a href="/Articles/502864/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's not unusual to see msync (with MS_ASYNC) used to detect whether a certain address is mapped or not - for instance, inside in-process stack tracers that may need to follow random pointers. Unless I'm mistaken, libunwind does exactly this. It may be undersirable if this suddenly becomes a lot more expensive.<br>
+<p>
+Playing around with SIGSEGV handlers is one alternative, but it's often slower and kind of dangerous in what is typically already a precarious context (inside a signal handler itself, for example), or with multiple threads.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502864/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor502881"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2012 18:23 UTC (Thu)
+                               by <b>cmccabe</b> (guest, #60281)
+                              [<a href="/Articles/502881/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You could always try to write(2) a byte from the address you're checking to /dev/null.<br>
+<p>
+I also got the impression that libunwind was mostly for crash debugging, at which point performance is not exactly priority number 1...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502881/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor502897"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2012 19:31 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/502897/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Other uses listed on libunwind's own webpage include 'exception handling' and 'efficient setjmp()', for which performance is surely more of a priority.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502897/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor502899"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2012 19:41 UTC (Thu)
+                               by <b>Yorick</b> (guest, #19241)
+                              [<a href="/Articles/502899/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe. There is no guarantee that write(2) from an invalid address wouldn't cause a SIGSEGV instead of returning EFAULT. I could be mistaken, but I believe Linux has actually behaved that way before. msync(2) seems to be more tolerant in general.<br>
+<p>
+Another interesting use of libunwind is for profiling, for which performance is attractive. (Yes, there are alternatives, but libunwind is fairly portable.)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502899/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor502906"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2012 21:15 UTC (Thu)
+                               by <b>cmccabe</b> (guest, #60281)
+                              [<a href="/Articles/502906/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Maybe. There is no guarantee that write(2) from an invalid address</font><br>
+<font class="QuotedText">&gt; wouldn't cause a SIGSEGV instead of returning EFAULT. I could be mistaken,</font><br>
+<font class="QuotedText">&gt; but I believe Linux has actually behaved that way before. msync(2) seems</font><br>
+<font class="QuotedText">&gt; to be more tolerant in general.</font><br>
+<p>
+I'm really curious why you think this.  It seems totally bogus to me: the kernel is the one doing the address space checking, not userspace.  You would need to add extra code to get the weird and (I think) non-POSIX behavior of delivering a signal to userspace.  What gave you the idea that a signal might be delivered?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502906/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor502911"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2012 22:03 UTC (Thu)
+                               by <b>Yorick</b> (guest, #19241)
+                              [<a href="/Articles/502911/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I may have misunderstood it entirely, but I was under the impression from old discussions on linux-kernel (that I wish I could find now—sorry) that Posix actually would allow this. Consider an implementation that implements all or parts of write() in user space, for instance.<br>
+<p>
+You would then rightly ask why msync() would be exempt from such a behaviour, and to that I have no good answer. I have seen that syscall being used for this purpose (address checking) in a variety of places, however, misguided or not.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502911/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor502936"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2012 3:40 UTC (Fri)
+                               by <b>cmccabe</b> (guest, #60281)
+                              [<a href="/Articles/502936/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think glusterfs has a shim library that will intercept some calls to glibc and interpose its own functions.  So you might call write() and end up getting a userspace version.  So I guess it's not outside the realm of possibility.  Of course, glusterfs could theoretically intercept msync as well-- I don't know if their shim library does or not.<br>
+<p>
+I would guess that the people using msync to check whether an address is valid are using it more because it doesn't require you to have any open file descriptors, than because they're being "careful."  In fact, it's not even clear according to the man page that you can use msync on memory that wasn't allocated with mmap.  I really have no idea what msync is "supposed" to do on memory allocated with brk, for example.  So it's just another case of people relying on some pretty hairy implementation details.<br>
+<p>
+As far as I can see, your best bet for checking address validity probably is "mincore."  It definitely doesn't make any sense for a shim library to intercept that function.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502936/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor502943"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2012 8:40 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/502943/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Anyone intercepting relatively-bare syscalls and converting them into library functions like that had better trap SIGSEGV during the call and convert it into an -EFAULT return. It's not like that's terribly hard (though it does require flipping signal dispositions twice, that's fast as syscalls go).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502943/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor502999"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">EFAULT vs SIGSEGV on write()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2012 17:59 UTC (Fri)
+                               by <b>giraffedata</b> (guest, #1954)
+                              [<a href="/Articles/502999/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>
+Anyone intercepting relatively-bare syscalls and converting them into library functions like that had better trap SIGSEGV during the call and convert it into an -EFAULT return.
+</blockquote>
+
+<p>
+But do the standards or conventional architecture really call for that?  I don't think the POSIX definition of write() uses the word "kernel" and I believe the general understanding for any library is that if you pass an invalid address to a subroutine, it might generate a SIGSEGV.
+<p>
+Or are you just making a practicality argument, since people might be depending on EFAULT.  I think it would be a pretty unusual program that passes invalid addresses to write() when the program isn't broken.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502999/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor503094"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">EFAULT vs SIGSEGV on write()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2012 23:48 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/503094/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's practicality. If you're trying to transparently, replace a function that normally EFAULTs on events that would cause userspace to SIGSEGV, it behooves you to behave the same way, lest you break some weird program that really depends on this. (I wrote one once. It does happen.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/503094/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor502930"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2012 2:21 UTC (Fri)
+                               by <b>buck</b> (subscriber, #55985)
+                              [<a href="/Articles/502930/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+MS_REALLY_ASYNC_MEANINGFUL_PARAMS (MS_RAMP), anybody?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502930/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor502993"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 22, 2012 17:51 UTC (Fri)
+                               by <b>jmorris42</b> (guest, #2203)
+                              [<a href="/Articles/502993/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe I'm missing something important but it sounds like these two changes make the system call behave more like the documentation.  That should be a good thing and a no brainer.<br>
+<p>
+The first change, causing it to actually get busy writing when the call is made but without blocking is kinda what you should have been expecting from explicitly making that call in the first place.  The existing kernel behavior of basically ignoring the whole request is the error.  If you could live with it getting written eventually when the system got around to it you could have skipped the call and got the same result.<br>
+<p>
+Same for the range.  It is actually implementing behavior that has long been documented in the API but left unwritten.  Even if you have a bug and are specifying the range wrong you still get the same result you used to get, a write when the kernel gets a spare roundtuit.  So all this is doing is increasing the odds that a range that is correctly specified will get written in the case of a crash.  It could have happened before though and it might not, and it still might not get written.  So all one can say is if you have buggy code it is possible you will get bitten a little more often with this change but probably all that will happen is you won't get as much of an improvement in reliability.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/502993/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor503640"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 26, 2012 19:14 UTC (Tue)
+                               by <b>liljencrantz</b> (guest, #28458)
+                              [<a href="/Articles/503640/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am surprised this did not come up in the article. Maintaining backward compatibility with possibly existing old programs is relevant, but is it really more important than making sure the kernel behavior matches the API documentation so that *future* programs will behave as expected?<br>
+<p>
+The other alternative would of course be to deprecate the old calls and replace them with newer ones that do what you'd expect from the documentation and then carefully document all the ways in which the old syscalls don't actually do what they advertise. This alternative sounds horrible in a very Redmondesque way.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/503640/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor504876"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2012 12:36 UTC (Tue)
+                               by <b>philomath</b> (guest, #84172)
+                              [<a href="/Articles/504876/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Exactly my words, as I would have written. thank you!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/504876/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor503451"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 25, 2012 22:01 UTC (Mon)
+                               by <b>cesarb</b> (subscriber, #6266)
+                              [<a href="/Articles/503451/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+About the second concern: how about a MS_DO_NOT_IGNORE_OFFSET_AND_LENGHT flag?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/503451/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor503916"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 28, 2012 7:19 UTC (Thu)
+                               by <b>slashdot</b> (guest, #22014)
+                              [<a href="/Articles/503916/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Probably needs to become the addition of two new flags called MS_IMMEDIATE and MS_RANGE.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/503916/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor744520"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">msync() and subtle behavioral tweaks</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 16, 2018 19:25 UTC (Tue)
+                               by <b>ktsaou</b> (guest, #106531)
+                              [<a href="/Articles/744520/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It seems this or something similar is already merged into the kernel since 2014: <a href="https://github.com/torvalds/linux/commit/7fc34a62ca4434a79c68e23e70ed26111b7a4cf8">https://github.com/torvalds/linux/commit/7fc34a62ca4434a7...</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/744520/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2012, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

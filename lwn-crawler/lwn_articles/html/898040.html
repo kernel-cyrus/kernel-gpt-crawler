@@ -1,0 +1,732 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A new LLVM CFI implementation [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/898040/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/898158/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/898040/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A new LLVM CFI implementation</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 17, 2022</br>
+           </div>
+Some kernel features last longer than others.  Support for forward-edge
+control-flow integrity (CFI) for kernels compiled with LLVM was added to the 5.13
+kernel, but now there is already a replacement knocking on the door.
+Control-flow integrity will remain, but the new implementation will be
+significantly different — and seemingly better in a number of ways.
+<p>
+The kernel makes extensive use of indirect function calls; they are at the
+heart of its internal object model.  Every one of those calls is a
+potential entry point for an attacker; if the target of the call can be
+somehow changed to an address of the attacker's choosing, the game is
+usually over.  Forward-edge CFI works to thwart such
+attacks by ensuring that every indirect function call sends control to a
+code location that was actually intended to be a target of that call.
+Specifically, an
+indirect function call should only go to a known function entry point, and the
+prototype of the function should match what is expected at the call site.
+<p>
+The CFI implementation merged for 5.13 works by creating "jump tables"
+containing all of the legitimate targets of indirect function calls in the
+kernel; there is one jump table for each observed function prototype.
+Actual indirect calls are replaced with a jump-table lookup to ensure that
+the intended target meets the criteria; the target should be found in the
+jump table corresponding to the intended function prototype.
+If that test fails, a kernel panic results.
+See <a href="/Articles/856514">this article</a> for a more detailed
+description of how this mechanism works.
+<p>
+That implementation of CFI does the job, but it has a few disadvantages as
+well.  Creating the jump tables requires a view of the full kernel binary;
+in practice, it requires that <a href="/Articles/744507/">link-time
+optimization</a> be used to build the kernel, which is a slow and sometimes
+tricky process.  The replacement of
+function-pointer variables with jump-table entries also means that those
+variables cannot be compared against the address of a specific function,
+which is something that kernel code needs to do on occasion.
+It would be nicer to have a CFI implementation that doesn't impose problems
+of this sort.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+That implementation would appear to exist in <a
+href="/ml/linux-kernel/20220610233513.1798771-1-samitolvanen@google.com/">this
+patch set</a> from Sami Tolvanen.  It depends on <a
+href="https://reviews.llvm.org/D119296">a new Clang compiler option</a>
+(<tt>-fsanitize=kcfi</tt>), which has not yet landed in the LLVM mainline.
+This CFI mechanism, which is "<q>intended to be used in low-level code,
+such as operating system kernels</q>", avoids the above-mentioned problems
+at the cost of a couple of other tradeoffs, notably that it cannot work
+with execute-only memory (read access is always required).
+<p>
+When code is compiled with <tt>-fsanitize=kcfi</tt>, the entry point to
+each function is preceded by a 32-bit value representing the prototype of
+that function.  This value is (part of) a hash calculated from the <a
+href="https://en.wikipedia.org/wiki/Name_mangling#C++">C++
+mangled name</a> for the function and its arguments.  On x86 systems, this
+hash is placed into a 
+simple <tt>MOV</tt> instruction and surrounded by <tt>INT3</tt>
+instructions; this is meant to prevent the hash itself from becoming a
+useful gadget for attackers.  When an indirect call is made, extra code is
+emitted to fetch and check this hash value prior to emitting the call
+itself; if the hash does not match what
+was expected, a trap (which will be turned into a kernel oops) results.  The
+checking of the hash is why execute-only memory cannot be supported: it
+must be possible to read the hash value from the executable code.
+<p>
+For the most part, this mechanism just works without the need for much
+change in the kernel code itself — at least, not beyond the changes that
+were already required for the previous CFI implementation.  There is,
+however, the problem of functions written in assembly, which will need to
+have the necessary preamble generated by some other means.  Generating the
+requisite hash value for each indirectly called assembly function could be
+a tiresome task; fortunately, the compiler provides some help.  Whenever it
+sees (in C code) the address of a function being taken (as in <a
+href="https://elixir.bootlin.com/linux/latest/source/drivers/media/platform/marvell/mcam-core.c#L1654">this
+example</a>):
+<p>
+<pre>
+    static const struct v4l2_file_operations mcam_v4l_fops = {
+	.open = mcam_v4l_open,
+	/* ... */
+    };
+</pre>
+<p>
+it will generate a corresponding symbol defined as the resulting hash
+value; in this case, the symbol would be
+<tt>__kcfi_typeid_mcam_v4l_open</tt>.  The existence of these symbols means
+that the preambles for assembly functions can be generated automatically
+via <a
+href="/ml/linux-kernel/20220610233513.1798771-7-samitolvanen@google.com/">some
+tweaks</a> to the macros already used to define those functions.
+<p>
+This patch series is currently in its third version, and it would appear
+that all of the substantive concerns have been addressed.  It is, in other
+words, looking ready to be merged into the mainline.  There is only one
+remaining obstacle to overcome: kernel developers will be reluctant to
+merge this feature until it is actually supported in the LLVM Clang
+compiler.  Assuming that happens in the near future, it should not be too
+long until the kernel acquires an upgraded CFI implementation for the arm64
+and x86 architectures.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Releases-6.1">Releases/6.1</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security-Control-flow_integrity">Security/Control-flow integrity</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/898040/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor898292"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new LLVM CFI implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 18, 2022 17:52 UTC (Sat)
+                               by <b>jhoblitt</b> (subscriber, #77733)
+                              [<a href="/Articles/898292/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What are the odds that RedHat will switch to llvm for kernel builds?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898292/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor898477"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new LLVM CFI implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 21, 2022 8:41 UTC (Tue)
+                               by <b>LtWorf</b> (subscriber, #124958)
+                              [<a href="/Articles/898477/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If fedora does it… it might eventually happen on redhat as well.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898477/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor898320"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new LLVM CFI implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2022 13:48 UTC (Sun)
+                               by <b>mss</b> (subscriber, #138799)
+                              [<a href="/Articles/898320/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It looks like this new CFI flavor essentially only checks if the called function has the expected number of arguments and each argument has the expected type - the called function name will not get verified.<br>
+<p>
+The function return value type isn&#x27;t a part of its C++ mangled name so I guess this isn&#x27;t checked either.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898320/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor898321"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new LLVM CFI implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2022 14:24 UTC (Sun)
+                               by <b>atnot</b> (subscriber, #124910)
+                              [<a href="/Articles/898321/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, this is to be expected as it is only designed to protect function pointers from being overwritten with completely arbitrary addresses. Only being able to call something that is actually intended to be a target of a function pointer is much less useful than, say, being able to call into the middle of a function that changes you uid. Since function pointers are used when you want to be able to change what function is called at runtime, checking the name would not make a lot of sense.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898321/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor898323"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new LLVM CFI implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2022 14:29 UTC (Sun)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/898323/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It&#x27;d be interesting to have a function be able to declare &quot;I am an implementation of aops-&gt;dirty_folio&quot;, and abort if it&#x27;s called through get_block_t. Should be possible with enough ELF magic and __attribute__((...))<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898323/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor898322"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new LLVM CFI implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2022 14:29 UTC (Sun)
+                               by <b>mss</b> (subscriber, #138799)
+                              [<a href="/Articles/898322/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  Since function pointers are used when you want to be able to change what function is called at runtime, checking the name would not make a lot of sense.</font><br>
+<p>
+I assume having a hash table of allowed call targets could work here (it would be incompatible with out-of-tree kernel modules, however).<br>
+<p>
+But this sounds a bit like the previous CFI design that this new implementation seeks to replace.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898322/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor898331"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new LLVM CFI implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2022 20:58 UTC (Sun)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/898331/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, this is COME FROM, not GO TO.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898331/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor898333"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new LLVM CFI implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2022 21:32 UTC (Sun)
+                               by <b>mss</b> (subscriber, #138799)
+                              [<a href="/Articles/898333/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  No, this is COME FROM, not GO TO.</font><br>
+<p>
+I don&#x27;t quite understand your analogy here, the article says:<br>
+<font class="QuotedText">&gt; When an indirect call is made, extra code is emitted to fetch and check this hash value prior to emitting the call itself</font><br>
+<p>
+So the checking happens prior to the actual call: in the caller, not in the callee.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898333/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor898334"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new LLVM CFI implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2022 21:41 UTC (Sun)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/898334/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was perhaps overly eager to make an INTERCAL reference.<br>
+<p>
+But I wasn&#x27;t referring to the implementation; rather the concept is that the function declares who can call it. That&#x27;s done by type here, but could also be done by saying &quot;I am an implementation of get_block_t&quot;<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898334/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor898330"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new LLVM CFI implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2022 18:49 UTC (Sun)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/898330/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The hash computation could presumably be changed pretty easily, since it only has to agree for all the files in a build of the kernel. Once the enforcement mechanism based on hashes is stable, the hash calculation should be easy enough to make more restrictive. Probably the ideal choice would be to hash the name of the typedef used to declare the function pointer, but then you need to change the code to annotate the functions with this typedef name. Getting the compiler to use this information for something useful is probably a necessary first step in getting people to make this kind of code change, so you want to start with using the information that is already available to do something that&#x27;s good but could be improved.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898330/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor898336"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Checking the name</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2022 21:45 UTC (Sun)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/898336/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I don't quite understand what you are asking for here. The name of the called function isn't known at compile time, that's why it's an indirect call. So what name would you check against?
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898336/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor898337"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Checking the name</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2022 21:58 UTC (Sun)
+                               by <b>mss</b> (subscriber, #138799)
+                              [<a href="/Articles/898337/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The name of the called function isn&#x27;t known at compile time, that&#x27;s why it&#x27;s an indirect call</font><br>
+<p>
+I think that the set of functions implementing particular callback in the kernel should be known at compile time, either via manual annotations (as willy has suggested above) or maybe even automatically by a sufficiently smart compiler.<br>
+<p>
+This probably would be incompatible with out-of-tree kernel modules, however.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898337/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor898340"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Checking the name</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2022 22:40 UTC (Sun)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/898340/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can do that now. Just declare your functions as taking an extra (unused) argument of type struct { char[0]; char[0]; ...} with a different number of empty arrays for each possible callback. They have zero size and even at O0, no code should be emitted for them, but they still change the signature of the function and (should!) therefore change the C++ name mangling. The problem is, you also need to actually pass an argument, and unlike C++, C doesn&#x27;t let you get away with just writing &quot;{}&quot; for that, so you probably need some sort of macro. It&#x27;s a shame the standard doesn&#x27;t let you write something like &quot;void&quot; for a zero-size argument.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898340/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor898368"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Checking the name</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2022 13:51 UTC (Mon)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/898368/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <font class="QuotedText">&gt; It's a shame the standard doesn't let you write something like "void" for a zero-size argument.</font>
+
+<p>Well… zero-sized arguments don't exist in standard C, they are <a href="https://gcc.gnu.org/onlinedocs/gcc/Zero-Length.html">GNU extension</a> which means you can try to supply the patch which will support what you want to Clang and GCC.</p>
+
+<p>Once you left the standard it's kind of hard to expect to see such non-standard constructs supported in said standard, don't you think?</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898368/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor898420"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Checking the name</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2022 17:39 UTC (Mon)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/898420/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think the point was that the standard should have allowed zero-sized (void type) arguments, variables, and fields from the beginning, for symmetry with expressions and function return types, so it wouldn&#x27;t require a GNU extension. Likewise for empty structures and unions &amp; zero-length arrays (including array variables, not just fields).<br>
+<p>
+A keyword for the void constructor might be nice, but &quot;(void)0&quot; would serve well enough. This could be made into a standard VOID macro, like NULL for &quot;(void*)0&quot;.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898420/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor898427"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Checking the name</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2022 20:56 UTC (Mon)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/898427/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The standard does have empty struct members using 0-length bit fields which have been in the standard from the beginning.[1] They&#x27;re not quite empty as they&#x27;re intended to serve as markers instructing the compiler to shift subsequent bit fields to a new word. 0-length arrays actually work similarly--fundamentally they&#x27;re a mechanism for controlling alignment and can also introduce padding where there wouldn&#x27;t have been any in their absence. (In practice, though, they can only introduce tail padding--at the tail end of a preceding bit field, if any, for the former, or tail end of the struct for the latter.)  Empty bit fields seem a little more useful, though, as aside from being standard they can be (must be since C11) unnamed: `struct { int a:3; int:0; int b:1; };` is a valid definition. You can use them along with the GNU empty struct extension to get an empty type without any names: both `sizeof (struct { int:0; })` and `sizeof (struct { int:0; int:0; })` are valid and evaluate to 0 (tested clang 3.8 and GCC 9.4).<br>
+<p>
+Also, at least based on a straight-forwarding reading of the standard, sequentially declared 0-length bit fields should collapse (i.e. not unspecified or undefined behavior), so that they introduce only one word of padding at most, if any; and this is indeed the behavior I see from clang and GCC. And while maybe more susceptible to disagreement, the language of the standard does seem to specify that a 0-length bit field not succeeding another bit field should not introduce any padding. I see the same behaviors for 0-length arrays, but the GCC documentation seemed much more ambiguous on both points.[2]<br>
+<p>
+I am curious why I haven&#x27;t seen void (the true &quot;nothing&quot;) type semantics extended elsewhere in the grammar. Maybe 0-length bit and array fields were sufficient, if not ideal, for the most pressing scenarios. But perhaps the language (inclusive of extensions) is finally moving in a direction where the old hacks are insufficient, and void might see some more attention.<br>
+<p>
+[1] See $ 3.5.2.1 at <a href="http://port70.net/~nsz/c/c89/c89-draft.txt">http://port70.net/~nsz/c/c89/c89-draft.txt</a><br>
+<p>
+[2] Putting it all together after having double checked my assertions with the standard, it does seem that the only use for 0-length arrays has been almost entirely subsumed by flexible array members, except that the former make indexing notation easier (no offsetof verbiage). For anything else (mostly in relation to extensions, like 0-length structures), 0-length bit field notation seems sufficient. Maybe the situation is different with C++.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898427/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor898344"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Checking the name</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 19, 2022 23:29 UTC (Sun)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/898344/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      That is essentially what the existing implementation does - that's what the jump tables contain.  It requires link-time optimization to work, though, and I'm not sure what it buys over verification of the prototype.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898344/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor898353"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Checking the name</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2022 2:38 UTC (Mon)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/898353/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe they are thinking of the function pointers in C++ vtables, where you know not just the expected signature, but the name of the virtual method that is being overridden.  If you include that in the hash, you can prevent the attacker from replacing it with an unrelated function or method that happens to have the same signature.<br>
+<p>
+Of course, that doesn&#x27;t apply to C.  But it may be possible to get a similar effect with manual annotations of some sort...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898353/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor898359"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A new LLVM CFI implementation</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 20, 2022 7:46 UTC (Mon)
+                               by <b>Villemoes</b> (subscriber, #91911)
+                              [<a href="/Articles/898359/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The replacement of function-pointer variables with jump-table entries also means that those variables cannot be compared against the address of a specific function, which is something that kernel code needs to do on occasion. </font><br>
+<p>
+Indeed, and for that reason it&#x27;s really beyond me how the current code could have been merged without an explicit &quot;depends on BROKEN&quot;. The series monkey-patched out some sanity checking WARN_ONs that used function pointer comparison, but there are places in the kernel that rely on function pointer comparison for correctness, and because this CFI code breaks the semantics of comparing function pointers, leads to crashes down the line. Which, of course, prevents an attacker from gaining control; the owner&#x27;s control and use of the machine is just collateral damage we have to accept in the name of s3kurity.<br>
+<p>
+Oh well, at least it&#x27;s getting replaced by something saner now.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/898359/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

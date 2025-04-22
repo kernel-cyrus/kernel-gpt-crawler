@@ -1,0 +1,525 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The creation of the io.latency block I/O controller [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/782876/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/783053/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/782876/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The creation of the io.latency block I/O controller</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="GAByline">
+           <p>March 14, 2019</p>
+           <p>This article was contributed by Josef Bacik</p>
+           </div>
+<p>Sharing a disk between users in Linux is awful.  Different applications
+have different I/O patterns, they have different latency requirements, and
+they are never consistent.  Throttling can help ensure that users get their
+fair share of the available bandwidth but, since most I/O is in the
+writeback path, it's often too late to throttle without putting pressure
+elsewhere on the system.  Disks are all different as well.  You have
+spinning rust, solid-state devices (SSDs), awful SSDs, and barely usable
+SSDs.  Each class of device has its own performance characteristics and,
+even in a single class, they'll perform differently based on the workload.
+Trying to address all of these issues with a single I/O controller was
+tricky, but we at Facebook think that we have come up with a reasonable
+solution.
+
+<p>Historically, the kernel has had two I/O controllers for control groups.  The
+first, io.max, allows setting hard limits on the bandwidth used or I/O
+operations 
+per second (IOPS), per device.  The second, io.cfq.weight, was provided by
+the CFQ I/O scheduler.  As Facebook has worked on things like <a
+href="/Articles/759781/">pressure-stall information</a> and the <a
+href="/Articles/601840/">version-2 
+control-group interface</a>, it became apparent that neither of those
+controllers
+solved our problem.  Generally, we have a main workload that runs, and then
+we have periodic system utilities that run in the background.  Chef runs a
+few times an hour, updates any settings on the system, and installs
+packages.  The <tt>fbpkg</tt> tool downloads new versions of the
+application that is running on the system three or four times per day.
+
+<p>The io.max controller allowed us to clamp down on those system
+utilities, but made them 
+run unbearably slowly all of the time.  Ratcheting up on the throttling
+just made them impact the main workload too much, so it wasn't a great
+solution.  The CFQ io.cfq.weight controller was a non-starter, as CFQ did not
+work with the multi-queue block layer, not to mention that just using CFQ
+in general caused so many problems with latencies that we had turned it off
+years ago in favor of the deadline scheduler.
+
+<p>Jens Axboe's <a href="/Articles/682582/">writeback-throttling work</a>
+introduced a new way of monitoring and curtailing workloads.  It works by
+measuring the latencies of reads from a disk and, if they exceed a
+configured threshold, it clamps down on the number of writes that are
+allowed to go to the disk.
+
+This sits above the I/O scheduler, which is important because we have a
+finite number of requests we can have outstanding for any single device.
+This number is controlled by the
+<tt>/sys/block/&lt;device&gt;/queue/nr_requests</tt> setting.  We call this
+the "queue depth" of the device.  The writeback-throttling infrastructure
+worked by lowering the queue depth before allocating a request for incoming
+write operations, allowing the available requests to be used by reads and
+throttling the writes as necessary.
+
+<p>This solution addressed a problem wherein <tt>fbpkg</tt> would pull down
+multi-gigabyte packages to update the running application.  Since the
+application updates tended to be pushed all at once, we would see global
+latency spikes as the sudden wave of writes impacted the already running
+application.
+
+<h4>Enter a new I/O controller</h4>
+
+<p>Writeback throttling isn't control-group aware and only really cares
+about evening out read and write latencies per disk.  However it has a lot
+of good ideas, all of which I blatantly stole for <a
+href="/Articles/758963/">the new controller</a>, which 
+I call io.latency.
+
+This controller has to work on both spinning rust and high-end NVMe SSDs,
+so it needed to have a low overhead.  My goal was to add no locking in
+the fast path, a goal I mostly accomplished.  Initially we really wanted
+both workload protection and proportional control.  We have use cases where
+we want to protect the main workload at all costs, but other use cases
+where we want to stack multiple workloads and have them play together
+nicely.  Eventually we had to drop that plan and go for workload protection
+only, and come up with another solution for proportional control.
+
+
+<p>With io.latency, one sets a latency threshold for a group.  If
+this threshold is exceeded for a given time period (250ms normally), then
+the controller will throttle any peers that have a higher latency threshold
+
+<img src="https://static.lwn.net/images/2019/io.latency.png" alt="[control-group hierarchy]"
+width=201 height=127 hspace=3 vspace=3 align="right">
+
+setting.  The throttling mechanism is the same as writeback throttling: the
+controller simply 
+clamps down on the queue depth for that particular control group.  This
+throttling 
+only applies to peers in the control-group hierarchy, so in the case shown
+to the right, for example,  
+if <tt>fast</tt> misses its latency threshold, then only <tt>slow</tt>
+would be throttled, while <tt>unrelated</tt> would be unaffected.
+
+<p>The way I accomplish this without locking is to have a cookie that is
+set in both the parent and its children.  If, for example, <tt>fast</tt>
+misses its 
+target, it decrements the cookie in its parent group (<tt>b</tt>).  The
+next time 
+<tt>slow</tt> submits an I/O request, the controller checks the cookie in
+<tt>b</tt> against <tt>slow</tt>'s copy of the cookie.  If the value has gone
+down, <tt>slow</tt> decreases its queue depth.  If the value has gone up
+then <tt>slow</tt> would increase its queue depth.
+
+<p>In the normal I/O path, io.latency adds two atomic operations: one to
+read the parent cookie and one to acquire a slot in the queue.  In the
+completion path, we only have one atomic operation (to release the queue
+slot) in the normal case, along with a per-CPU operation to account for the
+time the I/O took.  In the slow case, which occurs every window sample time
+(that's the 250ms time period mentioned above) we have to acquire a lock
+in the parent to add up all of the I/O statistics and check if our
+latencies have missed the threshold.
+
+<p>Part of io.latency is accounting for the I/O time.  Since we care about
+total latency suffered by the application, we count from the time that each
+operation is submitted to the time it is completed.  This time is kept in a
+per-CPU structure that is summed up every window period.  We found in
+testing that taking the average latency was good for rotating drives, but for
+SSDs it wasn't responsive enough.  Thus, for SSDs, we have a percentile
+calculation in place; if the 90th-percentile latencies surpass the
+threshold setting, then it's time for a less-important peer group to be
+throttled.
+
+<p>The final part of io.latency is a timer that fires once each second.
+Since the controller was built to be mostly lockless, it's driven by the
+I/O being done.  However, if you have the main workload throttling a slower
+workload into oblivion then ceasing I/O, we will no
+longer have a mechanism to unclamp the slow group.  The periodic timer
+takes care of this by firing when there's I/O occurring from any source and
+verifying that the aggrieved group is still doing I/O, otherwise it
+unclamps everybody so they can go on about their work.
+
+<h4>Everything worked perfectly, right?</h4>
+
+<p>Unfortunately, the kernel is a large system of interconnected parts, and
+many of these parts don't like the fact that, suddenly,
+<tt>submit_bio()</tt> can take much longer to return if the caller is being
+throttled.  We kept running into
+a variety of different priority inversions that ate up a lot of our time
+when testing this whole system in production.
+
+<p>Our test scenario was an overloaded web server with a slow memory leak
+that was started under the <tt>slow</tt> control group.  Generally, what
+happens is that the <tt>fast</tt> workload will start being driven into
+memory reclaim and needing to do swap I/O for whatever pages it can get.
+Pages are attached to their owning control group, which means any I/O
+performed using those pages is done within the owner's limits.  Our
+high-priority workload was swapping pages owned by a low-priority group,
+which meant that it was being incorrectly throttled.
+
+<p>This was easy enough to solve: just add a <tt>REQ_SWAP</tt> flag to the
+I/O operation and make it so the I/O controller simply let those operations
+through with no throttling.  A similar thing had to be done for
+<tt>REQ_META</tt> as well, since we could get blocked up on a metadata I/O
+that the slow group had submitted.
+However, now the slow group was causing a lot of I/O pressure, but not in
+a way that caused it to be throttled, since all <tt>REQ_SWAP</tt> I/O is now
+free.  The bad workload was only allocating memory — and never doing I/O — so
+there was no way to throttle it until it buried the main workload.
+Once the memory pressure starts
+to build, the workload's latencies really go through the roof because, for
+the most part, the main workload is memory intensive, not I/O intensive.
+
+<p>Another set of infrastructure had to be added to solve this problem.  We
+knew that we were doing a lot of I/O on behalf of a badly behaving control
+group; we just needed a way to tell the memory-management layer that this
+group was behaving poorly.  To solve this problem I added a congestion
+counter to the block control-group structure that can be set if a control
+group 
+is getting a lot of I/O done for free without being throttled.  Since we
+know which control group was responsible for the pages being submitted, we
+can tag that group as congested, and the memory-management layer will know it
+needs to start throttling things.
+
+<p>The next problem we were having was with the <tt>mmap_sem</tt>
+semaphore.  In our workload, there is some monitoring code that does the
+equivalent of <tt>ps</tt>; it reads <tt>/proc/&lt;pid&gt;/cmdline</tt>
+which, in turn, takes <tt>mmap_sem</tt>.  The other thing that takes
+<tt>mmap_sem</tt> is the page-fault handler.
+
+If tasks performing page faults are being throttled, thus holding 
+<tt>mmap_sem</tt>, and our main workload tries to read a throttled task's
+<tt>/proc/&lt;pid&gt;/cmdline</tt> file, the main workload would be blocked
+waiting for the throttled I/O to complete.
+  This meant we had to find a way to do the harsh throttling
+outside of the path of any possible kernel locking that would cause
+problems.  The <tt>blkcg_maybe_throttle_current()</tt> infrastructure was
+added to handle this problem.  We would add artificial delays to the
+current task, then, as we return to user space, when we know we aren't
+holding any kernel locks, we would pause for the given delay to make sure
+we were still throttled.
+
+<p>With all of these things in place we had a working system.
+
+<h4>Results</h4>
+
+<p>Previously, when we would run this memory leak test with no I/O
+controller in place, the box would be driven into swap and thrash for many
+minutes until either the out-of-memory killer brought everything down or
+our automated health checker noticed something was wrong and rebooted the
+box manually.  It takes a while for our boxes to come back up, be
+integrated back into the cluster, and become ready to accept traffic, so on
+average there were about 45-50 minutes of downtime for a box with this
+reproducer.
+
+<p>With the full configuration in place and <a
+href="https://github.com/facebookincubator/oomd">oomd</a> monitoring
+everybody, we'd drop about 10% of our requests per second; then the
+memory hog would become so throttled that oomd would see it and kill it.
+This is a 10% drop on an overloaded web server; in normal traffic you'd
+likely see less or no impact on the overall performance.
+
+
+<h4>Future work</h4>
+
+<p>The io.latency controller, along with all of our other control-group
+work and oomd, 
+currently runs in production on all of our web servers, all of our build
+servers, and on the messenger servers.  It has been stable for a year and
+has drastically reduced the number of unexpected reboots across those
+tiers.  The next step is to build a proportional I/O controller, to be
+called io.weight.  It's currently in development; production testing will
+start soon and will likely be posted upstream in the next few months.
+Thankfully all of the various priority inversions that were found with
+io.latency have all been fixed, which makes adding new I/O controllers much
+more straightforward.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Control_groups-IO_bandwidth_controllers">Control groups/I/O bandwidth controllers</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Bacik_Josef">Bacik, Josef</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/782876/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor783102"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The creation of the io.latency block I/O controller</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 15, 2019 3:41 UTC (Fri)
+                               by <b>unixbhaskar</b> (guest, #44758)
+                              [<a href="/Articles/783102/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, sounds good. Many many moons ago, I used to handle throttled web server, specifically runs Apache, and I had encountered quite a few oom. Due to my lack of understanding and precautions, I failed to get over it. Looks like something going to assist people like me in a big way. Thank you and the entire fellas for the hard work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/783102/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor783206"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The creation of the io.latency block I/O controller</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 16, 2019 2:49 UTC (Sat)
+                               by <b>martin.langhoff</b> (subscriber, #61417)
+                              [<a href="/Articles/783206/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How does the 1s tick play with power management? The progress towards tickless systems makes for visibly better battery runtime, and better VM behavior on the server side...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/783206/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor783214"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The creation of the io.latency block I/O controller</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 16, 2019 7:35 UTC (Sat)
+                               by <b>josefbacik</b> (subscriber, #90083)
+                              [<a href="/Articles/783214/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The 1s timer is only armed while there’s IO happening.  No IO, no periodic timer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/783214/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor783328"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The creation of the io.latency block I/O controller</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2019 13:30 UTC (Mon)
+                               by <b>juril</b> (guest, #111960)
+                              [<a href="/Articles/783328/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Hi Josef. I was wondering how your work relates to BFQ (<a href="https://lwn.net/Articles/601799/">https://lwn.net/Articles/601799/</a>).<br>
+Could you comment on differences?<br>
+Thanks!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/783328/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor783374"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The creation of the io.latency block I/O controller</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 18, 2019 15:37 UTC (Mon)
+                               by <b>josefbacik</b> (subscriber, #90083)
+                              [<a href="/Articles/783374/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At the time I was doing io.latency bfq wasn't mature enough to use.  bfq is more akin to our current io.weight work, however we have found in testing that the latency induced by bfq is way more than we are willing to pay for.  The io scheduler infrastructure currently only operates on requests, which means they get a request and that request is holding resources up for the entirety of its lifetime.  This is why io.latency/wbt operate above the io scheduler, we can throttle all we want and not affect other workloads.  Throttling at the io scheduler level means we're still holding on to that extra resource and punishing all the other workloads because of this lack of resource.<br>
+<p>
+This isn't an impossible problem to solve by any means, and is not a complaint against bfq itself.  We just know this method works, and it works extremely well, and then allows us to run whatever io scheduler we want underneath it, wether it's kyber or mq-deadline or whatever.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/783374/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785175"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: BFQ (The creation of the io.latency block I/O controller)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2019 14:50 UTC (Mon)
+                               by <b>frr</b> (guest, #74556)
+                              [<a href="/Articles/785175/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I remember about a decade ago, when "dropbox style" services were all the rage, several "operators" of such services were among our potential customers for traditional RAID boxes with inexpensive SATA drives. One of the first morales was, that RAID makes the IOps math even more complicated, over bare disk drives :-) In the following text, I will abstract from the striped RAID nastiness, I'll refer to bare drives - and specifically spinning rust, as it has some cheap volume to offer.<br>
+<p>
+Our potential customers' traffic pattern was: read-mostly, with numerous clients trying to download the bulk content from the servers. I.e., imagine a hundred HTTP server threads, each performing a sequential download of a large file - but in time, their individual read requests get interleaved, leading to a pretty good approximation of random access to the LBA address space of the disk (or RAID volume).<br>
+<p>
+BFQ seems to promise to solve something similar: apparently it tries to keep some "flow stats" per "control group" (?) and if the summary pattern for the group amounts to sequential access, it can do transaction combining to achieve performace benefits. Similar but not the same, I suspect.<br>
+<p>
+The "parallel readers" pattern is probably not what Facebook are facing - by the description they have a more varied mix of different load patterns, and basically consider the access paterns to be mostly random.<br>
+<p>
+I also tested a scenario with many parallel *writing* threads. Imagine a storage back end for surveilance video recording from many cameras. Here the Linux kernel can offer a configurable and huge dirty cache, suitable for write-combining during write-back caching. Especially promising with the "deadline" scheduler. But, as you increase the load, the write-back pending times start growing, and unfortunately the "deadline" scheduler employs a strict timeout, after which the pending request is scheduled for "immediate" writeback = into a FIFO queue with no more ordering :-( So the promise of elevator-based optimization (albeit geologically slow) collapses into a pure FIFO and the show basically stops.<br>
+<p>
+In the days when I was playing with this, the cheap bulky SATA drives could do about 100-130 MBps (nowadays north of 200 MBps) but during the years, the truly random IOps remains at just about 75. That's 75 random seeks per second. And to squeeze "close to sequential" MBps performance out of a cheap disk drive, you would need to combine the traffic into transactions no smaller than say 4 MB (10 MB would be even better). Here is a graph based on my simple measurements:<br>
+<a rel="nofollow" href="http://support.fccps.cz/download/adv/frr/hdd/perf_vs_tsize.gif">http://support.fccps.cz/download/adv/frr/hdd/perf_vs_tsiz...</a><br>
+<p>
+And also the elevator-based ordering only has a limited room to scale the IOps thoughput - possibly bounded by the disk drive electronics processing horsepower for IOps:<br>
+<a rel="nofollow" href="http://support.fccps.cz/download/adv/frr/hdd/IOps_vs_qdepth.gif">http://support.fccps.cz/download/adv/frr/hdd/IOps_vs_qdep...</a><br>
+<p>
+Once we get into SSD's, at a first glance there's no point in trying to order and combine the transactions, as there's no mechanical arm with magnetic heads to be moved about, there's no track seeking inertia, and the elevator sorting algorithms and "stream tracking stats" are too expensive (in terms of latency / crunching horsepower) to be any use. <br>
+The basic "page" or "row" for NAND Flash reading / writing is about 4 kB, i.e. just about one memory page of the host CPU.<br>
+Still, beware of writing. The erase block size (a binary number on the order of megabytes) may again be a good clue.<br>
+Even sequential writing may hit a hidden boundary after a couple hundred megabytes (or maybe gigabytes in the bigger drives), long before the drive's payload capacity is fully overwritten - allegedly because modern drives first start using the MLC/TLC chips in "SLC mode" (which is faster) and only when that space runs out, they need to fall back to the native "symbol depth".<br>
+Random writing of "much less than an erase block per transaction" is generally not a good idea, because it requires more "flash janitoring" to take place (allocation of pages from different erase blocks, wear leveling must "shuffle pages out of the way" etc) and can really slow things down...<br>
+<p>
+It's a heap of factors to consider, between the application-level abstraction of a file (or database, or whatever) and the physical sectors on spinning rust or pages in NAND Flash chips. I've already hinted at the fun available in striped RAID, and also note that even sequential files need to store metadata, which may add some "out of sequence" seeks as well. Modulo barrier operations. Admittedly difficult to optimize for at the block level or just slightly above, while the apps not necessarily even care to use "hinting" about their future intentions ( fadvise() ) which is readily available from the kernel. Does the httpd even have some useful clues about the traffic pattern it is serving? Well at least it could know the size of a file being read from disk...<br>
+<p>
+IMO it's really the user space apps that should be aware of their respective buffering needs, and should do the optimal stream buffering internally, keeping a suitably large buffer in the user space. Makes me wonder if mmapping the source file of a stream  (rather than an explicit read() = copy into a user-space buffer) would give the kernel more opportunities for merging multiple parallel sessions, that are trying to "stream" the same popular file down a myriad independent TCP sessions running at different transfer rates... Not sure, maybe someone has already written an optimized "file-serving back-end httpd" during the decade that has passed, I'm not keeping an eye on it. Not sure though, people seem to be focusing more on building clouds of Java VM's, using JavaScript on the server side etc... and the most popular HTTP daemons apparently still have buckets or buffers in kilobyte sizes. And the "file download services" are tackling the issue using automatic Flash-SSD-based cache that caters for the popular downloads, so that the spinning rust does not need to be accessed so intensively.<br>
+<p>
+This debate about storage IO bandwidth reservations feels like the "kernel and sysadmin team" fighting the "user-space apps team". Sounds odd to me. There should be an architect who would know better than play chess with himself on both sides of the checkerboard (on each side frantically trying to beat the opponent).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785175/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2019, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

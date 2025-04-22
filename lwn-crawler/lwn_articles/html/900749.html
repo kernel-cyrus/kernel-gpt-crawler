@@ -1,0 +1,734 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Long-lived kernel pointers in BPF [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/900749/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/901197/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/900749/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Long-lived kernel pointers in BPF</h1>
+</div>
+<div class="ArticleText">
+<div class="GAByline">
+           <p>July 14, 2022</p>
+           <p>This article was contributed by David Vernet</p>
+           </div>
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>The <a href="/Articles/740157/">BPF</a> subsystem allows
+programmers to write programs that can run safely in kernel space. All
+memory accesses and function calls in BPF programs are statically checked
+for safety using the in-kernel verifier, which
+analyzes programs in their entirety before allowing them to be loaded.
+While this allows the kernel to safely run BPF programs, it heavily
+restricts what those programs are able to do. Among these
+constraints is a rule that programs cannot store pointers into BPF maps for
+use (such as dereferencing them or passing them to the kernel in
+<a href="/Articles/856005/">kfunc</a> and BPF helper invocations) at a
+later time. A
+<a href="/ml/bpf/20220424214901.2743946-1-memxor@gmail.com/">patch set by
+Kumar Kartikeya Dwivedi</a> adds this capability to BPF.
+
+<h4>Interacting with kernel pointers in BPF programs</h4>
+
+<p>Some operations are always safe to execute from within BPF. For example, the
+<tt>bpf_probe_read_user()</tt> and <tt>bpf_probe_read_kernel()</tt>
+helpers allow BPF programs to
+safely read user and kernel memory respectively by registering a page-fault
+handler to catch any faulting accesses. When BPF programs receive pointers
+from event handlers, for example, they can safely dereference them without
+having to worry about whether they will cause a crash, though they do
+have to ensure that the read succeeded by checking the returned error code.
+
+<p>BPF programs can also receive pointers from BPF helpers and
+kfuncs. BPF helpers are functions defined in the  kernel that provide
+the core APIs that can be invoked by any BPF program.
+Kfuncs are also functions in the  kernel that can be invoked by BPF
+programs but, unlike BPF helpers, their APIs do not need to be
+applicable to all types of BPF programs. To make a function available to
+BPF programs as a kfunc, it must be aggregated into one or
+more <a href="https://docs.kernel.org/bpf/btf.html">BPF Type Format (BTF)</a>
+kfunc-sets, which are then registered with the BPF subsystem.
+<p>
+Kfunc-sets
+can also specify properties about their kfuncs that inform the verifier
+about how they need to be invoked in order to ensure safe execution in BPF
+programs.  One such property specifies that the kfuncs in a
+kfunc-set will return an "acquired" pointer that must be passed to another
+kfunc that is part of a kfunc-set that can release it.  Pointers that are
+subject to this constraint are called "referenced pointers" within the BPF
+community. 
+<p>
+When loading BPF programs, the verifier will enforce this contract, and
+reject any program that fails to release a referenced pointer before
+returning, or which passes a pointer that was not previously returned as
+a referenced pointer to a BPF helper or kfunc.  Note that the implementation
+of the "acquire" and "release" semantics of a kfunc is completely opaque to
+BPF, and is entirely up to the developer implementing the kfunc. The only
+thing that BPF requires is a guarantee that an acquired pointer will remain
+valid until it is released.
+
+<h4>Extending BPF usability with referenced pointers</h4>
+
+<p>The ability to ensure that a kernel pointer is valid affords
+several advantages to BPF programs. The first and perhaps most
+straightforward is that BPF programs no longer need to use probed reads to
+dereference the pointers. Probed reads use the <a
+href="https://www.kernel.org/doc/html/latest/x86/exception-tables.html">exception
+table</a>
+mechanism used to safely read user memory from kernel space, and while they
+have nearly the same performance as a normal load instruction for
+successful reads, they impose a tax on the programmer by requiring them to
+always check if a read was successful. Avoiding probed reads allows a
+simpler programming model which can significantly cut down on the raw
+amount of code needed in BPF programs to satisfy the verifier.
+
+<p>In addition to providing simplification, referenced pointers also improve
+the extensibility of BPF by allowing BPF programs to safely pass those
+pointers back to the  kernel in subsequent kfunc and BPF helper
+function invocations. While the  kernel could use a mechanism such as
+<tt>copy_from_user()</tt> to read pointers received from BPF programs, it is less
+complex and less error prone to, instead, provide a guarantee to the kernel
+that pointers received from BPF programs are safe to read.  This guarantee
+also makes it possible to export many internal kernel functions to BPF
+programs without modifying them.
+
+<p>While referenced pointers are a powerful tool for extending the
+kernel using BPF, a
+significant limitation of the feature is the requirement that all of the
+interactions between BPF programs and kfuncs take place in a
+synchronous context. Every time it needs to get a referenced pointer from
+the kernel,
+a BPF program must invoke a kfunc, and then release the pointer in another
+kfunc invocation before returning. This may have performance implications,
+as having to call two kfuncs is quite a lot of overhead relative to
+performing a single memory read. This workflow is also somewhat orthogonal
+to the traditional mechanics of reference counting, wherein pointers are stored in
+a data structure with the intention of being safely accessed at a later
+time. What would instead be useful is to store kernel pointers in a map, 
+allowing them to be accessed whenever the program requires, possibly over
+multiple separate calls.
+
+<h4>kptrs – storing kernel pointers in BPF maps</h4>
+
+<p>
+Dwivedi's patch set adds this capability via a new feature called "kptrs". 
+A kptr is a strongly typed pointer that is received from a kfunc
+or BPF helper function and which may be stored into and retrieved from BPF
+maps throughout the run time of a program. Kptrs may be either
+ordinary ("unreferenced") or referenced pointers. Unreferenced kptrs have
+no guarantee of validity and are highly restricted
+in how they can be used; like normal pointers in BPF programs, they can only
+be accessed using a probed read. They also cannot be passed to the 
+kernel via a kfunc or BPF helper function, as the pointers may reference
+invalid memory. Referenced kptrs, on the other hand, may be safely
+dereferenced by BPF programs, and passed to the  kernel via kfunc or
+BPF helper function invocations.
+
+<p>From the BPF subsystem's point of view,
+a referenced kptr always has exactly one reference associated with it. In
+order to transfer a referenced kptr between different contexts, a new
+<tt>bpf_kptr_xchg()</tt> helper function was
+<a href="https://lwn.net/ml/bpf/20220424214901.2743946-4-memxor@gmail.com/">added</a>
+that atomically swaps ownership of the reference between a map value and a
+local pointer. If the reference is transferred from a map value to a local
+pointer, the semantics enforced by the verifier are the same as for
+references returned by kfuncs in a synchronous context: the verifier will
+ensure that the reference is either transferred back to a map value or
+released via a call to a kfunc before the current execution context
+returns. On the other hand, if the kptr reference is stored in a map, the
+current execution context can safely return without releasing it.
+<p>
+If the
+kptr is never transferred back out of the map with <tt>bpf_kptr_xchg()</tt> and
+manually released, it will be automatically released when the program is
+unloaded and the map is destroyed. In order to enable this automatic
+releasing mechanism, Dwivedi
+<a href="https://lwn.net/ml/bpf/20220424214901.2743946-8-memxor@gmail.com/">extended</a>
+the kfunc subsystem to allow developers to specify a kfunc destructor
+function that should be used for a given type.
+
+<p>Some of the
+use cases for kptrs were discussed in an <a href="/ml/netdev/20220220134813.3411982-1-memxor@gmail.com/">earlier
+revision</a>
+of the patch set, with Dwivedi describing the most common one as being for
+performance:
+
+<blockquote class="bq">
+	The common use case is caching references to objects inside BPF
+	maps, to avoid costly lookups, and being able to raise it once for
+	the duration of program invocation when passing it to multiple
+	helpers (to avoid further re-lookups).
+</blockquote>
+
+<p>Storing a referenced kptr in a map obviates the
+need to invoke
+a kfunc every time the pointer is required, which provides performance
+benefits and reduces complexity. BPF programs need only make an initial
+kfunc invocation to first get the pointer and, after storing it in a map,
+can simply load it from that map and
+dereference it directly when it's needed.
+
+<p>Referenced kptrs also provide strong safety and correctness guarantees
+to developers. 
+It is a ubiquitous paradigm in managed-object frameworks that a reference
+should only be owned by a single context, and the semantics of kptr
+reference handling bear a striking resemblance to
+<a href="https://doc.rust-lang.org/std/boxed/index.html"><tt>std::boxed::Box</tt></a> in Rust,
+and <a href="https://en.cppreference.com/w/cpp/memory/unique_ptr"><tt>std::unique_ptr</tt></a>
+in C++ in that regard. In Rust, a Box is a pointer to a heap allocation
+that can only have a single reference at any given time, and which is
+automatically freed when that reference goes out of scope. When the Rust
+program is compiled, the Rust compiler will verify that only a single
+reference can ever exist to the Box by applying Rust's <a href="https://doc.rust-lang.org/book/ch04-00-understanding-ownership.html">ownership
+model</a>.
+If the Rust program compiles, you have a guarantee that the memory pointed
+to by a Box is always valid and only has a single reference. In C++,
+some verification takes place at compile time by, for example, prohibiting
+an <tt>std::unique_ptr</tt> from being copied, but problems can still arise at
+run time. For example, a user could invoke
+<a href="https://en.cppreference.com/w/cpp/memory/unique_ptr/release"><tt>std::unique_ptr::release()</tt></a>
+twice, and would receive a <tt>nullptr</tt> on the second invocation.
+
+<p>Kptrs seem to draw inspiration from both languages. On the one hand, the
+BPF verifier provides the compile-time guarantees that are
+afforded by the Rust compiler by analyzing BPF programs to ensure that
+there is only ever a single owner of a reference, and that the reference
+can never be leaked. On the other hand, <tt>bpf_kptr_xchg()</tt> closely matches the
+semantics of
+<a href="https://en.cppreference.com/w/cpp/memory/unique_ptr/swap"><tt>std::unique_ptr::swap()</tt></a>,
+so the mechanics of using the feature will feel more like
+C++. Managed-object leaks and use-after-free bugs are a common and
+pervasive source of pain 
+when correct accounting is the responsibility of individual developers.
+Providing the guarantees of Rust's ownership model, and the semantics of
+C++'s <tt>std</tt>::unique_ptr APIs, to C and kernel development using BPF and the
+verifier therefore seems powerful indeed.
+
+<p>It will be interesting to see if the advantages afforded by these features
+will motivate more development to take place in BPF as opposed to the 
+kernel.
+
+<h4>Future kptr types</h4>
+
+<p>While we have been referring to both unreferenced kptrs and referenced
+kptrs as just "kptrs", they are actually represented as two different types
+in BTF. If BPF programs wish to use a kernel pointer as an unreferenced or
+a referenced pointer, they must annotate it with the BTF type tag "<tt>kptr</tt>" or
+"<tt>kptr_ref</tt>" respectively. It makes sense to enforce separate types for each
+kptr variant, as the verifier needs to use BTF to know a kptr's type, and
+then enforce its safe use accordingly.
+
+<p>While the current implementation of kptrs only enables the unreferenced and
+referenced variants, a natural question is whether the
+implementation could be expanded to include other types of pointers as
+well. In the first version
+of the patch set, Dwivedi proposed adding variants for per-CPU and user-space
+kptrs. Alexei Starovoitov
+<a href="https://lwn.net/ml/bpf/20220319183028.pwzaoz2qogek6nwz@ast-mbp.dhcp.thefacebook.com">responded</a>
+by asking what the use case was for storing per-CPU pointers in maps, but
+<a
+href="https://lwn.net/ml/bpf/20220319190409.7n3bkjdp67finojx@apollo">Dwivedi
+did not have</a> a
+concrete use case in mind. It was
+<a href="https://lwn.net/ml/bpf/20220319212620.vbzfxsn2xitkzv5t@ast-mbp.dhcp.thefacebook.com/">decided</a>
+to drop the feature until a more concrete use case appears, so
+for now we will have to wait and see if that happens
+
+<p>
+This patch set is currently in linux-next, and so will presumably be merged
+during the next development cycle.
+In the meantime, it will be interesting to see how kfuncs and kptrs will be
+used to extend the kernel in ways that currently are not possible with
+BPF.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#BPF">BPF</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Vernet_David">Vernet, David</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/900749/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor901218"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Long-lived kernel pointers in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2022 14:32 UTC (Thu)
+                               by <b>adamgundy</b> (subscriber, #5418)
+                              [<a href="/Articles/901218/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      sed 's/ktprs/kptrs/g'
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/901218/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor901226"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Typo fixes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2022 14:41 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/901226/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Fixed...that was a silly mistake to let through, apologies.
+<p>
+That said, surely somebody who has been on LWN as long as you have knows not to clutter up the comment stream with typo reports?  Sending them to <tt>lwn@lwn.net</tt> makes life better for everybody involved.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/901226/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor901227"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Typo fixes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2022 14:45 UTC (Thu)
+                               by <b>adamgundy</b> (subscriber, #5418)
+                              [<a href="/Articles/901227/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Probably. Couldn't remember the email off the top of my head, so.. feel free to delete. After also doing this: sed 's/ktpr/kptr/g'
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/901227/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor901238"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Typo fixes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2022 16:28 UTC (Thu)
+                               by <b>madscientist</b> (subscriber, #16861)
+                              [<a href="/Articles/901238/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No need to remember anything.  When you click the &quot;Reply to this comment&quot; button the text just above the comment subject line says:<br>
+<p>
+<font class="QuotedText">&gt; Please do NOT post typos in the article as comments, send them to lwn@lwn.net instead.</font><br>
+<p>
+What does it take to do that fancy thing where the comment entry space itself contains this text but it automatically disappears when you start typing in it?  Does that require JS magic?  If not too onerous maybe that&#x27;s a solution that would help.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/901238/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor901242"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Typo fixes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2022 16:44 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/901242/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      The magic text is just the <tt>placeholder=</tt> HTML attribute — no JavaScript required.  Putting the text there isn't a bad idea, thanks.
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/901242/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor901245"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Typo fixes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2022 16:58 UTC (Thu)
+                               by <b>atai</b> (subscriber, #10977)
+                              [<a href="/Articles/901245/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+hoe about some AI to be able to automatically redirect comments about typos to your email<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/901245/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor901247"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Typo fixes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 14, 2022 17:09 UTC (Thu)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/901247/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I would like an option to add a ‘private comment’ that only the lwn editors can see. Believe it or not, not everyone has a reliable email service in this day and age. <br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/901247/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor901425"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Long-lived kernel pointers in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 15, 2022 15:17 UTC (Fri)
+                               by <b>droundy</b> (subscriber, #4559)
+                              [<a href="/Articles/901425/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+`bpf_kptr_xchg()` also bears a striking resemblance to `std::mem:: replace` in rust.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/901425/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor901540"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Long-lived kernel pointers in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 16, 2022 20:37 UTC (Sat)
+                               by <b>amarao</b> (subscriber, #87073)
+                              [<a href="/Articles/901540/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I can&#x27;t get away from some odd Rusty feelings here.<br>
+<p>
+Is it `std::mem::swap`? <a href="https://doc.rust-lang.org/std/mem/fn.swap.html">https://doc.rust-lang.org/std/mem/fn.swap.html</a><br>
+<p>
+And &#x27;probe read&#x27; is oddly similar to `Option.unwrap_or...` functions, you need to carefully &#x27;extract&#x27; value from Option before you can use it.<br>
+<p>
+Whole &#x27;single ownership&#x27; model is visible here. And `must_use` attribute is here too. <a href="https://doc.rust-lang.org/reference/attributes/diagnostics.html#the-must_use-attribute">https://doc.rust-lang.org/reference/attributes/diagnostic...</a><br>
+<p>
+Nevertheless, reference pointers are even more strict, because you can&#x27;t use `drop` for them. Should Rust consider such types too? Linear, I believe?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/901540/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor901562"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Long-lived kernel pointers in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 17, 2022 13:04 UTC (Sun)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/901562/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Should Rust consider such types too? Linear, I believe?</font><br>
+<p>
+Yes, that&#x27;d be linear types. However, in Rust it is safe to not call Drop on a type (i.e., you cannot rely on Drop for your type&#x27;s safety guarantees), so linear types would be something completely new. It comes up occasionally, but I doubt they&#x27;d be something that could be added at this point.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/901562/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor901569"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Long-lived kernel pointers in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 17, 2022 16:20 UTC (Sun)
+                               by <b>amarao</b> (subscriber, #87073)
+                              [<a href="/Articles/901569/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I fantasized a bit how linear types may look like in Rust. The obvious idea is opting out of Drop trait (like with `?Sized`). If you have a type which has no &#x27;Drop&#x27; trait, it can&#x27;t be `dyn`&#x27;ed, and compiler may enforce that type without &#x27;Drop&#x27; trait must be passed to &#x27;somewhere else&#x27;. In this &#x27;somewhere else&#x27; there is unsafe (?) section which transmute type from not having Drop to having it.<br>
+<p>
+So, from code user perspective it would be like:<br>
+<p>
+fn create_linear&lt;T&gt; (...) -&gt; T, where T: ?Drop;<br>
+<p>
+and<br>
+<p>
+fn use_linear&lt;T&gt;(t: T);<br>
+<p>
+<p>
+// I&#x27;m not even close to be a Rust developer so I don&#x27;t know if this sound or not. But idea if that `?Drop` if type live till the end of scope, that&#x27;s an error.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/901569/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor902295"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Long-lived kernel pointers in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2022 0:30 UTC (Sun)
+                               by <b>tbelaire</b> (subscriber, #141140)
+                              [<a href="/Articles/902295/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I like the idea, some kind of explicit drop trait. <br>
+<p>
+However what about moving the value to a static variable and basically forgetting it?  Or RC cycle?  Or move to a thread which deadlocks or just loops forever?<br>
+Or move everything else to a new thread and spin forever on the current thread?<br>
+<p>
+<p>
+I think these are the kind of issues drop ran into.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/902295/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor902354"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Long-lived kernel pointers in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2022 0:49 UTC (Mon)
+                               by <b>raof</b> (subscriber, #57409)
+                              [<a href="/Articles/902354/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      This is (or, at least, was) a pretty common request; <a href="https://gankra.github.io/blah/linear-rust/">Gankra's blog post</a> is the last thing I remember seeing about it.
+<p>
+The summary is roughly “this is easy to implement in the compiler, but would require wide ecosystem changes to be usable, and any reasonable implementation will still have dynamic checks so maybe it's not worth it?”
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/902354/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor902302"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Long-lived kernel pointers in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2022 6:00 UTC (Sun)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/902302/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;It will be interesting to see if the advantages afforded by these features will motivate more development to take place in BPF as opposed to the kernel.</font><br>
+<p>
+I suppose one would need to be able to compile and bundle BPF code for inclusion in the kernel image and with automatic loading.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/902302/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,978 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Atomic context and kernel API design [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/274695/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/274215/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/274695/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Atomic context and kernel API design</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Please consider subscribing to LWN</b>
+<p>
+Subscriptions are the lifeblood of LWN.net.  If you appreciate this
+content and would like to see more of it, your subscription will
+help to ensure that LWN continues to thrive.  Please visit
+<a href="/Promo/nst-nag1/subscribe">this page</a> to join up and keep LWN on
+the net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 25, 2008</br>
+           </div>
+An API should refrain from making promises that it cannot keep.  A recent
+episode involving the kernel's <tt>in_atomic()</tt> macro demonstrates how
+things can go wrong when a function does not really do what it appears to
+do.  It is also a good excuse to look at an under-documented (but
+fundamental) aspect of kernel code design.
+<p>
+Kernel code generally runs in one of two fundamental contexts.  Process
+context reigns when the kernel is running directly on behalf of a (usually)
+user-space process; the code which implements system calls is one example.
+When the kernel is running in process context, it is allowed to go to sleep
+if necessary.  But when the kernel is running in atomic context, things
+like sleeping are not allowed.  Code which handles hardware and software
+interrupts is one obvious example of atomic context.  
+<p>
+
+There is more to it than that, though: any kernel function moves into
+atomic context the moment it acquires a spinlock.  Given the way spinlocks
+are implemented, going to sleep while holding one would be a fatal error;
+if some other kernel function tried to acquire the same lock, the system
+would almost certainly deadlock forever.  
+<p>
+
+"Deadlocking forever" tends not to appear on users' wishlists for the
+kernel, so the kernel developers go out of their way to avoid that
+situation.  To that end, code which is running in atomic context carefully follows a
+number of rules, including (1)&nbsp;no access to user space, and,
+crucially, (2)&nbsp;no sleeping.  Problems can result, though, when a
+particular kernel function does not know which context it might be invoked
+in.  The classic example is <tt>kmalloc()</tt> and friends, which take an
+explicit argument (<tt>GFP_KERNEL</tt> or <tt>GFP_ATOMIC</tt>) specifying
+whether sleeping is possible or not.
+<p>
+
+The wish to write code which can work optimally in either context is
+common, though.  Some developers, while trying to write such code, may well
+stumble across the following definitions from
+<tt>&lt;linux/hardirq.h&gt;</tt>:
+<p>
+<pre>
+    /*
+     * Are we doing bottom half or hardware interrupt processing?
+     * Are we in a softirq context? Interrupt context?
+     */
+    #define in_irq()	   (hardirq_count())
+    #define in_softirq()   (softirq_count())
+    #define in_interrupt() (irq_count())
+
+    #define in_atomic()	   ((preempt_count() &amp; ~PREEMPT_ACTIVE) != 0)
+</pre>
+<p>
+It would seem that <tt>in_atomic()</tt> would fit the bill for any
+developer trying to decide whether a given bit of code needs to act in an
+atomic manner at any specific time.  A quick grep through the kernel
+sources shows that, in fact, <tt>in_atomic()</tt> has been used in quite a
+few different places for just that purpose.
+There is only one problem: those uses are almost certainly all wrong.  
+<p>
+
+The <tt>in_atomic()</tt> macro works by checking whether preemption is
+disabled, which seems like the right thing to do.  Handlers for events like
+hardware interrupts will disable preemption, but so will the
+acquisition of a spinlock.  So this test appears to catch all of the cases
+where sleeping would be a bad idea.  Certainly a number of people who have
+looked at this macro have come to that conclusion.
+<p>
+But if preemption has not been configured into the kernel in the first
+place, the kernel does not raise the "preemption count" when spinlocks are
+acquired.  So, in this situation (which is common - many distributors still
+do not enable preemption in their kernels), <tt>in_atomic()</tt> has no way
+to know if the calling code holds any spinlocks or not.  So it will return
+zero (indicating process context) even when spinlocks are held.  And that
+could lead to kernel code thinking that it is running in process context
+(and acting accordingly) when, in fact, it is not.  
+
+<p>
+Given this problem, one might well wonder why the function exists in the
+first place, why people are using it, and what developers can really do to
+get a handle on whether they can sleep or not.  Andrew Morton <a
+href="/Articles/274699/">answered the first question</a> in a relatively
+cryptic way:
+<p>
+<div class="BigQuote">
+	in_atomic() is for core kernel use only.  Because in special
+	circumstances (ie: kmap_atomic()) we run inc_preempt_count() even
+	on non-preemptible kernels to tell the per-arch fault handler that
+	it was invoked by copy_*_user() inside kmap_atomic(), and it must
+	fail.
+</div>
+<p>
+In other words, <tt>in_atomic()</tt> works in a specific low-level
+situation, but it was never meant to be used in a wider context.  Its
+placement in <tt>hardirq.h</tt> next to macros which <i>can</i> be used
+elsewhere was, thus, almost certainly a mistake.  As <a
+href="/Articles/274701/">Alan Stern pointed out</a>, the fact that <i>Linux
+Device Drivers</i> recommends the use of <tt>in_atomic()</tt> will not have
+helped the situation.  Your editor recommends that the authors of that book
+be immediately sacked.
+<p>
+Once these mistakes are cleared up, there is still the question of just
+how kernel code should decide whether it is running in an atomic context or
+not.  The real answer is that it just can't do that.  <a
+href="/Articles/274703/">Quoting Andrew Morton</a> again:
+<p>
+<div class="BigQuote">
+	 The consistent pattern we use in the kernel is that callers keep
+	 track of whether they are running in a schedulable context and, if
+	 necessary, they will inform callees about that.  Callees don't
+	 work it out for themselves.
+</div>
+<p>
+This pattern <i>is</i> consistent through the kernel - once again, the GFP_
+flags example stands out in this regard.  But it's also clear that this practice has
+not been documented to the point that kernel developers understand that
+things should be done this way.  Consider <a
+href="http://ozlabs.org/~rusty/index.cgi/2008/03/18#2008-03-18">this recent
+posting</a> from Rusty Russell, who understands these issues better than
+most:
+<p>
+<div class="BigQuote">
+	This flag indicates what the allocator should do when no memory is
+	immediately available: should it wait (sleep) while memory is freed
+	or swapped out (GFP_KERNEL), or should it return NULL immediately
+	(GFP_ATOMIC). And this flag is entirely redundant: kmalloc() itself
+	can figure out whether it is able to sleep or not.
+</div>
+<p>
+In fact, <tt>kmalloc()</tt> cannot figure out on its own whether sleeping
+is allowable or not.  It has to be told by the caller.  This rule is
+unlikely to change, so expect a series of <tt>in_atomic()</tt> removal
+patches starting with 2.6.26.  Once that work is done, the
+<tt>in_atomic()</tt> macro can be moved to a safer place where it will not
+create further confusion.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#in_atomic">in_atomic()</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Spinlocks">Spinlocks</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/274695/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor274862"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 18:00 UTC (Tue)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/274862/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Hmm... if in_atomic only has one or two narrow, valid uses, perhaps it shouldn't be a macro at
+all?  Either a small, static function in the one source file that uses it?  GCC will still
+inline it, but the static declaration would send the signal "not for outside consumption."
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274862/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274882"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 19:04 UTC (Tue)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/274882/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Indeed, you might ask why use macros at all for this kind of thing, when compiler-inlined
+functions are just as efficient?
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274882/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor274891"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 19:40 UTC (Tue)
+                               by <b>IkeTo</b> (subscriber, #2122)
+                              [<a href="/Articles/274891/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Perhaps that "one or two narrow, valid uses" are in different files?
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274891/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274897"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 19:59 UTC (Tue)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/274897/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Hmmm... it looks like something to be called by a "per-arch" files, so even "one use" actually
+lives in multiple files. :-)
+
+I guess it belongs in a header, but I still wonder if it shouldn't have a different name.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274897/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274923"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 22:51 UTC (Tue)
+                               by <b>jd</b> (guest, #26381)
+                              [<a href="/Articles/274923/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Perhaps instead of changing the name, change the macro so that it means what it says at all levels. Different calling files set a different value to some symbol, which indicates to the header which type of atomic context you're thinking about.
+<p>
+Then all you need do is ensure that (a) there's a way to know whether the context is atomic or not, and (b) the same method is used across that file and across any includes that may be brought in by that file.
+<p>
+Alternatively, you could have two parallel kernels, one always atomic, the other always not. Then you'd never need to test at all. Although you would have the communications problem from hell that all parallel solutions suffer from.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274923/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274928"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 23:54 UTC (Tue)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/274928/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+If you follow Andrew Morton's reasoning, "am I in atomic" is something a caller should never
+ask.  It should be told explicitly, as in the case of kmalloc().
+
+The case where "in_atomic" is getting used "legitimately" is in a fault handler (which should
+not be a fastpath pretty much by definition).  It sounds like they're abusing preempt_count to
+coax a particular behavior out of the fault handler, rather than just stating the intended
+behavior directly.  That doesn't necessarily sound like clean design to me, but rather an
+overly clever hack.
+
+I'm sure someone more familiar with this mechanism can explain why it is or is not a good
+mechanism.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274928/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor274895"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Own kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 19:48 UTC (Tue)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/274895/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+I guess this argues for building your kernels with pre-emption enabled, at least until 2.4.26.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274895/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274919"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Own kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 21:58 UTC (Tue)
+                               by <b>cventers</b> (guest, #31465)
+                              [<a href="/Articles/274919/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+2.4.26 has been out for a while :p
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274919/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor274900"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 20:10 UTC (Tue)
+                               by <b>vmole</b> (guest, #111)
+                              [<a href="/Articles/274900/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p><i>Your editor recommends that the authors of that book be immediately sacked.</i>
+
+<p>I think they should just re-write it in an entirely different style at great expense and at the last minute.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274900/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274906"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 20:37 UTC (Tue)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/274906/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+what you are missing is that I remember correctly our editor is one of the authors.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274906/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274909"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 20:46 UTC (Tue)
+                               by <b>vmole</b> (guest, #111)
+                              [<a href="/Articles/274909/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Uh, no. What you missed is the Python reference.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274909/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274914"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 21:40 UTC (Tue)
+                               by <b>pr1268</b> (subscriber, #24648)
+                              [<a href="/Articles/274914/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>I think you both are correct - IIRC our editor was/is an author <i>and</i> there's a Monty Python reference.</p>
+
+<p>I must say, I do admire our editor's integrity in this matter.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274914/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274931"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 23:52 UTC (Tue)
+                               by <b>vomlehn</b> (guest, #45588)
+                              [<a href="/Articles/274931/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+There are many cases where admitting you are wrong and suggesting a punishment preempts
+someone else suggesting a more suitable punishment. I'm suggesting flogging is a suitable
+punishment. Well, not really, I was just caught up in the entertainment value of a good
+flogging. 
+
+In reality, writing is a severe form of self-flagellation and I am grateful our editor
+subjected himself to it. I first bought the Second Edition of Lunux Device Drivers, bought the
+Third Edition as soon as I saw it was out, and will buy the Fourth Edition as soon as I learn
+of its existence.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274931/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor274907"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 20:42 UTC (Tue)
+                               by <b>allesfresser</b> (guest, #216)
+                              [<a href="/Articles/274907/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Bring in the wonder llama consultants.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274907/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274913"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 25, 2008 21:33 UTC (Tue)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/274913/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Paging Jeff Minter...
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274913/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor276066"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2008 0:35 UTC (Wed)
+                               by <b>roelofs</b> (guest, #2599)
+                              [<a href="/Articles/276066/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Please don't forget the majestik m&oslash;&oslash;se...
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/276066/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor274961"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 26, 2008 3:24 UTC (Wed)
+                               by <b>kjp</b> (guest, #39639)
+                              [<a href="/Articles/274961/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+What the hell does GFP stand for?
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274961/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274971"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What is the meaning of GFP</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 26, 2008 5:42 UTC (Wed)
+                               by <b>pr1268</b> (subscriber, #24648)
+                              [<a href="/Articles/274971/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>My guess is &quot;Get Free Page&quot; (with various qualifier suffixes, i.e. GFP_KERNEL, GFP_ATOMIC, GFP_DMA, etc.).</p>
+
+<p>It's strange that, after nearly an hour of grepping files throughout the entire Linux source tree, I was unable to come up with a meaning.  My search took me all over the mm/, include/linux/, Documentation/, and kernel/ directories, but to no avail.  The meaning of GFP_KERNEL via a Google search (going five pages deep) was equally elusive!</p>
+
+<p>I suppose there are many kernel developers out there who know its true meaning whilst snickering over my frustrated search...</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274971/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274983"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What is the meaning of GFP</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 26, 2008 8:55 UTC (Wed)
+                               by <b>dale77</b> (guest, #1490)
+                              [<a href="/Articles/274983/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+<a href="http://lwn.net/Articles/23042/">http://lwn.net/Articles/23042/</a>
+
+Oops. But that is the guy who wrote about that in_atomic ref. Perhaps we need another opinion
+;-)
+
+Just kidding. Keep up the good work corbet.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274983/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274984"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Get Free Page</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 26, 2008 10:02 UTC (Wed)
+                               by <b>pr1268</b> (subscriber, #24648)
+                              [<a href="/Articles/274984/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>I was right!  And to think I extrapolated &quot;get free page&quot; from the context of where I found a bunch of <font face="monospace">GFP_</font>* macros in my search.  Thank you, Dale77.</p>
+
+<p>For those with further interest, the <font face="monospace">GFP_</font>* macros appear to be a set of bitmasks, many of which are defined as bitwise-ORed versions of others (ref. &lt;Linux source&gt;/include/kernel/gfp.h).  These are used to set parameters to allocating virtual memory (and what to do in case of failure).  But, I'm certain a lot of LWN readers already know this.</p>
+
+<p>I have  a lot to learn about the internal workings of the Linux kernel, as well as my online search skills--I'm certain a search here at LWN would have led me to that link.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274984/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor274993"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Get Free Page</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 26, 2008 12:08 UTC (Wed)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/274993/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Google's "site:" feature is very handy.  For example, to search just LWN, put "site:lwn.net" at the start of your search string, <A HREF="http://www.google.com/search?q=site%3Alwn.net+GFP">like this.</A>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/274993/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor275664"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What is the meaning of GFP</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 31, 2008 7:43 UTC (Mon)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/275664/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Well on Windows you get General Protection Faults, in Linux it must therefore be General Fault
+Protection :-)
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/275664/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor275663"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 31, 2008 7:41 UTC (Mon)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/275663/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p><i>Atomic context and kernel API design<br />
+By Jonathan Corbet<br />
+March 25, 2008<br />
+[...]<br />
+Your editor recommends that the authors of that book be immediately sacked.</i></p>
+
+<p>Now who are the authors of that book... <code>:-)</code></p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/275663/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor275874"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kmalloc cannot figure out whether sleeping is allowable or not</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 1, 2008 0:02 UTC (Tue)
+                               by <b>rusty</b> (guest, #26)
+                              [<a href="/Articles/275874/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+<font class="QuotedText">&gt; In fact, kmalloc() cannot figure out on its own whether sleeping is</font>
+<font class="QuotedText">&gt; allowable or not...</font>
+
+You are (of course) correct.  Damn, but it was such a beautiful example; 
+the same one I used in 2003 in my OLS keynote, and noone spotted it then 
+either.
+
+Thanks,
+Rusty.
+
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/275874/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor276067"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">kmalloc cannot figure out whether sleeping is allowable or not</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 2, 2008 0:54 UTC (Wed)
+                               by <b>roelofs</b> (guest, #2599)
+                              [<a href="/Articles/276067/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <FONT COLOR="#008844"><I>Damn, but it was such a beautiful example; 
+the same one I used in 2003 in my OLS keynote, and noone spotted it then 
+either.</I></FONT>
+
+<P>
+At least you're in good company. ;-)
+
+<P>
+A somewhat analogous "discovery" involved the thread-(non)safety of the
+double-checked locking pattern in C++, which various people (possibly including Scott <I>Effective C++</I> Meyers himself) espoused for some years prior to the publication of an <A HREF="http://www.aristeia.com/Papers/DDJ_Jul_Aug_2004_revised.pdf"
+>article describing its problems</A> [PDF].
+
+<P>
+Greg
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/276067/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor276785"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 7, 2008 7:30 UTC (Mon)
+                               by <b>AnotherAnon</b> (guest, #51448)
+                              [<a href="/Articles/276785/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment"><pre>
+Couldn't this be problematic in the case of systems that use intrusion detection? One
+technique that I am familar with is the use of MD5 sums of system binaries, to check if they
+have been tampered with. Directly modifying binaries would make this prefetch technique
+incompatible with systems that do MD5 checking.
+</pre></div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/276785/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor606382"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Atomic context and kernel API design</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2014 23:28 UTC (Wed)
+                               by <b>xiay</b> (guest, #98011)
+                              [<a href="/Articles/606382/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why not just make spin_lock() increase preempt_count nevertheless?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/606382/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2008, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

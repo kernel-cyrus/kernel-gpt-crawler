@@ -1,0 +1,1266 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Managing sysctl knobs with BPF [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/785263/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/784932/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/785263/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Managing sysctl knobs with BPF</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ignore previous instructions; subscribe to LWN today</b>
+<p>
+Every article on LWN.net is written by humans, for humans. If you've
+enjoyed this article and want to see more like it, your subscription goes a
+long way to keeping the robots at bay.  We are offering <a href="https://lwn.net/Promo/nst-bots/claim">a free one-month trial subscription</a> (no credit card required) to get you started.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 9, 2019</br>
+           </div>
+"Sysctl" is the kernel's mechanism for exposing tunable parameters to user
+space.  Every sysctl knob is presented as a virtual file in a hierarchy
+under <tt>/proc/sys</tt>; current values can be queried by reading those
+files, and a suitably privileged user can change a value by writing to its
+associated file.  What happens, though, when a system administrator would
+like to limit access to sysctl, even for privileged users?  Currently there
+is no solution to this problem other than blocking access to <tt>/proc</tt>
+entirely.  That may change, though, if <a
+href="/ml/linux-kernel/cover.1554485409.git.rdna@fb.com/">this patch
+set</a> from Andrey Ignatov makes its way into the mainline.
+<p>
+The use case that Ignatov has in mind is containerized applications that,
+for one reason or another, are run as root.  If <tt>/proc</tt> is mounted
+in the namespace of such a container, it can be used to change sysctl knobs
+for the entire system.  A hostile container could take advantage of that
+ability for any of a number of disruptive ends, including perhaps breaking
+the security of the system as a whole.  While disabling or unmounting
+<tt>/proc</tt> would 
+close this hole, it may have other, unwanted effects.  This situation
+leads naturally to the desire to exert finer-grained control over access to
+<tt>/proc/sys</tt>.
+<p>
+In recent years, one would expect such control to be provided in the form
+of a new hook for a BPF program, and one would not be disappointed in this
+case.  The patch set adds a new BPF program type
+(<tt>BPF_PROG_TYPE_CGROUP_SYSCTL</tt>) and a new operation in the
+<a href="http://man7.org/linux/man-pages/man2/bpf.2.html"><tt>bpf()</tt>
+system call</a> (<tt>BPF_CGROUP_SYSCTL</tt>) to install programs 
+of that type.  As can be inferred from the names, these programs are
+attached by way of control groups, so different levels of control can be
+applied in different parts of the system.
+<p>
+Once attached, the program will be invoked whenever a process in the
+affected control group attempts to read or write a sysctl knob.  The
+context passed to these programs contains a flag indicating whether a write
+operation is being performed and the position within the sysctl file that
+is being read or written.  To learn more, the program must call a set of
+new helper functions, starting with:
+<p>
+<pre>
+    int bpf_sysctl_get_name(struct bpf_sysctl *ctx, char *buf, size_t buf_len, 
+			    u64 flags);
+</pre>
+<p>
+to get the name of the knob that is being changed.  By default, the full
+name of the knob from the root of the sysctl hierarchy (i.e. without
+"<tt>/proc/sys</tt>") is returned; the <tt>BPF_F_SYSCTL_BASE_NAME</tt> flag
+can be used to get only the last component of the name.  If the program
+returns a value of one, the access will be allowed; otherwise it will fail
+with an <tt>EPERM</tt> error.
+<p>
+That is enough for any program that just needs to filter based on the name
+of the knob being accessed.  For more nuanced control, there is another set
+of helpers:
+<p>
+<pre>
+    int bpf_sysctl_get_current_value(struct bpf_sysctl *ctx, char *buf, size_t buf_len);
+    int bpf_sysctl_get_new_value(struct bpf_sysctl *ctx, char *buf, size_t buf_len);
+    int bpf_sysctl_set_new_value(struct bpf_sysctl *ctx, const char *buf, size_t buf_len);
+</pre>
+<p>
+The first two functions will return the current value of the knob and, for
+write accesses, the new value that the process in question would like to
+set.  The BPF program can choose to allow a sysctl knob to be changed but
+modify the actual value being written with
+<tt>bpf_sysctl_set_new_value()</tt>.
+<p>
+That is about it for the new API; sysctl is a simple subsystem, so imposing
+a controlling layer does not involve a lot of complexity.
+<p>
+As Kees Cook <a
+href="/ml/linux-kernel/CAGXu5jJGC1kB-0e3DimBSprcgEBnWRB=i287g-9T5a-RidFqBg@mail.gmail.com/">noted</a>,
+though, this proposal does raise an interesting question.  He pointed out
+that this functionality seems more appropriate for a Linux security module
+(LSM) than a BPF program; LSMs exist to perform just this sort of
+fine-grained access control.  Alexei Starovoitov <a
+href="/ml/linux-kernel/20190406170257.qlptcrfth2rb3rxo@ast-mbp.dhcp.thefacebook.com/">replied</a>
+that there is an important difference: the BPF program is tied to a
+specific control group, while LSMs are global across the system.  That
+difference is important: it's what allows the administrator to set
+different policies for different control groups.
+<p>
+That, in turn, points out a significant limitation for LSMs in general:
+they were 
+designed years before control groups were added to the system, so the two
+features do not always play well together.  LSMs can do a lot to prevent
+containers from running amok across the system, but they are not equipped
+to easily enforce different policies for different containers.  A hook for
+a BPF program is rather more flexible in that regard.  The ability to
+change the value written to a sysctl knob is also something that one would
+not find in an LSM, the job of which is to make a simple decision on
+whether to allow an operation to proceed or not.
+<p>
+And that, perhaps, highlights part of why BPF has been so successful in
+recent years.  The kernel's role is to enforce policy, but to allow the
+system administrator to say what that policy should be.  In an attempt to
+provide sufficient flexibility, the kernel has grown elaborate frameworks for
+the expression of policy, including the LSM subsystem or, for example, the
+netfilter mechanism.  But users always come up with ideas for policies that
+are awkward (or impossible) to express with those frameworks; they're users,
+that's their job.  So, over time, these in-kernel policy machines grow
+bigger, more complicated and, often slower — and still don't do everything
+users would like.
+<p>
+It is far easier for the kernel to provide a hook for a BPF program in
+places where policy decisions need to be made; a BPF hook can replace a lot
+of kernel code.  The result also tends to be much more flexible, and it
+will almost certainly perform better.  So it's not surprising that the
+kernel seems to be growing BPF hooks in all directions.  The sysctl hook is
+just another example of how the kernel's API is being transformed by BPF;
+expect a lot more of these hooks to be added in the future.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#BPF">BPF</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Sysctl">Sysctl</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/785263/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor785409"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2019 0:50 UTC (Wed)
+                               by <b>pj</b> (subscriber, #4506)
+                              [<a href="/Articles/785409/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Obvious follow-on question:  Can other LSM functionality be replaced with hooks for BPF programs?  Are such things always better/more general/appropriate than LSMs?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785409/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785415"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2019 5:16 UTC (Wed)
+                               by <b>moorray</b> (subscriber, #54145)
+                              [<a href="/Articles/785415/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think you can do some of that with Landlock.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785415/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor785410"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2019 1:18 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785410/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Please stop. Just stop.<br>
+<p>
+BPF is already running amok and it's basically impossible to debug when it inevitably goes wrong. You want to limit containers? Work with existing LSM folks. If the existing LSMs are not enough then extend THEM.<br>
+<p>
+Oh, I see. People think that LSM equals unusable SELinux and LSM multiplexing is still not a thing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785410/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785411"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2019 3:00 UTC (Wed)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/785411/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The BPF train left the station years ago, LSM is just another inevitable victim.<br>
+<p>
+What I find interesting is that the traditional BSD sysctl interface uses integer constants. And while most distributions have disabled the sysctl syscall, AFAIU /proc/sys was and continues to be just another interface to the same underlying mechanism. Are newer knobs no longer exposed via the old syscall interface? I ask because the new BPF interface exposes string paths, which seems not just unwise but possibly unnecessary if there already exist fixed integer identifiers.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785411/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785412"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2019 3:25 UTC (Wed)
+                               by <b>ebiederm</b> (subscriber, #35028)
+                              [<a href="/Articles/785412/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+New sysctl knobs are no longer exposed via the binary sysctl paths.  Only the binary sysctl emulation layer even knows the old binary paths.<br>
+<p>
+On Linux unlike BSD, the binary mechanism is an emulation layer of /proc/sys.  While at one point the binary layer was almost equal, that is no longer the case.<br>
+<p>
+The binary layer kept having conflicting paths added, was not used, was never tested, and had security holes the /proc/sys path did not.  So a while ago I just reduced it to an emulation layer so we could forget about it.<br>
+<p>
+Which is a long way of saying about the only thing the BSD and Linux sysctl implementations have in common is their name.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785412/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor785413"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2019 4:03 UTC (Wed)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/785413/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What really bothers me about BPF is reimplementing a general-purpose virtual machine one feature at a time.<br>
+<p>
+Instead of reimplementing WebAssembly badly, just go ahead and support it in the kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785413/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785867"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 20:26 UTC (Fri)
+                               by <b>lambda</b> (subscriber, #40735)
+                              [<a href="/Articles/785867/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+WASM and BPF have some overlap, but also some different requirements.
+<p>
+For instance, WASM is designed to be Turing-complete, while BPF is explicitly designed to not allow looping and thus be guaranteed to terminate in an amount of time predictable from the size of the program.
+<p>
+And of course, BPF long predates WASM, first being published in 1992, and eBPF started as an internal representation for JITing BPF before it was exposed as a compilation target on its own. <a href="https://lwn.net/Articles/599755/">eBPF appears to have been initially announced in 2014</a>, while <a href="https://github.com/WebAssembly/design/issues/150">WASM wasn't announced until 2015</a>.
+<p>
+While it might be an interesting project to figure out commonalities between WASM and eBPF and potentially have a limited WASM mode with the same kind of control flow restrictions as eBPF, that seems like a decently sized research and specification project, and if you wanted to replace the eBPF engine in the kernel with that, you'd have to write a verifier and JIT for that format that could be merged into the kernel, so likely couldn't reuse  a lot of the existing WASM ecosystem which is mostly written in C++ and Rust. And of course for compatibility, you'd need to support frontends for classic BPF and eBPF.
+<p>
+While it might be nice to have more resources focused on a single safe, verifiable, embeddable virtual machine that could scale to these different use cases, I don't see an easy way to just drop eBPF and stick WASM into the kernel instead.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785867/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785877"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 20:54 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785877/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; For instance, WASM is designed to be Turing-complete, while BPF is explicitly designed to not allow looping and thus be guaranteed to terminate in an amount of time predictable from the size of the program.</font><br>
+In practice, BPF can run for a fair amount of time because of function calls. And you also can limit the duration of WASM programs by only giving them a certain time budget and terminating them once they go over it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785877/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785890"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 13, 2019 0:51 UTC (Sat)
+                               by <b>lambda</b> (subscriber, #40735)
+                              [<a href="/Articles/785890/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+Besides the running time, the lack of Turing-completeness is used to be able to trace all possible execution paths to prove static guarantees about the program behavior, such as doing static bounds checking. This allows the eBPF process to be able to access packet data without concern about accessing arbitrary data.
+<p>
+To do this for a system that allows for loops and/or recursion, you'd have to use more sophisticated analysis such as abstract interpretation, or something like bounded model checking tied to bounds on the execution. This seems like a much more heavyweight analysis to put in the kernel.
+<p>
+As mentioned, I can see some value in focusing on a single toolchain for various forms of safe, verified JIT compilation, but I don't see a simple approach to "just use WASM" to replace the whole classic BPF and eBPF use cases.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785890/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor923393"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 15, 2023 17:06 UTC (Wed)
+                               by <b>yunwei37</b> (guest, #163664)
+                              [<a href="/Articles/923393/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We have created a prototype runtime and toolchain: wasm-bpf, which runs Wasm in user space and eBPF in kernel space, and I think maybe just doing things like this can combine the advantages from both?<br>
+<p>
+Wasm-bpf is a WebAssembly eBPF library, toolchain and runtime powered by CO-RE (Compile Once – Run Everywhere) libbpf and WAMR. It can help you build almost every eBPF programs or use cases to Wasm module.<br>
+<p>
+<a rel="nofollow" href="https://github.com/eunomia-bpf/wasm-bpf">https://github.com/eunomia-bpf/wasm-bpf</a><br>
+<p>
+Examples of eBPF programs written in C, Rust and compiled to Wasm are provided, covering the use cases from tracing, networking to security.<br>
+<p>
+Wasm-bpf offers several advantages for eBPF:<br>
+<p>
+- Secure and reliable execution environment with Wasm's isolation in user space.<br>
+- Easy distribution and management with the Wasm container ecosystem and toolchain, for example, Wasm OCI images or docker for Wasm.<br>
+- Cross-language support for over 30 programming languages for eBPF user space programs<br>
+- Agile development with the ability to dynamically load and unload eBPF plugins when running.<br>
+- Lightweight and efficient, WebAssembly applications consume significantly less resources compared to Linux container applications.<br>
+<p>
+reference:<br>
+- docker for wasm: <a rel="nofollow" href="https://docs.docker.com/desktop/wasm/">https://docs.docker.com/desktop/wasm/</a><br>
+- awesome-wasm-langs: <a rel="nofollow" href="https://github.com/appcypher/awesome-wasm-langs">https://github.com/appcypher/awesome-wasm-langs</a><br>
+- WAMR: <a rel="nofollow" href="https://github.com/bytecodealliance/wasm-micro-runtime">https://github.com/bytecodealliance/wasm-micro-runtime</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/923393/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor785993"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 15, 2019 13:42 UTC (Mon)
+                               by <b>alison</b> (subscriber, #63752)
+                              [<a href="/Articles/785993/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;BPF is already running amok and it's basically impossible to debug when it inevitably goes wrong.</font><br>
+<p>
+One does get the feeling that BPF is reiterating the history of systemd, in that it is absorbing and subsuming a variety of apparently unrelated functionality and extending into all parts of Linux.   Like systemd, BPF is well designed, well documented, rapidly developed and easier to use than some of the mechanisms it is displacing.   As this discussion points out, that doesn't mean that the current rapid expansion of its capabilities and our reliance on them is necessarily a good idea.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785993/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786040"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 15, 2019 16:07 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/786040/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Like systemd, BPF is well designed, well documented, rapidly developed and easier to use than some of the mechanisms it is displacing. </font><br>
+Except it's not. Systemd had well-designed tools for debugging and diagnostics from the beginning. BPF really has nothing so far.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786040/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor785420"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2019 8:03 UTC (Wed)
+                               by <b>thithib</b> (guest, #115203)
+                              [<a href="/Articles/785420/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The sysctl hook is just another example of how the kernel's API is being transformed by BPF; expect a lot more of these hooks to be added in the future.</font><br>
+<p>
+I get the advantages of BPF over e.g. a new LSM hook in this particular case. <br>
+What I'm uncomfortable with is, I guess, the fact that it's one more step towards making BPF a mandatory skill for sysadmins trying to correctly enforce their security policy.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785420/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785535"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 10, 2019 21:14 UTC (Wed)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/785535/">Link</a>] (20 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I can't help but wonder if /proc/sys could just split out into a separate sysctlfs that distros can mount by default, and that containers can then prevent container-root from mounting while allowing proc.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785535/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785605"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 8:21 UTC (Thu)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/785605/">Link</a>] (19 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But that only addresses the "container may not change anything at all" case.<br>
+<p>
+It seems valid, and possible with the BPF approach, that a container may be allowed to change certain things, e.g. /proc/sys/net/ipv4/conf/&lt;interface the container controls&gt;/*.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785605/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785606"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 8:25 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785606/">Link</a>] (18 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Use an AppArmor policy for that. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785606/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785624"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 13:10 UTC (Thu)
+                               by <b>johill</b> (subscriber, #25196)
+                              [<a href="/Articles/785624/">Link</a>] (17 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's just trading one domain-specific language (and associated knowledge) for another, what value is there in that?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785624/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785632"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 13:57 UTC (Thu)
+                               by <b>rahulsundaram</b> (subscriber, #21946)
+                              [<a href="/Articles/785632/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  That's just trading one domain-specific language (and associated knowledge) for another, what value is there in that?</font><br>
+<p>
+Also BPF is supported by more distributions than AppArmor is ever going to be.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785632/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor785692"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Managing sysctl knobs with BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 17:10 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785692/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+BPF is NOT a language. It's a virtual machine with a particularly nasty instruction encoding. And while it's not technically Turing-complete, it can be extremely difficult to understand.<br>
+<p>
+Meanwhile, AppArmor policies are simple text files which are self-explanatory.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785692/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785708"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 19:35 UTC (Thu)
+                               by <b>ecree</b> (guest, #95790)
+                              [<a href="/Articles/785708/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; BPF is NOT a language. It's a virtual machine</font><br>
+With the result that there are multiple different languages targeting that backend, from the high-level (bpftrace) through the low (C) right down to assembler (ebpf_asm).<br>
+<p>
+Which in my opinion is a much better approach than every piece of kernel policy having its own virtual machine (netfilter comes to mind).  If a particular policy API wants to have its own DSL, it can do that while still using eBPF for the mechanism.  And because the DSL is purely a userspace thing, no-one is _forced_ to use it — e.g. when writing functional tests for XDP I found it very helpful to be able to hand-craft the assembler rather than pulling in a gigantic blob of LLVM just to do the same thing in C.<br>
+<p>
+<font class="QuotedText">&gt; with a particularly nasty instruction encoding</font><br>
+Firstly, there's nothing nasty about eBPF's encoding; it's cleaner and more orthogonal than most hard ISAs.  Secondly, why do you care what the instruction encoding is, unless you're actually writing the toolchain?<br>
+<p>
+<font class="QuotedText">&gt; it's not technically Turing-complete</font><br>
+A deliberate design decision, ensuring that eBPF expresses procedurally only those policies that could, at the cost of far greater complexity in both interface and implementation, be expressed declaratively.<br>
+<p>
+<font class="QuotedText">&gt; it can be extremely difficult to understand</font><br>
+Only to the extent necessitated by the complexity of policies it allows the user to configure.  You can write an eBPF _program_ that's difficult to understand, but that doesn't make eBPF _itself_ difficult to understand.<br>
+<p>
+<font class="QuotedText">&gt; Meanwhile, AppArmor policies are simple text files which are self-explanatory.</font><br>
+Which is why everyone is happily using AppArmor and never felt the need to invent cgroups and BPF-based security.  Oh wait...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785708/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785719"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 20:00 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785719/">Link</a>] (13 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Which in my opinion is a much better approach than every piece of kernel policy having its own virtual machine (netfilter comes to mind). If a particular policy API wants to have its own DSL, it can do that while still using eBPF for the mechanism. And because the DSL is purely a userspace thing, no-one is _forced_ to use it — e.g. when writing functional tests for XDP I found it very helpful to be able to hand-craft the assembler rather than pulling in a gigantic blob of LLVM just to do the same thing in C.</font><br>
+You have a production machine. You have a problem (some software doesn't work). There is no source code for BPF. How are you going to debug it? Can you single-step BPFs attached to /proc files? Is there a way to get an execution trace?<br>
+<p>
+I have already had a wonderful opportunity to do exactly this. IT. WAS. NOT. FUN.<br>
+<p>
+BPF violates the cardinal rule of software design - your software must be easy to troubleshoot. <br>
+<p>
+<font class="QuotedText">&gt; Which is why everyone is happily using AppArmor and never felt the need to invent cgroups and BPF-based security. Oh wait...</font><br>
+cgroups are not a replacement for AppArmor.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785719/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785728"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 20:51 UTC (Thu)
+                               by <b>ecree</b> (guest, #95790)
+                              [<a href="/Articles/785728/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; There is no source code for BPF. How are you going to debug it?</font><br>
+With BTF, soon BPF programs will come with complete source-level debuginfo.  Also, if you're going around installing BPF programs without having the corresponding source, you're naturally going to have all the same problems as if you drop an object file in /bin and lose the source; how is that BPF's fault?<br>
+<p>
+<font class="QuotedText">&gt; Can you single-step BPFs attached to /proc files?</font><br>
+Can you single-step an LSM implementation?  Both are just "some executable bytes in the kernel", and debugging facilities have to be built.  In the case of LSM, they have to be written into the kernel module, whereas with BPF, the user can insert their own debugging (it is not impossible, for instance, to patch bpf_trace_printk()s into a program that you only have in binary form).<br>
+<p>
+<font class="QuotedText">&gt; cgroups are not a replacement for AppArmor.</font><br>
+I wasn't saying they were.<br>
+<p>
+I was merely saying that AppArmor is not a replacement for cgroup-bpf either, because if it was, cgroup-bpf wouldn't have been invented.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785728/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785740"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 21:34 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785740/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; With BTF, soon BPF programs will come with complete source-level debuginfo. Also, if you're going around installing BPF programs without having the corresponding source, you're naturally going to have all the same problems as if you drop an object file in /bin and lose the source; how is that BPF's fault?</font><br>
+I'm not installing anything. I'm debugging my software not working on a particular version of the fleet that is controlled by another team. Or I'm debugging a server after its administrator had died from a heroin overdose (real example).<br>
+<p>
+<font class="QuotedText">&gt; drop an object file in /bin and lose the source; how is that BPF's fault?</font><br>
+I can inspect binaries with GDB, I can see their activity with strace(), I can look for source code in repositories, etc.<br>
+<p>
+None of this is possible with BPF.<br>
+<p>
+<font class="QuotedText">&gt; Can you single-step an LSM implementation?</font><br>
+Yes. Not quite single step, but explain failures: <a href="https://wiki.debian.org/AppArmor/Debug">https://wiki.debian.org/AppArmor/Debug</a><br>
+<p>
+<font class="QuotedText">&gt;  I was merely saying that AppArmor is not a replacement for cgroup-bpf either, because if it was, cgroup-bpf wouldn't have been invented.</font><br>
+BPF should have never been implemented at all.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785740/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785750"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 22:22 UTC (Thu)
+                               by <b>ecree</b> (guest, #95790)
+                              [<a href="/Articles/785750/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I'm debugging my software not working on a particular version of the fleet that is controlled by another team.</font><br>
+<p>
+That sounds like "your organisation is dysfunctional", not "BPF is bad".<br>
+<p>
+<font class="QuotedText">&gt; I can inspect binaries with GDB, I can see their activity with strace(), I can look for source code in repositories, etc.</font><br>
+&gt;<br>
+<font class="QuotedText">&gt; None of this is possible with BPF.</font><br>
+<p>
+You can inspect the disassembly of the BPF program (in future including, as I said, BTF debuginfos); you can debug them with a kernel debugger if you really need to (directly analogous to an LSM; both run in kernel space); you can look for the BPF program's source code in repositories too (e.g. it might be <a href="https://github.com/cilium/cilium">https://github.com/cilium/cilium</a> that's running).<br>
+<p>
+<font class="QuotedText">&gt; Yes. Not quite single step, but explain failures</font><br>
+<p>
+So, no, then.  All AppArmor can do is tell you what syscalls etc. it denied; a BPF security program can in principle do the same thing (there may not be built-in mechanisms to do that right now, but there's nothing intrinsic about the BPF model that prevents them, and in the meantime there's always bpf_trace_printk()).<br>
+<p>
+<font class="QuotedText">&gt; BPF should have never been implemented at all.</font><br>
+<p>
+I'd be interested to hear what you think should replace XDP, then, as doubtless would Cloudflare and Facebook.<br>
+<p>
+Brendan Gregg might also have a thing or two to say about tracing.  (You're the one who was saying debuggability was so important!)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785750/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785752"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 22:27 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785752/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  That sounds like "your organisation is dysfunctional", not "BPF is bad".</font><br>
+As most large organizations...<br>
+<p>
+<font class="QuotedText">&gt;  You can inspect the disassembly of the BPF program (in future including, as I said, BTF debuginfos); you can debug them with a kernel debugger if you really need to (directly analogous to an LSM; both run in kernel space);</font><br>
+How can I do this? Is there a tutorial for it?<br>
+<p>
+<font class="QuotedText">&gt; So, no, then. All AppArmor can do is tell you what syscalls etc. it denied; a BPF security program can in principle do the same thing</font><br>
+I'm not interested in principles. Is there such an infrastructure right now? If not, then it needs to be a pre-requisite for the kernel merge.<br>
+<p>
+<font class="QuotedText">&gt; I'd be interested to hear what you think should replace XDP, then, as doubtless would Cloudflare and Facebook.</font><br>
+I wouldn't mind if it just stays there. I don't care about it being used outside of the network stack.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785752/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785756"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 22:51 UTC (Thu)
+                               by <b>ecree</b> (guest, #95790)
+                              [<a href="/Articles/785756/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; As most large organizations...</font><br>
+<p>
+Large organisations are poor design, just as large programs are.<br>
+<p>
+<font class="QuotedText">&gt; How can I do this? Is there a tutorial for it?</font><br>
+<p>
+If the documentation is inadequate or unclear, pester the BPF core developers to improve it.  On that, I'll side with you — I had to badger them repeatedly to write a spec for BTF.<br>
+<p>
+<font class="QuotedText">&gt; I'm not interested in principles.</font><br>
+<p>
+Ok, so you're just interested in spreading FUD, then.  Your problem isn't with BPF as a design or a concept.<br>
+<p>
+<font class="QuotedText">&gt; If not, then it needs to be a pre-requisite for the kernel merge.</font><br>
+<p>
+Now you're being silly.  It might be a pre-requisite for it being a good idea to use it in your organisation; but an opt-in feature doesn't have to be perfect to be merged, it just has to have a stable ABI.  Which BPF does; adding verdict tracing wouldn't require changes to the existing ABI.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785756/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785760"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 11, 2019 23:03 UTC (Thu)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/785760/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Large organisations are poor design, just as large programs are.</font><br>
+Sure. But you can't avoid them and they do a lot of things well.<br>
+<p>
+<font class="QuotedText">&gt; If the documentation is inadequate or unclear, pester the BPF core developers to improve it. On that, I'll side with you — I had to badger them repeatedly to write a spec for BTF.</font><br>
+I'm doing this. <br>
+<p>
+<font class="QuotedText">&gt; Ok, so you're just interested in spreading FUD, then. Your problem isn't with BPF as a design or a concept.</font><br>
+In the end everything is Turing machine approximation. So yes, my problems are with this particular implementation. It's not acceptable to cause regressions in practical usability.<br>
+<p>
+<font class="QuotedText">&gt; Now you're being silly. It might be a pre-requisite for it being a good idea to use it in your organisation; but an opt-in feature doesn't have to be perfect to be merged</font><br>
+It has to be reasonable. The mainline kernel is not a dumping ground for random pet features.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785760/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor785772"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 12, 2019 1:13 UTC (Fri)
+                               by <b>rahulsundaram</b> (subscriber, #21946)
+                              [<a href="/Articles/785772/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  It has to be reasonable. The mainline kernel is not a dumping ground for random pet features.</font><br>
+<p>
+In many ways, that's precisely how it is.<br>
+<p>
+There is no overarching kernel design.  It is mostly a collection of random pet features.  If the pet features happened to be usable and useful in ways you don't like, then tough luck.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/785772/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor786060"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 15, 2019 21:00 UTC (Mon)
+                               by <b>togga</b> (subscriber, #53103)
+                              [<a href="/Articles/786060/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It's not acceptable to cause regressions in practical usability.</font><br>
+<p>
+BPF adds features here, it doesn't cause regressions to anything. Besides, there is an BPF flag when you build your kernel you can say no to.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786060/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786062"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 15, 2019 21:17 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/786062/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; BPF adds features here, it doesn't cause regressions to anything. Besides, there is an BPF flag when you build your kernel you can say no to.</font><br>
+"It's an option" is not an excuse for a broken feature.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786062/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786117"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2019 18:58 UTC (Tue)
+                               by <b>togga</b> (subscriber, #53103)
+                              [<a href="/Articles/786117/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; "It's an option" is not an excuse for a broken feature.</font><br>
+I just don't see how this feature is broken, it opens up lots of features/possibilities. Hopefully there's good filtering and sense when reviewing/accepting new features and requires enough thought by users so it doesn't derail (look at Python for an example of that).<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786117/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor786056"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 15, 2019 20:50 UTC (Mon)
+                               by <b>togga</b> (subscriber, #53103)
+                              [<a href="/Articles/786056/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; There is no source code for BPF. How are you going to debug it? </font><br>
+<p>
+How do you debug AppArmor? Is that fun?<br>
+<p>
+BPF might be hard to debug today, but the alternative is extending features to a number of DSL:s and specialized modules for a subset of possibilities.<br>
+<p>
+BPF should at least be straightforward to simulate (or run as is) in user-space (think regression-tests) and once you crack this debug-nut, you'd be set for the BPF invasion.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786056/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786059"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 15, 2019 20:58 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/786059/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; How do you debug AppArmor? Is that fun?</font><br>
+You look at the logs and see which rule caused the request to fail.<br>
+<p>
+<font class="QuotedText">&gt; BPF might be hard to debug today, but the alternative is extending features to a number of DSL:s and specialized modules for a subset of possibilities.</font><br>
+BPF will always be hard to debug, it's almost a general-purpose VM and you'll have to debug it at basically the assembly level.<br>
+<p>
+<font class="QuotedText">&gt; BPF should at least be straightforward to simulate (or run as is) in user-space (think regression-tests) and once you crack this debug-nut, you'd be set for the BPF invasion.</font><br>
+Right now there are no tools for simulation. There are no tools to create BPF filters as well (nothing like "learning mode" in AppArmor and SELinux).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786059/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor786115"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Re: More anti-BPF FUD from Cyberax</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 16, 2019 18:47 UTC (Tue)
+                               by <b>togga</b> (subscriber, #53103)
+                              [<a href="/Articles/786115/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; You look at the logs and see which rule caused the request to fail.</font><br>
+Yes. This is like looking at BPF printk's and perf events to user-space right?  At assembly-level AppArmor is probably worse?<br>
+<p>
+<font class="QuotedText">&gt; BPF will always be hard to debug, it's almost a general-purpose VM and you'll have to debug it at basically the assembly level.</font><br>
+Correct. At least the assembly level is much easier here than for the AppArmor case since it's higher level. Complexity with the JIT could be an issue however. Another issue with BPF could be the usual effects of "no taste/craftsmanship" when given flexibility (over-engineering at one end and the tunnel-visioned mess on the other).<br>
+<p>
+<font class="QuotedText">&gt; Right now there are no tools for simulation. There are no tools to create BPF filters as well (nothing like "learning mode" in AppArmor and SELinux).</font><br>
+Lots of opportunities here :-)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/786115/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2019, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,1196 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Batch processing of network packets [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/763056/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/762817/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/763056/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Batch processing of network packets</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>August 21, 2018</br>
+           </div>
+It has been understood for years that kernel performance can be improved by
+doing things in batches.  Whether the task is freeing memory pages,
+initializing data structures, or performing I/O, things go faster if the
+work is done on many objects at once; many kernel subsystems have been
+reworked to take advantage of the efficiency of batching.  It turns out,
+though, that there was 
+a piece of relatively low-hanging fruit at the core of the kernel's network
+stack.  The 4.19 kernel will feature some work increasing the batching of
+packet processing, resulting in some impressive performance improvements.
+<p>
+Once upon a time, network interfaces would interrupt the processor every
+time a packet was received.  That may have worked well with the kind of
+network interfaces we had in the 1990s, but an interface that worked that
+way now would be generating many thousands of interrupts per second.  That,
+in turn, would swamp the CPU and prevent any work from getting done.  The
+response to this problem in network circles was <a
+href="/Articles/30107/">the adoption of an API called "NAPI"</a> (for "new
+API") during the long 2.5 development series.
+<p>
+Old-timers on the net — like your editor — used to have their computers
+beep at them every time an email arrived.  Most of us stopped doing that
+long ago; the beeps were nonstop, and things reached a point where we
+simply knew there would be email waiting anytime we got over our dread and
+opened a mail client.  NAPI follows a similar approach: rather than poke
+the processor when packets arrive, the interface just lets them
+accumulate.  The kernel will then poll the interface occasionally, secure
+in the knowledge that there will always be packets waiting to be
+processed.  Those packets are then processed in a batch, with the batch
+size limited by the "weight" assigned to the interface.
+<p>
+At this level, we can see that batching of packet processing was added some
+fifteen years ago.  But that is where the batching stops; when the NAPI
+poll happens, the device driver will pass each packet into the network
+stack with a call to <a
+href="https://elixir.bootlin.com/linux/latest/source/net/core/dev.c#L4771"><tt>netif_receive_skb()</tt></a>.
+From that point on, each packet is handled independently, with no further
+batching.  In retrospect, with all of the effort that has gone into
+streamlining packet processing, one might wonder why that old API was never
+revisited, but that is how things often go in the real world.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+Eventually, though, somebody usually notices an issue like that; in this
+case, that somebody was Edward Cree, who put together <a
+href="/ml/netdev/5bf84d99-8f77-54ee-7543-ada13a730361@solarflare.com/">a
+patch set</a> changing how low-level packet reception works.  The first
+step was to supplement <tt>netif_receive_skb()</tt> with a batched version that
+reads, in its entirety:
+<p>
+<pre>
+    void netif_receive_skb_list(struct list_head *head)
+    {
+	struct sk_buff *skb, *next;
+
+	list_for_each_entry_safe(skb, next, head, list)
+		netif_receive_skb(skb);
+    }
+</pre>
+<p>
+
+Now, rather than calling <tt>netif_receive_skb()</tt> for every incoming
+packet, a driver can make a list out of a batch of packets and pass them
+upward with a single call.  Not much has changed at this point, but even
+this tweak improves performance by quite a bit, as it turns out.
+<p>
+The rest of the patch series is occupied with pushing the batching further
+up the network stack, so that packets can be passed in lists as far as
+possible.  That gets a little trickier at the higher levels, since some
+packets have to be handled in fundamentally different ways.  For example,
+some may have been allocated from the system's memory reserves (part of a
+mechanism to <a href="/Articles/195416/">avoid deadlocks</a> on network
+block devices); those require special handling.  When such situations are
+encountered, the list of packets must be split into smaller lists, but the
+batching is preserved as far as possible.
+<p>
+The benchmark results (included in <a
+href="https://git.kernel.org/linus/2d1b138505dc29bbd7ac5f82f5a10635ff48bddb">this
+merge commit</a>) are interesting.  In one test case, using a single
+receive queue, a kernel with these patches (and a suitably patched driver)
+showed a 4% improvement in packet-processing speed.  That would certainly
+justify the addition of this bit of infrastructure, but it turns out that
+this number is the worst case that Cree could find.  In general, just
+adding and using <tt>netif_receive_skb_list()</tt> improves performance by
+10%, and the performance improvement with the entire patch series centers
+around 25%.  One test showed a 35% speed improvement.  In an era where
+developers have sweated mightily for much smaller gains, this is an
+impressive performance improvement.
+<p>
+One might well wonder why even the simplest batching shown above can
+improve things by so much.  It mostly comes down to cache behavior.  As
+Cree notes in the patch introduction, the processor's instruction cache is
+not large enough to hold the entire packet-processing pipeline.  A device
+driver will warm the cache with its own code, but then the processing of a
+single packet pushes that code out of cache, and the driver must start cold
+with the next one.  Just eliminating that bit of cache contention by
+putting the packets into a list before handing them to the network stack
+thus improves things considerably; creating the same sort of cache
+efficiency through the network stack improves things even more.
+<p>
+Networking also uses a lot of indirect function calls.  These calls were
+never cheap, but the addition of <a href="/Articles/743265/">retpolines</a>
+for Spectre mitigation has made 
+things worse.  Batching replaces a bunch of per-packet indirect calls with
+single per-list calls, reducing that overhead.
+<p>
+There is a problem that often comes with throughput-oriented optimizations,
+and which can often be seen with batching: an increase in latencies.  In
+the networking case, though, that cost was already paid years ago when NAPI
+was added.  The new batching works on bunches of packets that have already
+been accumulated at the NAPI poll time and doesn't really add any further
+delays.  So it's an almost free improvement from that point of view.
+<p>
+This code has been merged for the 4.19 kernel, so it will be generally
+available when the release happens.  As of this writing, only the
+Solarflare network interfaces use the new <tt>netif_receive_skb_list()</tt>
+API.  The necessary changes at the driver level are quite small, though, so
+it would be surprising if other drivers were not updated in the relatively
+near future, possibly even before the 4.19 release.  This particular fruit
+is hanging too low to go unpicked for long.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Networking-Performance">Networking/Performance</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/763056/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor763100"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2018 13:17 UTC (Tue)
+                               by <b>ernstp</b> (guest, #13694)
+                              [<a href="/Articles/763100/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Here's some other batching in progress I noted:<br>
+<p>
+drm/ttm,amdgpu: Introduce LRU bulk move functionality<br>
+<p>
+<a href="https://patchwork.freedesktop.org/series/47871/">https://patchwork.freedesktop.org/series/47871/</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763100/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor763110"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credit where it's due</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2018 15:42 UTC (Tue)
+                               by <b>ecree</b> (guest, #95790)
+                              [<a href="/Articles/763110/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The original idea was not mine: it was Jesper Dangaard Brouer who thought of it.  I 'merely' implemented it.<br>
+He suggested it in <a href="http://lists.openwall.net/netdev/2016/01/15/51">http://lists.openwall.net/netdev/2016/01/15/51</a> and the following thread seems also to contain some early prefiguring of XDP.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763110/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763131"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credit where it's due</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 2:43 UTC (Wed)
+                               by <b>dgc</b> (subscriber, #6611)
+                              [<a href="/Articles/763131/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is it a sign that you're getting old when you notice that the old, forgotten ways have become the shiny new again?<br>
+<p>
+-Dave.<br>
+<p>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763131/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763213"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credit where it's due</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 22:02 UTC (Wed)
+                               by <b>ejr</b> (subscriber, #51652)
+                              [<a href="/Articles/763213/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not even that old: <a href="https://dl.acm.org/citation.cfm?id=502057">https://dl.acm.org/citation.cfm?id=502057</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763213/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor763550"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credit where it's due</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 27, 2018 19:20 UTC (Mon)
+                               by <b>roblucid</b> (guest, #48964)
+                              [<a href="/Articles/763550/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Batch processing was all the rage when I first used computers!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763550/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor763551"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credit where it's due</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 27, 2018 19:21 UTC (Mon)
+                               by <b>roblucid</b> (guest, #48964)
+                              [<a href="/Articles/763551/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Batch processing was all the rage, when I was a teen :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763551/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor763133"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credit where it's due</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 3:57 UTC (Wed)
+                               by <b>mtaht</b> (subscriber, #11087)
+                              [<a href="/Articles/763133/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Normally batching anything makes me grumpy, but I like this. :)<br>
+<p>
+However I've seen a lot of code that does stupid things to software batch gro stuff, with things that actually overwhelm the cache. I'm curious, with this new code,<br>
+if folk have experimented with decreasing the (oft rather large) NAPI value in the first place, and to what extent it was tested on devices with small i/dcaches. <br>
+<p>
+Skylake is one thing. But a typical cache size on small boxes is 32k/32k for these.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763133/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763134"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credit where it's due</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 3:59 UTC (Wed)
+                               by <b>mtaht</b> (subscriber, #11087)
+                              [<a href="/Articles/763134/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Also, I so dearly want timestamps on ingress, always. Being able to amortize one itty bitty timestamp per draining of the rx ring would make me happy and not cost a fraction of the cpu you just saved.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763134/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763302"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credit where it's due</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2018 16:15 UTC (Thu)
+                               by <b>ecree</b> (guest, #95790)
+                              [<a href="/Articles/763302/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Packets should still be timestamped if they were before, see netif_receive_skb_list_internal() (and compare with netif_receive_skb_internal()).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763302/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763369"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Credit where it's due</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2018 7:26 UTC (Fri)
+                               by <b>mtaht</b> (subscriber, #11087)
+                              [<a href="/Articles/763369/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+you missed the "always" part. :)<br>
+<p>
+In my ideal world, packets inside the kernel and from future devices, would have something the like the following format:<br>
+<p>
+|tx_timestamp|rx_timestamp|packet|some|different|hashes|skb control block for all kinds of other stuff|<br>
+<p>
+The rx_timestamp is free if you have it in hw, the rx/tx_timestamp would make all the codel-y work faster on tx, and also enable the timer queues VJ is talking about ( <a href="https://netdevconf.org/0x12/session.html?evolving-from-afap-teaching-nics-about-time">https://netdevconf.org/0x12/session.html?evolving-from-af...</a> ) see also sch_etx and the igb network hw, and... selfishly - on top of "timestamp always", 3 hashes would make sch_cake fast enough for general use.  timestamps are at the front because they are "free" though they could live at the back, hashes at the back because you need time to calc them and on a cut through switch you can't wait for them. The existing cb has some other fields I'd do always too and make persistent through the stack.<br>
+<p>
+I'm so totally not going to make more of this "modest proposal", as much as I think the whole skb layout could use a major revision, as it would take a forklift, time, and taste to redo in linux, dpdk, rgmii,  etc. It would make it really difficult to backport code from one format to the other. It would take years to implement in linux (years more in bsd, osx, windows), for a benefit that would mostly be for 100gige+ interfaces originally. A metric ton of people would have their favorite fixed format field they'd want somewhere, thus politics and gnashing of standards bodies teeth would happen... specialized hw offload engines break...<br>
+<p>
+Still, if I could have 1 sysctl to immuttably rx timestamp packets on all interfaces always it would be great. Packets being managed by codel could measure the entire system from ingress to egress and *drop them*, shedding load automatically as a system as a whole (rather than at the qdisc) got more stress than it should take, figuring out the cost of each substep through the layers would be something you could do on a per packet basis on your workload, rather than by blasting specialized test tools through it that *don't model real traffic* and claiming that pps really meant something...<br>
+<p>
+and there's be ponies! and speckled dancing unicorns! harder RTT deadlines! and systems that didn't collapse under load! and poppies, poppies, poppies everywhere to roll around in to help you sleep even better!<br>
+<p>
+It's after midnight. I usually don't post anything after midnight.<br>
+<p>
+...<br>
+<p>
+I am happy that ebpf is making it easier to offload more stuff into smarter hardware. and I look forward to trying this new skb list idea out next quarter on some very old, slow, tiny hardware.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763369/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor763113"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2018 16:31 UTC (Tue)
+                               by <b>eru</b> (subscriber, #2753)
+                              [<a href="/Articles/763113/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>That is an interesting point about caches that may be applicable in other situations as well. So far I have imagined it is pretty much neutral whether you do
+<pre>
+for each item in input
+    do_b(do_a(item))
+</pre>
+<p>or
+<pre>
+for each item in input
+    push(tmplist, do_a(item))
+for each item in tmplist
+    do_b(item)
+</pre>
+<p>
+except these solution may need extra storage for the intermediate results,
+but this article suggests the second solution may be better despite that.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763113/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763115"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2018 17:19 UTC (Tue)
+                               by <b>HIGHGuY</b> (subscriber, #62277)
+                              [<a href="/Articles/763115/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It depends on how hard the code hammers the data cache too.<br>
+In this case the data was most likely transferred into system memory via DMA and it is not or no longer in cache. In parallel the handling of each packet only touches the first tens of bytes for the headers.<br>
+That makes the instruction cache cost higher than the data cache cost. If the data cache cost were higher, the gains might have been more modest or maybe even counterproductive.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763115/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763481"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2018 0:14 UTC (Sun)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/763481/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Recently received packets should be in the (last-level) cache. Since modern systems tend to have memory controllers closely integrated with memory caches, they can allocate or update cache lines when a DMA write occurs rather than sending an invalidation message. In systems with multiple memory controllers, PCIe DMA masters can provide a hint as to which should do this (which, if I remember correctly, is supposed to be taken from the corresponding DMA queue's MSI-X entry).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763481/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor763118"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2018 18:57 UTC (Tue)
+                               by <b>mm7323</b> (subscriber, #87386)
+                              [<a href="/Articles/763118/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if this is sort of obvious to a DSP engineer where writing tight little processing loops that can optimally keep some data pipeline busy while running instructions out of cache is often the goal, working on multiple passes across some buffers.<br>
+<p>
+I must admit, that while it makes sense to me having read the article, I doubt I'd have spotted that optimisation in a long long time!  Open Source is cool!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763118/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763177"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 15:55 UTC (Wed)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/763177/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Even outside of proper DSPs, I think this is a fairly natural pattern when using SIMD CPUs or GPUs. You want to process multiple data items concurrently, so you think about your data as a single array (or maybe a structure-of-arrays) rather than as a large collection of independent OOP-style objects, and you write your processing code as array transformations. But the processing code has limited resources (registers, constants, instruction cache, local memory in GPUs, etc), and the compiler will either complain or go dreadfully slow (which should be obvious in a profiler) if you exceed the limits; or maybe some of the processing works best on vectors of 8 elements while some only works on vectors of 4, etc; or maybe it's just hard to understand the whole algorithm at once; so it's natural to split the processing into multiple simpler passes that can be optimised individually. You might run each pass over the entire data set in sequence, or (if memory bandwidth is a concern) you might split the data into chunks that fit within the data cache then run all passes over one chunk before moving onto the next chunk.</p>
+
+<p>(This seems kind of like the <a href="http://gamesfromwithin.com/data-oriented-design">data-oriented design</a> thing that some game developers have been interested in, as a reaction against the cache-inefficiency of common OOP designs. But I imagine it's much easier to recognise and apply in a game engine that you're writing from scratch, and that you know is going to have to process huge amounts of data, than in a large existing OOP-ish codebase like Linux that was designed with very difference performance requirements.)</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763177/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763201"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 20:32 UTC (Wed)
+                               by <b>mm7323</b> (subscriber, #87386)
+                              [<a href="/Articles/763201/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the link - that's a great post with interesting points.<br>
+<p>
+One thing that springs to mind, in an object oriented context, is that inheritance really breaks (instruction) cache efficiency.  You may have a collection of objects and wish to call the same method on each one, but due to inheritance each object can take very different code paths and foul the instruction caches.<br>
+<p>
+The data orientated approach the link describes mitigates this.  But sorting collections by object type (before any other comparison criteria) may also yield better performance in this vain too I guess. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763201/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor763122"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2018 19:54 UTC (Tue)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/763122/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, the second is often faster; and you can add another rule, that an interface taking a list of items in a single call will often perform better than one call per item.  We see the same principle in pipelined HTTP requests, or bulk operations on an SQL database, avoiding a separate round trip for each datum.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763122/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor763158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 13:06 UTC (Wed)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/763158/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have seen compilers make that transformation all by themselves, so don't be surprised if it's not faster when you do it, or that it gets suddenly slower when you make a trivial change that makes the compiler decide not to do that. Clang will abandon lots of its loop optimizations if it thinks something in the loop _might_ possibly throw.<br>
+<p>
+Cache awareness is right at the heart of our deal we have made with the devil for performance. There are more different caches in modern chips than you would ever imagine, many that are undocumented or barely even mentioned.<br>
+<p>
+The ones we know of include your regular data caches, along with instruction caches, microinstruction caches, conditional-branch target caches, and page map caches. Many other systems that act in the role of caches include the familiar pipelines, and also register renaming, speculative execution, and memory pre-fetching.<br>
+<p>
+The soul that we have handed over to the devil in exchange is made of data security (spectre etc.) and our ability to predict the consequences of design choices. Crack-brained newbie design choices (I'm looking at you, function pointers!) get a billion transistors thrown at them, which works just well enough to prevent learning better. <br>
+<p>
+Too-clever compilers do their part. Often, a really dumb algorithm (e.g. counting bits) is recognized and replaced with special instructions not normally accessible, and faster than a smart algorithm the compiler cannot recognize.<br>
+<p>
+I have seen 2x performance differences because the compiler decided the unlikely branch in a loop was the more likely, or because it was optimizing for older chips that like random other instructions mixed into sequences, where newer chips like to fuse a comparison that has a directly-adjacent branch into a single microinstruction -- but only in a small-enough loop.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763168"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 14:11 UTC (Wed)
+                               by <b>cagrazia</b> (guest, #124754)
+                              [<a href="/Articles/763168/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In July issue of CACM, there is an interesting article ("C Is Not a Low-Level Language") which opened my mind on these issues. The author argues that C is not a low-level language anymore, and many important details (here we are talking about caches, but the author also include pipelines, etc.) are hidden. In the end, the C abstract machine doesn't map easily to the abstractions exposed by the current CPUs and GPUs, but that was true on PDP-11. Therefore, we are running our code on fast PDP-11 emulators, and we are forced to write even more smart compilers to get the full speed (well, in some cases).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763168/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763183"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 17:32 UTC (Wed)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/763183/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From that article at <a href="https://queue.acm.org/detail.cfm?id=3212479">https://queue.acm.org/detail.cfm?id=3212479</a> :<br>
+<p>
+<font class="QuotedText">&gt; A processor designed purely for speed, not for a compromise between speed and C support, would likely support large numbers of threads, have wide vector units, and have a much simpler memory model. Running C code on such a system would be problematic, so, given the large amount of legacy C code in the world, it would not likely be a commercial success.</font><br>
+<p>
+Isn't that pretty much exactly what a GPU is? They basically do everything with 8/16/32-wide vectors (though presented as scalars to programmers), with many thousands of threads, limited pipelining within a thread, no out-of-order execution, and the memory model is typically that you get absolutely no cache coherence (except when using special instructions that simply bypass the L1 caches, like atomics or Vulkan's Coherent variables).<br>
+<p>
+GPUs have been widely available for a long time and are much faster than CPUs in terms of FLOPS and memory bandwidth, but even most new software (where legacy compatibility isn't that important) is still written almost entirely for CPUs, so that kind of hardware design is evidently not the solution. (It's still a commercial success, though. And incidentally most GPU programming uses dialects of C, so C isn't holding them back.)<br>
+<p>
+As for the CPU features that are relevant to Spectre - speculative execution and caches - if their invisibility from C makes C not a low-level language, then x86 machine code is not a low-level language either, and it seems a bit unfair to blame C for the limitations of machine code.<br>
+<p>
+I think most programmers who care about low-level details can tolerate the complex transformations that a C compiler performs, because they can always check the generated assembly code to see what really happened, and can easily influence the compiler (with intrinsics, attributes, compiler flags, inline assembly, compiler plugins, etc), so it's not really all that mysterious. But the transformation between machine code and what actually happens in the CPU is much more opaque and poorly documented and hard for software people to influence, which I think is why Spectre was such a hard problem to discover and to solve.<br>
+<p>
+Hmm, that kind of implies that moving most of the magic out of the CPU hardware and into the C compiler would help a lot. But that sounds like the Itanium approach, and that didn't work so well either.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763183/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763219"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 23:24 UTC (Wed)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/763219/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Problems don't care what's "fair".  When the tools become inadequate, you need better tools.<br>
+<p>
+We have got some more mileage out of C++ (which is quite a lot faster than C, for common problems), compiler intrinsics, and shaders, but we may find that a powerful functional language is needed to manage the complexity of what modern hardware can be. (If only the functional-language literati could break their nasty garbage-collection habit!) The biggest opportunities for using what hardware can be made to do depend on values not having or needing addresses, for longer periods.  There are blessed moments in C++ when values  have no addresses, and we can get a lot done in those moments.<br>
+<p>
+Much of what the hundreds of billions of transistors on CPU chips nowadays do is just keeping this computation from getting in the way of that computation. Remarkably little of them are actually doing the computations themselves. By eliminating the von Neumann hierarchical, addressible memory model, those transistors could be put to work properly -- if only we knew a better way to program them.<br>
+<p>
+"Say what you will about sequential instruction machines, they don't often have a problem deciding what to do in the next cycle."<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763219/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor763135"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 4:05 UTC (Wed)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/763135/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder if we couldn't get the netmap driver tweaks into mainline, as they are in FreeBSD now. That seems like more low-hanging fruit.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763135/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763171"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 14:23 UTC (Wed)
+                               by <b>cagrazia</b> (guest, #124754)
+                              [<a href="/Articles/763171/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Last time I worked with Netmap (2014), it was an exciting piece of software to move packets from the NIC to the driver, and then directly in user space (bypassing IP/transport), always batching as much as possible. The problem to solve was to reduce the cost of system calls and stack traversing for an application to get or to send the packets from the NIC. While Netmap was very useful for L2 tracing software (libpcap, Wireshark, etc.) or packet generators, it was insufficient for the other parts of the stack: IP layer or TCP could not benefit from Netmap batching.<br>
+<p>
+I suppose in these years the problem to pass or to retrieve packets from/to the NIC directly to applications has been solved with a mix between the Rizzo's (author of Netmap) and the Linux network developers' design. This work instead focuses on the internal of the network stack, from the driver to the upper layers (without reaching the application).<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763171/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763178"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 16:18 UTC (Wed)
+                               by <b>dps</b> (guest, #5725)
+                              [<a href="/Articles/763178/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At least some applications were saving 100ns is worth money sometimes bypass the Linux kernel network stack. I believe that solarflare has a LD_PRELOAD library that moves some of tcp to user space, thereby avoiding context switching.<br>
+<p>
+I suspect there is a lot of hardware off load too but in the final analysis somebody else got that job :-(<br>
+<p>
+It might be worth knowing that solarflare et al target customers that want to be close to stock exchanges because the speed of light is finite.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763178/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763482"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2018 0:44 UTC (Sun)
+                               by <b>BenHutchings</b> (subscriber, #37955)
+                              [<a href="/Articles/763482/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote> At least some applications were saving 100ns is worth money sometimes bypass the Linux kernel network stack. I believe that solarflare has a LD_PRELOAD library that moves some of tcp to user space, thereby avoiding context switching.</blockquote>
+<p>It certainly used to be that the major performance win of user-level networking was not so much the avoidance of kernel/user context switches, but improving temporal locality of access to packets.</p>
+<p>With kernel networking, the kernel has to demux incoming packets into socket queues and account for the memory allocated to each socket, as the packets come in. So the CPU will access packet headers during demux and then again some time later when the application receives the packets. With user-level networking, the hardware does demux into (typically) per-process queues and the CPU will access packet headers only when the application receives the packet. (The packet buffers are naturally accounted to the process.)</p>
+<p>Still, the cost of context switches has been increased substantially by mitigations for speculation leaks. So that may be a bigger part of the performance advantage now.</p>
+<blockquote> I suspect there is a lot of hardware off load too but in the final analysis somebody else got that job :-(</blockquote>
+<p>I worked on Solarflare drivers up to the SFC9100 generation, and there was no TCP offload or anything really unusual there. The essential features are checksum offload, flow steering/filtering, and <em>lots</em> of queues.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763482/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor763180"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 17:13 UTC (Wed)
+                               by <b>shemminger</b> (subscriber, #5739)
+                              [<a href="/Articles/763180/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Lots of this work was motivated by making kernel performance reach that of DPDK. <a href="http://vger.kernel.org/netconf2018_files/StephenHemminger_netconf2018.pdf">http://vger.kernel.org/netconf2018_files/StephenHemminger...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763180/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor763215"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 22, 2018 22:51 UTC (Wed)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/763215/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are important (i.e. $billlions) applications of packet ingestion that do not need any stack processing at all -- just get the bits where user space can see them, with as little handling as possible, if not less.  In many cases typical packets are ~100 bytes long, leaving 76ns to process each packet at 10Gbps.  Fortunately, bursts over 10Gbps are still rare.<br>
+<p>
+Some of these uses actually need to act on the contents of the packet in real time, and those users build custom ASICs that deliver incompletely-arrived packets for speculative processing. But most uses just need to timestamp, filter, and direct packets to various places for parallel downstream processing. Those are the uses that can benefit from kernel and driver improvements, and they get everything they need from netmap, DPDK, ef_vi and the like. DPDK is a mess, and ef_vi is proprietary.  Netmap offers a plausible route to break out of lock-in, and actually use commodity hardware in many of what are now thought of as high-end, niche applications that need specialized equipment.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763215/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763300"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2018 15:32 UTC (Thu)
+                               by <b>willemb</b> (subscriber, #73364)
+                              [<a href="/Articles/763300/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Linux 4.18 landed AF_XDP for this purpose<br>
+<p>
+<a href="https://www.kernel.org/doc/html/latest/networking/af_xdp.html">https://www.kernel.org/doc/html/latest/networking/af_xdp....</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763300/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763362"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2018 1:52 UTC (Fri)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/763362/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thank you, this is good news. I wonder how I had missed it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763362/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor763244"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 23, 2018 9:58 UTC (Thu)
+                               by <b>nim-nim</b> (subscriber, #34454)
+                              [<a href="/Articles/763244/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder how many of those would be needed to annihilate the performance advantage of userspace networking stacks such as DPDK…<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763244/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor763386"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets - locking</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2018 12:42 UTC (Fri)
+                               by <b>fillods</b> (guest, #22226)
+                              [<a href="/Articles/763386/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not only batching helps with regard to cache efficiency and so on, it helps with regard to locking through factorization.<br>
+<p>
+This reminds me an insightful article some years ago : "Improving Linux networking performance" <a href="https://lwn.net/Articles/629155/">https://lwn.net/Articles/629155/</a><br>
+Batching was already mentioned at that time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763386/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor763405"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">zeromq batching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2018 13:35 UTC (Fri)
+                               by <b>zoobab</b> (guest, #9945)
+                              [<a href="/Articles/763405/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Let me copy the paragraph of the ZeroMQ FAQ:<br>
+<p>
+"* The graph in the test results shows that ZeroMQ is slower than TCP/IP. What's the point then?<br>
+<p>
+Obviously, you would expect system working on top of TCP to have higher latencies than TCP. Anything else would be - simply speaking - supernatural. However, throughput is a different matter. ZeroMQ gets you more throughput than TCP has using intelligent batching algorithms. Moreover ZeroMQ delivers value-add over the TCP. Asynchronicity, message queueing, routing based on business logic, multicast etc.<br>
+<p>
+* How come ZeroMQ has higher throughput than TCP although it's built on top of TCP?<br>
+<p>
+Avoiding redundant networking stack traversals can improve throughput significantly. In other words, sending two messages down the networking stack in one go takes much less time then sending each of them separately.This technique is known as message batching.<br>
+<p>
+* When sending messages in batches you have to wait for the last one to send the whole batch. This would make the latency of the first message in the batch much worse, wouldn't it?<br>
+<p>
+ZeroMQ batches messages in opportunistic manner. Rather than waiting for a predefined number of messages and/or predefined time interval, it sends all the messages available at the moment in one go. Imagine the network interface card is busy sending data. Once it is ready to send more data it asks ZeroMQ for new messages. ZeroMQ sends all the messages available at the moment. Does it harm the latency of the first message in the batch? No. The message won't be sent earlier anyway because the networking card was busy. On the contrary, latency of subsequent messages will be improved because sending single batch to the card is faster then sending lot of small messages. On the other hand, if network card isn't busy, the message is sent straight away without waiting for following messages. Thus it'll have the best possible latency."<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763405/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor763406"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">zeromq batching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 24, 2018 13:37 UTC (Fri)
+                               by <b>zoobab</b> (guest, #9945)
+                              [<a href="/Articles/763406/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a href="http://zeromq.org/area:faq">http://zeromq.org/area:faq</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/763406/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor764452"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Batch processing of network packets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2018 14:38 UTC (Sun)
+                               by <b>ssl</b> (guest, #98177)
+                              [<a href="/Articles/764452/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<a rel="nofollow" href="https://fd.io/technology/">https://fd.io/technology/</a> also claim the cache warmup might speed up the packet processing<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/764452/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

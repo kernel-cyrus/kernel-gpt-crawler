@@ -1,0 +1,839 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Revisiting the kernel's preemption models (part 1) [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/944686/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/945212/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/944686/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Revisiting the kernel's preemption models (part 1)</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>September 21, 2023</br>
+           </div>
+All that Ankur Arora seemingly wanted to do with <a
+href="/ml/linux-kernel/20230830184958.2333078-1-ankur.a.arora@oracle.com/">this
+patch set</a> was to make the process of clearing huge pages on x86
+systems go a little faster.  What resulted was an extensive discussion on
+the difficulties of managing preemption correctly in the kernel.  It may be
+that some changes will come to the plethora of preemption models that the
+kernel currently offers.
+<p>
+<h4>Fast memory clearing</h4>
+<p>
+The patch set in question adds a function to use x86 string instructions to
+clear large amounts of memory more quickly; the change produces some nice
+performance improvements for situations (such as page-fault handling) where
+ranges of memory must be zeroed out before being given to the faulting
+process.  But there is one little problem with this approach: being able to
+clear large ranges with a single instruction is nice, but that one
+instruction can execute for a long time — long enough to create unwanted
+latencies for other processes running on the same CPU.
+<p>
+Excess latency caused by long-running operations is not a new problem for
+the kernel.  The usual response is to break those operations up, inserting
+<tt>cond_resched()</tt> calls to voluntarily give up the CPU for a bit if a
+higher-priority process needs to run.  It is, however, not possible to
+insert such calls into a single, long-running instruction, so some other
+mitigation is needed.  Arora chose to <a
+href="/ml/linux-kernel/20230830184958.2333078-8-ankur.a.arora@oracle.com/">add
+a new task flag</a> (<tt>TIF_ALLOW_RESCHED</tt>) marking the current task as
+being preemptible.  If the kernel, at the end of handling an interrupt,
+sees that flag, it knows that it can switch to a higher-priority task if
+need be.  This new flag could be set before clearing the pages, then reset
+afterward.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+This mechanism turned out to have some problems.  The code setting the flag
+may be preemptible, but other functions it calls may not be.  Other events,
+such as hardware interrupts or CPU traps (page faults, for example) could
+put the kernel into a non-preemptible situation as well.  Having a flag set
+that marks the current task as being preemptible anyway is just not going to
+lead to good things.
+<p>
+It looks like making this idea work with current kernels would require
+moving away from a task flag, and toward marking specific ranges of code as
+being preemptible in this way.  That could limit how widely this feature
+could be used, though, since finding out whether the current location is
+preemptible would require maintaining a data structure of the preemptible
+ranges and searching it, in the interrupt path,
+to see if preemption is possible.  That made Linus Torvalds <a
+href="/ml/linux-kernel/CAHk-=whMkp68vNxVn1H3qe_P7n=X2sWPL9kvW22dsvMFH8FcQQ@mail.gmail.com/">a
+little unhappy</a>:
+<p>
+<blockquote class="bq">
+	I really hate that, because I was hoping we'd be able to use this
+	to not have so many of those annoying and random "cond_resched()"
+	calls. [...]
+	I was hoping that we'd have some generic way to deal with this
+	where we could just say "this thing is reschedulable", and get rid
+	of - or at least not increasingly add to - the cond_resched() mess.
+</blockquote>
+<p>
+Peter Zijlstra <a
+href="/ml/linux-kernel/20230911150410.GC9098@noisy.programming.kicks-ass.net/">pointed
+out</a> that Torvalds was describing full preemption, which the kernel
+already supports quite well.  That led to a bit of a shift in the
+discussion.
+<p>
+<h4>Preemption models</h4>
+<p>
+The traditional Unix model does not allow for preemption of the kernel at
+all; once the kernel gets the CPU, it keeps executing until it voluntarily
+gives the CPU up.  In the beginning, Linux followed this model as well;
+over the years, though, the kernel has gained a number of preemption modes,
+selectable with a configuration option:
+<p>
+<ul class="spacylist">
+<li> <tt>PREEMPT_NONE</tt> is the traditional model, with no preemption at
+     all.  The kernel must give up the CPU, via a return to user space, a
+     blocking operation, or a <tt>cond_resched()</tt> call, before another
+     task can run.
+<li> <tt>PREEMPT_VOLUNTARY</tt> increases (significantly) the number of
+     points where the kernel is said to be voluntarily giving up the CPU.
+     Each call to <tt>might_sleep()</tt>, which is otherwise a debugging
+     function marking functions that could block, becomes a preemption
+     point, for example.
+<li> <tt>PREEMPT</tt> is full preemption; the kernel can be preempted at
+     any point where some factor (such as holding a spinlock or explicitly
+     disabling preemption) does not explicitly prevent it.
+<li> <tt>PREEMPT_RT</tt> is the realtime preemption mode, where even most
+     spinlocks become preemptible and a number of other changes are made as
+     well.
+</ul>
+<p>
+These options represent different tradeoffs between throughput and latency.
+Preemption is not free; it can worsen cache behavior, and tracking the
+state needed to know whether preemption is safe at any given time has costs
+of its own.  But latency hurts as well, especially for interactive use.  At
+the <tt>PREEMPT_NONE</tt> end of the scale, only throughput matters, and
+latencies can be long.  As the level of preemption increases, latency is
+reduced, but throughput might suffer as well.
+<p>
+As an extra complication, another option, <tt>PREEMPT_DYNAMIC</tt>, was <a
+href="https://git.kernel.org/linus/6ef869e06474">added to the 5.12
+kernel</a> by Michal Hocko in 2021.  It allows the preemption choice to be
+deferred until boot time, where any of the modes except <tt>PREEMPT_RT</tt>
+can be selected by the <tt>preempt=</tt> command-line parameter.
+<tt>PREEMPT_DYNAMIC</tt> allows distributors to ship a single kernel while
+letting users pick the preemption mode that works best for their workload.
+<p>
+Torvalds, seemingly looking closely at <tt>PREEMPT_DYNAMIC</tt> for the
+first time, <a
+href="/ml/linux-kernel/CAHk-=whc0Jsji_h-vLyDLT6Q-NCjSTMOg9qXACmoPZOdWqMovg@mail.gmail.com/">observed</a>
+that it maintains all of the information about whether the current task is
+preemptible, even when running in the no-preemption modes.  As Zijlstra <a
+href="/ml/linux-kernel/20230912072022.GA35261@noisy.programming.kicks-ass.net/">responded</a>,
+that suggests that the overhead of maintaining that information is not seen
+as being a problem; Ingo Molnar <a
+href="/ml/linux-kernel/ZQAVho72j1zG%2FHhK@gmail.com/">added</a> that, while
+it might be nice to patch that overhead out, "<q>it's little more than
+noise on most CPUs, considering the kind of horrible security-workaround
+overhead we have on almost all x86 CPU types</q>".  That overhead, he said,
+is less of a concern than preemption causing "<q>material changes to a
+random subset of key benchmarks that specific enterprise customers care
+about</q>", so <tt>PREEMPT_DYNAMIC</tt> works well as it is.
+<p>
+Zijlstra also said that, since <tt>PREEMPT_DYNAMIC</tt> seems to work for
+distributors, he is open to removing the other options.  While the
+connection wasn't made in the conversation, doing so might solve the
+original problem as well.  If the kernel is always maintaining the
+information needed to know when preemption is safe, that information can be
+used for a safe implementation of <tt>TIF_ALLOW_RESCHED</tt>.  It may not
+come to that, though; the conversation is ongoing and some more significant
+changes to preemption are being considered; stay tuned for <a
+href="/Articles/945422/">the second part of this series</a> once the dust
+settles a bit.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Preemption">Preemption</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/944686/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor945219"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The end of ARCH_NO_PREEMPT, at least for UML</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 21, 2023 16:13 UTC (Thu)
+                               by <b>saladin</b> (subscriber, #161355)
+                              [<a href="/Articles/945219/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Another piece of fallout from this discussion is a push to enable PREEMPT on all architectures.<br>
+<p>
+Currently, alpha, hexagon, m68k (classic), and UML don't support PREEMPT, but it was argued that it shouldn't<br>
+take more than 10 lines of assembly and a smattering of {enable,disable}_preempt() calls to support it [1].<br>
+<p>
+UML is a bit more complicated, but even so there's a patch [2] adding (limited) support for PREEMPT that shows<br>
+significant improvement over PREEMPT_NONE [3].<br>
+<p>
+This area is worth watching. Maybe we'll get full support for PREEMPT across the board, or maybe we'll<br>
+just get a few more architectures to support PREEMPT.<br>
+<p>
+[1]: <a href="https://lore.kernel.org/linux-um/877comw8m7.ffs@tglx/">https://lore.kernel.org/linux-um/877comw8m7.ffs@tglx/</a><br>
+[2]: <a href="https://lore.kernel.org/linux-um/20230921155522.283582-1-anton.ivanov@cambridgegreys.com/">https://lore.kernel.org/linux-um/20230921155522.283582-1-...</a><br>
+[3]: <a href="https://lore.kernel.org/linux-um/6934482b-f210-b86f-3fab-23355c989a56@kot-begemot.co.uk/">https://lore.kernel.org/linux-um/6934482b-f210-b86f-3fab-...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945219/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor945227"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 21, 2023 17:29 UTC (Thu)
+                               by <b>mtodorov</b> (subscriber, #158788)
+                              [<a href="/Articles/945227/">Link</a>] (17 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>As an extra complication, another option, PREEMPT_DYNAMIC, was added to the 5.12 kernel by Michal Hocko in 2021. It allows the preemption choice to be deferred until boot time, where any of the modes except PREEMPT_RT can be selected by the preempt= command-line parameter. PREEMPT_DYNAMIC allows distributors to ship a single kernel while letting users pick the preemption mode that works best for their workload.</blockquote>
+
+<p>I just wondered how much additional cost would it be in the code to make the choice of the PREEMPT model changeable at the runtime.</p>
+
+<p>This might allow for changing the mode from "normal operation" to "realtime" without rebooting ...</p>
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945227/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor945228"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 21, 2023 17:34 UTC (Thu)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/945228/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+rt is *much* more than just the preempt mode.<br>
+Even today rt cannot be selected with the PREEMPT_DYNAMIC boot parameter.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945228/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor945230"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 21, 2023 17:58 UTC (Thu)
+                               by <b>mtodorov</b> (subscriber, #158788)
+                              [<a href="/Articles/945230/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I see, this is correct.<br>
+<p>
+However, I can see the need for that, i.e. in changing a battleship's computer's mode from "normal operation" in which performance and computing efficiency is preferred to a "battle mode" or "condition red" where latency would be a paramount for ship's survival.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945230/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor945235"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 21, 2023 20:49 UTC (Thu)
+                               by <b>geofft</b> (subscriber, #59789)
+                              [<a href="/Articles/945235/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It sounds like the reason it isn't possible is that code is compiled differently, e.g. "even most spinlocks become preemptible" - in fact they are no longer spinlocks at all, but relatively normal locks where waiting code sleeps (yields to another process) instead of spinning: <a href="https://wiki.linuxfoundation.org/realtime/documentation/technical_details/sleeping_spinlocks">https://wiki.linuxfoundation.org/realtime/documentation/t...</a><br>
+<p>
+So you can't really convert this in a running system, because locks can be held at any time. You'd have to acquire the spinlock (which can block), then turn it into a sleeping lock, then figure out who's been spinning on the spinlock while you held it and somehow convert them. For a use case like going into battle, even if this were technically possible, having the mode switch require acquiring every lock in the system isn't acceptable because it could take indefinitely long. (And even if it weren't for this, there would be an ongoing performance cost in both modes in order to support checking what mode you're in and so forth, meaning that performance will never be as good as a pure real-time or pure non-real-time kernel.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945235/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor945237"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 21, 2023 21:26 UTC (Thu)
+                               by <b>mtodorov</b> (subscriber, #158788)
+                              [<a href="/Articles/945237/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I see your point. It could be reduced to checking a single variable telling which mode the system is currently in.<br>
+<p>
+The locks which are currently held in a non-preemptible mode are obviously going to be held, but the idea behind locking is that it is short-held for performance reasons anyway.<br>
+<p>
+I recall the kernel NMI timeouts on i.e. RCU locks being held for 20 seconds, but IMHO that is a sign of something deeply wrong in the kernel code ...<br>
+<p>
+However, I have given up the idea that I will ever understand fully how +32M lines of code work and inter-operate.<br>
+<p>
+Spinlocks are the idea of waiting from 6502 and Z80 and I think they're evil.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945237/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor945239"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 22, 2023 3:37 UTC (Fri)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/945239/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; However, I can see the need for that, i.e. in changing a battleship's computer's mode from "normal operation" in which performance and computing efficiency is preferred to a "battle mode" or "condition red" where latency would be a paramount for ship's survival.</span><br>
+<p>
+Switching modes is a complex and error-prone operation that affects the operation of all other software, so the net effect of doing this on the verge of a critical situation would be to switch into a less-tested mode for all software. Such a mode switch would need to be regularly tested, but even such testing would not be as good as simply running in that mode all the time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945239/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor945274"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 22, 2023 10:38 UTC (Fri)
+                               by <b>cloehle</b> (guest, #128160)
+                              [<a href="/Articles/945274/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; However, I can see the need for that, i.e. in changing a battleship's computer's mode from "normal operation" in which performance and computing efficiency is preferred to a "battle mode" or "condition red" where latency would be a paramount for ship's survival.</span><br>
+<p>
+Either you're application is real-time critical or it's not. Even in your case "Switching to battle mode" would be time-critical, wouldn't it?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945274/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor945319"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 22, 2023 12:17 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/945319/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; &gt; However, I can see the need for that, i.e. in changing a battleship's computer's mode from "normal operation" in which performance and computing efficiency is preferred to a "battle mode" or "condition red" where latency would be a paramount for ship's survival.</span><br>
+<p>
+<span class="QuotedText">&gt; Either you're application is real-time critical or it's not. Even in your case "Switching to battle mode" would be time-critical, wouldn't it?</span><br>
+<p>
+Actually if you really mean real-time, no it wouldn't.<br>
+<p>
+The term "real-time" is, sadly, horribly abused and often confused with "online".<br>
+<p>
+We basically have three - conflicting - targets we may want to optimise for.<br>
+<p>
+(1) Batch: Do as much work as possible, as efficiently as possible, and if some jobs take forever, well they do.<br>
+<p>
+(2) Online: Don't keep the user waiting. If that means background tasks get held up because we're wasting time checking to see if the user wants anything, well so be it.<br>
+<p>
+(3) Real time: We have deadlines. They MUST be met. We might have a job that only takes 20 minutes, but it needs to be completed AT midnight tomorrow. Or say we're making jam. Finish too early, and the jam will run away off the toast. Finish too late and we won't be able to get it out of the pan and into the jars. Basically, for real-time it doesn't matter when the deadline is, it matters that you can't move it.<br>
+<p>
+So take your battleship. Real-time doesn't mean the transition will happen quickly. Real-time means you know that if you engage real-time  mode, the cascade of actions to change OS state will take, say. pretty much exactly five minutes (or whatever time that is).<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945319/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor945335"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 22, 2023 18:11 UTC (Fri)
+                               by <b>cloehle</b> (guest, #128160)
+                              [<a href="/Articles/945335/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm aware of the distinction, but maybe my imagination is just lacking, but if the system is always used in 'non-RT'-mode until RT mode is needed, but that switch cannot be bound by a latency, what use case is there?<br>
+<p>
+The critical path for the RT reaction just increased from signal -&gt; RT reaction (with a defined latency upper bound for RT systems) to signal -&gt; switch to RT-mode -&gt; RT reaction (no upper bound anymore).<br>
+<p>
+Or how does the system know when to be in RT-mode?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945335/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor945337"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 22, 2023 18:41 UTC (Fri)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/945337/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; Or how does the system know when to be in RT-mode?</span><br>
+<p>
+There is no such thing as a "system RT mode".<br>
+<p>
+The kernel just provides mechanisms for tasks to be scheduled with various RT properties (e.g. RT-Fifo, RT-RR, deadline sched, locking latency guarantees, etc..).<br>
+But that does *not* mean that every task suddenly becomes a RT task. In fact, in a RT system almost all tasks usually still run in normal scheduling mode.<br>
+Normal tasks on a RT kernel basically just behave like tasks on a full-preempt kernel. Just with a little bit more overhead here and there. (I'm simplifying for the sake of briefness)<br>
+<p>
+A task has to opt-in to being RT. (And selecting a RT sched class is only part of that. There are many many many more things to consider.)<br>
+<p>
+And that's why it doesn't make sense at all to switch between full-preempt and RT-preempt during runtime. That would just add even more overhead with no added benefit. If your task doesn't need RT, then don't schedule it in a RT class.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945337/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor945321"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 22, 2023 12:34 UTC (Fri)
+                               by <b>kazer</b> (subscriber, #134462)
+                              [<a href="/Articles/945321/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The full RT is aimed at cases where safety (hazard) analysis determines that it is a critical task that must be made reliable to nth degree (what would be worst case if it failed, is it car ABS, heart monitor or CD-player). If it were part of, say, fly-by-wire system there would not be need to be in any other mode than full RT always. Less critical systems could have whatever mode suitable for the task.<br>
+<p>
+The RT mode is therefore determined by the task before code is ever deployed, not as a mode of operation "on the fly". RT is normally due to safety reasons and the worst case is what matters. If it safety isn't of consideration (only throughoutput) preemption isn't needed.<br>
+ <br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945321/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor945323"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 22, 2023 12:43 UTC (Fri)
+                               by <b>kazer</b> (subscriber, #134462)
+                              [<a href="/Articles/945323/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Adding to previous..<br>
+<p>
+The main feature of full RT is that it is *deterministic* - things happen at precisely when predicted and expected. Latency or performance is not important and they can be sacrificed for the sake of correctness.<br>
+<p>
+Servers can have a long latency for the sake of throughoutput and desktop users can prefer low latencies. While these deal with different pre-emption modes, they are not about real-timedness. So even in these cases boot-time selection is quite enough.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945323/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor945325"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 22, 2023 13:56 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/945325/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>RT isn't only of importance in safety-critical systems; in audio systems, 3 ms of latency is roughly equivalent to 1 m distance between the output device and the listener. For simple listening cases, this is a non-issue; you just have a big enough buffer that any plausible latency is covered by the buffer (e.g. a 3,000 ms buffer will cover most likely stalls). But for telephony, live effects and other such cases where there's feedback between the microphone and the output, you need to bound latency to a much smaller value.
+<p>The usual distinction in the RT world is between hard RT and soft RT; a system is soft RT if it recovers from a missed deadline as soon as it starts meeting deadlines again, and hard RT if further action has to be taken to recover or if recovery from missed deadlines is not possible. In this setup, audio is soft RT - if you miss a deadline, the audio system is in a fault condition, but as soon as you start hitting deadlines again, it recovers automatically; a fly-by-wire system is hard RT, since a failure to meet deadlines can result in the plane needing maintenance work.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945325/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor945350"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 23, 2023 6:17 UTC (Sat)
+                               by <b>donald.buczek</b> (subscriber, #112892)
+                              [<a href="/Articles/945350/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; If it were part of, say, fly-by-wire system there would not be need to be in any other mode than full RT always. </span><br>
+<p>
+Good example. You system doesn't need to be in RT mode if the plane is parked on the ground. It may, for example, be in some low power mode. When you are ready to go, you switch to fly mode which implies RT on critical systems. It's not critical, how long that takes. What you need, though,  is an indication that the switch is completed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945350/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor945366"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 23, 2023 7:23 UTC (Sat)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/945366/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But you can do that now with an existing RT kernel.<br>
+If your RT application decides to go non-RT, then it can do that now. Just switch scheduling modes.<br>
+And if you decide to put your system into sleep, you can do that now.<br>
+Switching the kernel preemption mode at runtime is absolutely not necessary to do all that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945366/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor945368"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 23, 2023 8:27 UTC (Sat)
+                               by <b>mtodorov</b> (subscriber, #158788)
+                              [<a href="/Articles/945368/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yet for a number of reasons, the RT preemption model isn't compiled by default ...<br>
+<p>
+Just as a curiosity, about a year ago the kernel 6.0 compiled with KASAN made a number of RCU stall warnings.<br>
+<p>
+It was blamed on the KASAN slow down, but I felt something odd if some RCU lock was held for more than 20 milliseconds, enough to trigger the NMI watchdog.<br>
+<p>
+After a year, I get the notion that it was due to the coarse granularity of the locks held while doing some tasks. In the worst case, an unlucky spinlocks contention can degrade your SMP system's performance in the worst case to a multicore 6502 ... Did somebody make a note on real-time telephony and heart monitor systems?<br>
+<p>
+Don't take this as I am ungrateful for the kernel - I am just not fond of the spinlocks and I wish I had a new parallel programming paradigm and a better grasp on the lockless algorithms and the RCU ...<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945368/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor945449"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 25, 2023 10:23 UTC (Mon)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/945449/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>You need to separate out PREEMPT_RT from real-time mode.
+<p>PREEMPT_RT configured kernels have slightly higher overheads than normal kernels, especially under full load, in return for a hard guarantee on the latencies that can be measured by processes in real time <a href="https://man7.org/linux/man-pages/man7/sched.7.html">scheduling classes</a> (at the time of this comment, that's SCHED_FIFO, SCHED_RR and SCHED_DEADLINE). If you don't use real time scheduling classes, then the overhead of PREEMPT_RT is entirely wasted, because online (SCHED_OTHER) and batch (SCHED_BATCH, SCHED_IDLE) scheduling classes do not get lower latencies in a PREEMPT_RT kernel.
+<p>Separately, a system is "in real-time mode" if it has one or more processes in runnable state in a real-time scheduling class. You can "switch" in and out of "real-time mode" by either blocking all processes in real-time scheduling classes on a kernel primitive such as a futex, or by removing all processes from real-time scheduling classes.
+<p>You can be "in real-time mode" with a PREEMPT_NONE or PREEMPT_VOLUNTARY kernel; the issue with this is that the kernel does not provide any guarantee that your process will be scheduled in time to meet its deadlines in this situation, but it's useful for (e.g.) providing musicians in a studio with live monitoring of the recording their DAW is making (complete with applied effects), where the worst consequence of missing a deadline is that you'll need to do another take. You'd prefer not to have to do another take, hence using real time scheduling to ensure that only the kernel can cause you to miss a deadline.
+<p>You can also use a PREEMPT_RT kernel with no real-time tasks. In this case, the kernel's latency guarantees are worthless, because you have no tasks that get guaranteed latencies, but you pay a small amount of overhead to allow the kernel to reschedule bits of itself to keep the latency guarantees.
+<p>The intended case for PREEMPT_RT kernels is to have real-time tasks, at least some of the time, where the system has been analysed to guarantee that the real-time tasks will always meet their deadlines.
+<p>You don't need to change the kernel configuration to switch out of "real-time mode" and enter low power states that are incompatible with your deadlines; you just change your scheduling. You can't switch codepaths between PREEMPT and PREEMPT_RT at runtime, because you need to have the system go completely idle in order to change locking, which is also the pre-requisite for kexec. If you do want to switch kernels, you can kexec between kernels at roughly the same time penalty you'd face if you tried to switch at runtime.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945449/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor945253"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Revisiting the kernel's preemption models (part 1)</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 22, 2023 9:46 UTC (Fri)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/945253/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+From <a href="https://lwn.net/ml/linux-kernel/ZQlV5l4pbKunQJug@gmail.com/">https://lwn.net/ml/linux-kernel/ZQlV5l4pbKunQJug@gmail.com/</a> it seems one suggestion is:<br>
+<p>
+<p>
+<span class="QuotedText">&gt; Ie. in the long run - after a careful period of observing performance </span><br>
+<span class="QuotedText">&gt; regressions and other dragons - we'd only have *two* preemption modes left:</span><br>
+<p>
+<span class="QuotedText">&gt;   !PREEMPT_RT     # regular kernel. Single default behavior.</span><br>
+<span class="QuotedText">&gt;   PREEMPT_RT=y    # -rt kernel, because rockets, satellites &amp; cars matter.</span><br>
+<p>
+<span class="QuotedText">&gt; Any other application level preemption preferences can be expressed via </span><br>
+<span class="QuotedText">&gt; scheduling policies &amp; priorities.</span><br>
+<p>
+PREEMPT_RT would still be a separate compile time option, due to the difficulty of switching locking primitives on the fly as mentioned in other comments here (and presumably switching to threaded interrupt handlers on the fly could be nontrivial as well). But the default behavior would be something similar to the current PREEMPT_NONE or PREEMPT_VOLUNTARY for non-RT processes, and similar to the current full PREEMPT ("low latency desktop") for RT processes. Best of both worlds.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/945253/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

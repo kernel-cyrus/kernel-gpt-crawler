@@ -1,0 +1,854 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A memory model for Rust code in the kernel [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/967049/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/966926/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/967049/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A memory model for Rust code in the kernel</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Benefits for LWN subscribers</b>
+<p>
+The primary benefit from <a href="/Promo/nst-nag5/subscribe">subscribing to LWN</a>
+       is helping to keep us publishing, but, beyond that, subscribers get
+       immediate access to all site content and access to a number of extra
+       site features.  Please sign up today!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 3, 2024</br>
+           </div>
+The Rust programming language differs from C in many ways; those
+differences tend to be what users admire in the language.  But those
+differences can also lead to an impedance mismatch when Rust code is
+integrated into a C-dominated system, and it can be even worse in the
+kernel, which is not a typical C program.  Memory models are a case in
+point.  A programming language's view of memory is sufficiently fundamental
+and arcane that many developers never have to learn much about it.  It is
+hard to maintain that sort of blissful ignorance while working in the
+kernel, though, so a recent discussion of how to choose a memory model for
+kernel code in Rust is of interest.
+<p>
+<h4>Memory models</h4>
+<p>
+It is convenient to view a system's memory as a simple array of bytes that
+can be accessed from any CPU.  The reality, though, is more complicated.
+Memory accesses are slow, so a lot of effort goes into minimizing them;
+modern systems are built with multiple levels of caching for that purpose.
+Without that caching, performance would slow to a crawl, severely impacting
+the production, delivery, and consumption of cat videos, phishing spam, and
+cryptocurrency scams.  This prospect is seen as a bad thing.
+<p>
+Multi-level caching speeds computation, but it brings a problem of its own:
+it is no longer true that every CPU in the system sees the same memory
+contents.  If one CPU has modified some data in a local cache,
+another CPU reading that data may not see the changes.  Operations
+performed in a carefully arranged order may appear in a different order
+elsewhere in the system.  As is the case in relativistic situations, the
+ordering of events depends on who is observing them.  Needless to say, this
+kind of uncertainty also has the potential to create disorder within an
+operating-system kernel.
+<p>
+CPUs have special operations that can ensure that a given memory store is
+simultaneously visible across the system.  These operations, though, are
+slow and need to be used with care.  Modern CPUs provide a range of
+"barrier" operations that can be used to properly sequence access to data
+with less overhead; see <a href="/Articles/576486/">this article</a> for an
+overview of some of them.  Use of these barriers can be somewhat complex
+(and architecture-specific), so a few generic interfaces have been created
+to simplify things (to the extent that they <i>can</i> be simplified).  A
+memory model combines a specification of how barriers should be used and
+any interfaces that ease that use, describing how to safely access data in
+concurrent settings.
+<p>
+<div class="tlr">
+"The majority of the _good_ programmers I know run away screaming
+from this stuff. As was said many, many years ago - understanding
+<tt>memory-barriers.txt</tt> is an -extremely high bar- to set as a basic
+requirement for being a kernel developer."<br>
+— <a
+href="/ml/linux-fsdevel/20200716014656.GJ2005@dread.disaster.area/">Dave
+Chinner</a>, 2020
+</div>
+
+The C11 standard, for example, defines some <a
+href="https://en.cppreference.com/w/c/language/atomic">atomic types</a> and
+<a href="https://en.cppreference.com/w/c/atomic">atomic operations</a>.
+C++ offers <a href="https://en.cppreference.com/w/cpp/atomic/atomic">an
+atomic type</a> of its own.  While the kernel community has occasionally <a
+href="/Articles/691128/">discussed</a> using the C atomic types, that has
+never happened for a number of reasons, some of which will become apparent
+below.  Instead, the kernel defines its own memory model, described in the
+infamous <a
+href="https://www.kernel.org/doc/html/latest/core-api/wrappers/memory-barriers.html">memory-barriers.txt</a>
+file (and sometimes referred to as "LKMM").  Few kernel developers
+understand this model in detail (and many <a href="/Articles/827180/">find
+it too subtle</a> to understand deeply), but it governs how memory
+access works at the lowest levels.  (See also <a
+href="/Articles/718628/">this article series</a> for more on the kernel's
+memory model).
+
+<p>
+One of the early concerns about incorporating Rust into the kernel is that
+the Rust language lacked a memory model of its own.  That gap has since
+been filled; the <a
+href="https://doc.rust-lang.org/std/sync/atomic/#memory-model-for-atomic-accesses">Rust
+memory model</a> looks a lot like the C++ model.  Boqun Feng, who helps
+maintain the kernel's memory model, thought that it would be good to
+formalize a model for Rust code to use in the kernel.  Should the Rust
+model be used, the kernel's model, or some combination of the two?  He <a
+href="/ml/linux-kernel/20240322233838.868874-1-boqun.feng@gmail.com/">posted
+his conclusion</a> to the linux-kernel mailing list: Rust code should
+adhere to the kernel's memory model.  He included an initial patch set
+showing what that would look like.
+<p>
+<h4>Using the kernel's model</h4>
+<p>
+The reasoning behind this conclusion is simple enough: "<q>Because kernel
+developers are more familiar with LKMM and when Rust code interacts with C
+code, it has to use the model that C code uses</q>".  Learning one memory
+model is hard enough; requiring developers to learn two models to work with
+the kernel would not lead to good results.  Even worse results are likely
+when Rust and C code interact, each depending on its respective memory model
+to ensure proper data ordering.  So, as long as the kernel has its own
+memory model, that is what Rust code will have to use.
+<p>
+Kent Overstreet <a
+href="/ml/linux-kernel/s2jeqq22n5ef5jknaps37mfdjvuqrns4w7i22qp2r7r4bzjqs2@my3eyxoa3pl3/">pointed
+out</a> a disadvantage of this approach: the kernel will remain
+incompatible with other Rust code and will not be able to incorporate it
+easily.  He suggested that, perhaps, the kernel's memory model could be
+rebuilt on top of C or C++ atomic operations, at which point supporting the
+Rust model would be easier.  That seems unlikely to happen, though, given
+the strong opposition from Linus Torvalds to any such change.
+<p>
+One of Torvalds's arguments was that <a
+href="/ml/linux-kernel/CAHk-=whY5A=S=bLwCFL=043DoR0TTgSDUmfPDx2rXhkk3KANPQ@mail.gmail.com/">language-based
+memory models are insufficiently reliable</a> for use in the kernel, and
+that is not a problem that can be addressed quickly.
+"<q>The C++ memory model may be reliable in another decade. And then a
+decade after *that*, we can drop support for the pre-reliable
+compilers.</q>" Thus, he said, "<q>I do not understand why people think
+that we wouldn't want to roll our own</q>".  Feng <a
+href="/ml/linux-kernel/Zf4fDJNBeRN5HOYo@boqun-archlinux/">added</a> that
+the kernel's memory model encompasses a number of use cases, such as
+mixed-size operations on the same variable, that are important to the
+kernel.  Those uses are not addressed (or allowed) in the Rust model.
+He did suggest that, perhaps, a subset of the Rust model could be
+implemented on top of the kernel's operations.
+<p>
+Another reason for the kernel project to implement its own memory model,
+Torvalds <a
+href="/ml/linux-kernel/CAHk-=whkQk=zq5XiMcaU3xj4v69+jyoP-y6Sywhq-TvxSSvfEA@mail.gmail.com/">said</a>,
+is that kernel developers need to be deeply familiar with the architectures
+they are supporting anyway.  There is no way to create a kernel without a
+lot of architecture-specific code.  Given that, "<q>having the architecture
+also define things like atomics is just a pretty small (and relatively
+straightforward) detail</q>".
+<p>
+Torvalds has <a
+href="/ml/linux-kernel/CAHk-=wjP1i014DGPKTsAC6TpByC3xeNHDjVA4E4gsnzUgJBYBQ@mail.gmail.com/">another
+reason</a> for sticking with the kernel's memory model, though: he thinks
+that the C++ model is fundamentally misdesigned.  A key aspect of that
+model is that data exposed to concurrent access is given a special atomic
+type, and the compiler automatically inserts the right barriers when that
+data is accessed.  Such a model can ensure that a developer never forgets
+to use the proper atomic operations, which is an appealing feature.  That
+is, however, not how the kernel's model works.
+<p>
+In the kernel's memory model, it is not the type of the data that
+determines how it must be accessed, but the context in which that access
+happens.  A simple example is data that is protected by a lock; while the
+lock is held, that data is not truly shared since the lock holder has
+exclusive access.  So there is no need for expensive atomic operations;
+instead, a simple barrier when the lock is released is sufficient.  In
+other settings, where a lock is not held, atomic operations may be needed
+to access the same data.
+<p>
+Torvalds argued that the kernel's approach to shared data makes more sense:
+<p>
+<blockquote class="bq">
+	In fact, I personally will argue that it is fundamentally wrong to
+	think that the underlying data has to be volatile. A variable may
+	be entirely stable in some cases (ie locks held), but not in
+	others.
+<p>
+	So it's not the *variable* (aka "object") that is 'volatile', it's
+	the *context* that makes a particular access volatile.
+<p>
+	That explains why the kernel has basically zero actual volatile
+	objects, and 99% of all volatile accesses are done through accessor
+	functions that use a cast to mark a particular access volatile.
+</blockquote>
+<p>
+This approach has been taken in the kernel for a long time; it is described
+in the <a
+href="https://docs.kernel.org/process/volatile-considered-harmful.html">volatile-considered-harmful
+document</a> that was first <a
+href="https://git.kernel.org/linus/0faa45480261">added to the kernel</a>
+for the 2.6.22 release in 2007.
+<p>
+The outcome of this discussion is clear enough: Rust code in the kernel
+will have to use the kernel's memory model for the foreseeable future.  The
+Rust language brings with it a number of new ways of doing things, many of
+which have significant advantages over&nbsp;C.  But bringing a new language
+into a code base that is old, large, and subject to special requirements is
+always going to require some compromises on the new-language side.  Using
+the kernel's memory model may not actually be a compromise, but it is
+different from what other Rust code will do; it will be one of the many
+things Rust developers will have to learn to work in the kernel project.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Development_tools-Rust">Development tools/Rust</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_model">Memory model</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/967049/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor968334"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2024 22:38 UTC (Wed)
+                               by <b>ejr</b> (subscriber, #51652)
+                              [<a href="/Articles/968334/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Vehemently agreeing for variables (esp. arrays) marked as "atomic." Ok, you use atomic int-fetch-and-add (ifa) to build them, but then they're effectively constant.<br>
+<p>
+Consider transposing a sparse matrix in CSR/CSC (compressed sparse row/column) representation. With ifa, you can build the transpose in parallel using only the output space. But if the language requires you to copy it... And doesn't allow some method of *scoping* the "atomicity" as with function arguments that suddenly don't match, well, feh.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968334/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor968335"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2024 22:46 UTC (Wed)
+                               by <b>atnot</b> (subscriber, #124910)
+                              [<a href="/Articles/968335/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Another disadvantage of going with a custom memory model is not immediately being able to use a bunch of nice tools like loom (<a href="https://github.com/tokio-rs/loom">https://github.com/tokio-rs/loom</a>) which allow you to exhaustively test your code with the worst orderings the C11 memory model allows, which is very neat.<br>
+<p>
+That said, the Kernel is probably big enough of a project for someone to be willing to add support for the LKMM to tools like this.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968335/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor968339"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 3, 2024 23:20 UTC (Wed)
+                               by <b>koverstreet</b> (subscriber, #4296)
+                              [<a href="/Articles/968339/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The C memory model doesn't support everything we need yet - we need to poke the appropriate people until it does.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968339/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor968363"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2024 10:58 UTC (Thu)
+                               by <b>foom</b> (subscriber, #14868)
+                              [<a href="/Articles/968363/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Doing anything like that would require the lkmm to be well-specified and correctly-implemented enough to be correctly formally modeled.<br>
+<p>
+Given how many research papers and iteratations the C/C++ mm has taken to address all sorts of crazy edge cases, and how little of that sort of work seems to have been done on the lkmm so far (as far as I can tell, at least), I'm skeptical that formal modeling could be successful yet...<br>
+<p>
+But maybe I'm wrong. I mean, I'm not an expert, I can only even barely understand the implications of the issue with sequentially-consistent ordering raised in <a href="http://plv.mpi-sws.org/scfix/paper.pdf">http://plv.mpi-sws.org/scfix/paper.pdf</a> and subsequently fixed in the first part of <a href="https://wg21.link/P0668">https://wg21.link/P0668</a> for C++20...<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968363/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor968340"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2024 0:16 UTC (Thu)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/968340/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Rust atomics do let you use non-atomic access to atomic values when you have obtained exclusive access, e.g. by taking a mutex.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968340/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor968506"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 5, 2024 7:56 UTC (Fri)
+                               by <b>phg</b> (subscriber, #96794)
+                              [<a href="/Articles/968506/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed, from the article it sounds like LKMM behavior could be modeled in Rust’s typesystem, using the typestate pattern for e. g.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968506/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor968341"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2024 0:18 UTC (Thu)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/968341/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe the Rust standard library could have a feature that implements its atomics on top of the LKMM atomics.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968341/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor968344"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What if another add-on language uses yet another memory model?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2024 2:59 UTC (Thu)
+                               by <b>felixfix</b> (subscriber, #242)
+                              [<a href="/Articles/968344/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Rust is just a tiny minority compared to the kernel's C code.  It ought to be obvious that it's better to convert the tiny minority than the huge majority.<br>
+<p>
+If yet another language is brought into kernel space (Java, C++, Algol) with yet another memory model, do you switch both Rust and kernel code to use the new tiny minority language?<br>
+<p>
+It's easier to keep the working memory model and make tiny newcomers adjust to it.<br>
+<p>
+Then again, I haven't mucked about in kernel code for 25 years.  I may be completely wrong.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968344/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor968349"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What if another add-on language uses yet another memory model?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2024 7:04 UTC (Thu)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/968349/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; It's easier to keep the working memory model and make tiny newcomers adjust to it.</span><br>
+<p>
+<span class="QuotedText">&gt; Then again, I haven't mucked about in kernel code for 25 years. I may be completely wrong.</span><br>
+<p>
+You are wrong. It may be EASIER, true, but if the working model is flawed then it's technical debt. In which case, yes maybe evolve it rather than ditch it, but it's SAFER (and better in the long run) to make the working model adjust to the newcomers.<br>
+<p>
+They found a lot of long-standing bugs in LLVM because Rust used a different model ...<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968349/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor969053"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">What if another add-on language uses yet another memory model?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2024 20:58 UTC (Mon)
+                               by <b>pjdesno</b> (guest, #167375)
+                              [<a href="/Articles/969053/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The standard practice in the Linux kernel world seems to be that if you break something, you fix it - i.e. if you change an interface, you have to submit a patch that not only does what you're intending to do, but fixes that interface everywhere it's used, in all zillion lines of the kernel. <br>
+<p>
+In theory the Rust folks could submit a patch that included changes across the entire kernel to update it to use a new memory model. That's 25 million lines of code, across multiple architectures including some they may not have access to. Some fraction of which are being actively developed while they're doing that work, so they'll have to go back and update those, etc etc. I expect the heat death of the universe to occur before they finished...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/969053/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor970124"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why languge specific?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2024 10:31 UTC (Wed)
+                               by <b>neva_krien</b> (guest, #169188)
+                              [<a href="/Articles/970124/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe it would be a good idea but I am doubtful the model should be made based on any 1 languge. <br>
+<p>
+And if I had to choose the 1 languge defiantly c. Just because everything has c interop and will have it for the foreseeable future. <br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/970124/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor970125"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why languge specific?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 17, 2024 10:46 UTC (Wed)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/970125/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>Which C memory model?
+<p>The whole problem here is that the kernel (written in C) has a memory model based on C90's memory model with extensions, and this memory model is not compatible with C11's memory model.
+<p>In turn, the C11 memory model is underspecified (contains defects, to use the C committee jargon), and you need to consider the fixes to it in C17 and C23 to have a complete memory model - it's also quite likely that a future C standard will fix more defects in the C11 memory model.
+
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/970125/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor968427"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2024 16:08 UTC (Thu)
+                               by <b>mbp</b> (subscriber, #2737)
+                              [<a href="/Articles/968427/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for writing about this, but I do wish this article had given some examples of Rust code that is legal in normal userspace Rust but not in the Linux kernel, so people not deeply steeped in these models could understand what it really means.<br>
+<p>
+From a brief look at the patches you linked, it seems like the impact is that Rust kernel code won't be able to use the normal `std::sync` primitives, like for atomic ints, but rather some different kernel-specific primitives. However, most Rust code would look the same as you'd normally expect, except for using these different underlying types?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968427/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor968433"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2024 16:44 UTC (Thu)
+                               by <b>kpfleming</b> (subscriber, #23250)
+                              [<a href="/Articles/968433/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's probably the case, but given the context (drivers and filesystems and other kernel components) the usage of synchronized access (locking), atomics, etc. will likely be orders of magnitude more frequent than 'normal Rust code'. If the replacement primitives don't provide the same semantics as the ones in the Rust standard library, then the code is fundamentally different even if it appears to be similar.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968433/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor968436"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2024 16:51 UTC (Thu)
+                               by <b>mbp</b> (subscriber, #2737)
+                              [<a href="/Articles/968436/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yep, that's the kind of thing I would like to read about, as a person who's written a decent amount of Rust and a little bit of kernel C code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968436/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor968442"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2024 17:47 UTC (Thu)
+                               by <b>dvdeug</b> (guest, #10998)
+                              [<a href="/Articles/968442/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; So it's not the *variable* (aka "object") that is 'volatile', it's the *context* that makes a particular access volatile.</span><br>
+<p>
+That reduces my (already low) plans of working on the kernel. I can see the arguments against how C uses volatile, but the memory model is already confusing enough, and trying to use volatile in ways it's not intended just adds confusion. Why not copy from a volatile variable, work on it, and then copy it back to the volatile variable when you're done? Similar semantics, and clearly working within the standard.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968442/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor968444"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 4, 2024 17:52 UTC (Thu)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/968444/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;Why not copy from a volatile variable, work on it, and then copy it back to the volatile variable when you're done?</span><br>
+<p>
+Because it doesn't give you the option to do a non-volatile access. Which is the common case in the kernel. We want optimization, except for in a few cases (a.k.a. context).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968444/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor968850"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2024 1:11 UTC (Mon)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/968850/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So "you" want the _same_ memory to behave sometimes as "shared" and sometimes not. This is definitely looks like very  sharpest knives.<br>
+<p>
+Even _C++_ chose a "slower" and safer to use model? Wow, no surprise everyone is running away from memory-barriers.txt.<br>
+<p>
+I guess it's OK as long as the kernel can provide "some" safe abstractions/routines that allow most kernel developers not to think about that? Which seems to be the case since very few understand memory-barriers.txt and Linux has been relatively... successful :-)<br>
+<p>
+At that point I should really go and read the email thread but I don't have the time (that's why we have LWN) so I'll stop...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968850/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor968920"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 8, 2024 14:41 UTC (Mon)
+                               by <b>foom</b> (subscriber, #14868)
+                              [<a href="/Articles/968920/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Note that C++20 did add support for atomic access to memory without using an atomic typed variable, <a href="https://en.cppreference.com/w/cpp/atomic/atomic_ref">https://en.cppreference.com/w/cpp/atomic/atomic_ref</a><br>
+<p>
+But also, gcc and clang have supported it as a compiler built-in function since forever. The kernel has never been shy about using compiler extensions elsewhere, so I'm not sure why the inability to do atomic access on non-atomic-typed memory in standard C is even a point of discussion.<br>
+<p>
+Such functionality is certainly useful for some rare cases, but does mean the user has to _manually_ deal with ensuring the alignment is as high as required, and ensure that the memory isn't accessed non-atomically at the same time as atomically (or else UB).<br>
+<p>
+It's good for the functionality to exist, but it's also good for it not to be the default, because atomics already have enough sharp edges without. I'd note also that in most cases, it is entirely sufficient to drop down to a memory_order_relaxed access, instead of dropping to a non-atomic access. The cost of a relaxed atomic access is minimal, as are the guarantees (more sharp edges!).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/968920/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor973819"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A memory model for Rust code in the kernel</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 16, 2024 2:19 UTC (Thu)
+                               by <b>mrugiero</b> (guest, #153040)
+                              [<a href="/Articles/973819/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You would need to provide context either way because `volatile` only tells the compiler not to remove or reorder across sequence points (calls to functions and other `volatile` accesses), but does nothing wrt the CPU that will reorder whatever it wants, nor across non-volatile accesses. You need the explicit barriers for any kind of synchronization, there's no way around that. So, just use the `WRITE_ONCE` and `READ_ONCE` macros that will do the `volatile` access while ensuring the right behavior wrt the CPU as well. And it the context allows, simply read and write from the normal variable without penalty.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/973819/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

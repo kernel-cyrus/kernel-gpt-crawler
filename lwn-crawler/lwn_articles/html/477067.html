@@ -1,0 +1,329 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The zsmalloc allocator [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/477067/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/476201/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/477067/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The zsmalloc allocator</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 25, 2012</br>
+           </div>
+The kernel cannot be said to lack for memory allocation mechanisms.  At the
+lowest level, "memblock" handles chunks of memory for the rest of the
+system.  The page allocator provides memory to the rest of the kernel in
+units of whole pages.  Much of the kernel uses one of the three slab
+allocators to get memory blocks in arbitrary sizes, but there is also
+<tt>vmalloc()</tt> for situations where large, virtually-contiguous regions
+are needed.  Add in various other specialized allocation functions and
+other allocators (like <a href="/Articles/447405/">CMA</a>) and it starts
+to seem like a true embarrassment of choices.  So what's to be done in this
+situation?  Add another one, of course.
+<p>
+The "zsmalloc" allocator, <a href="/Articles/474880/">proposed</a> by Seth
+Jennings, is aimed at a specific use case.  The slab allocators work by
+packing multiple objects into each page of memory; that works well when the
+objects are small, but can be problematic as they get larger.  In the worst
+case, if a kernel subsystem routinely needs allocations that are just
+larger than PAGE_SIZE/2, only one object will fit within a page.  Slab
+allocators can attempt to allocate multiple physically-contiguous pages in
+order to pack those large objects more efficiently, but, on
+memory-constrained systems, those allocations can become difficult - or
+impossible.  So, on systems that are already tight of memory, large objects
+will need to be allocated one-per-page, wasting significant amounts of
+memory through internal fragmentation.
+<p>
+The zsmalloc allocator attempts to address this problem by packing objects
+into a new type of compound page where the component pages are not
+physically contiguous.  The result can be much more efficient memory usage,
+but with some conditions: 
+<p>
+<ul>
+<li> Code using this allocator must not require physically-contiguous
+     memory,
+<p>
+<li> Objects must be explicitly mapped before use, and
+<p>
+<li> Objects can only be accessed in atomic context.
+</ul>
+<p>
+Code using zsmalloc must start by creating an allocation pool to work from:
+<p>
+<pre>
+    struct zs_pool *zs_create_pool(const char *name, gfp_t flags);
+</pre>
+<p>
+Where <tt>name</tt> is the name of the pool, and <tt>flags</tt> will be
+used to allocate memory for the pool.  It is not entirely clear (to your
+editor, at least) why multiple pools exist; the <tt>zs_pool</tt> structure
+is relatively large, and a pool is really only efficient if the number of
+objects allocated from it is also large.  But that's how the API is
+designed.
+<p>
+A pool can be released with:
+<p>
+<pre>
+    void zs_destroy_pool(struct zs_pool *pool);
+</pre>
+<p>
+A warning (or several warnings) will be generated if there are objects
+allocated from the pool that have not been freed; those objects will become
+entirely inaccessible after the pool is gone.
+<p>
+Allocating and freeing memory is done with:
+<p>
+<pre>
+    void *zs_malloc(struct zs_pool *pool, size_t size);
+    void zs_free(struct zs_pool *pool, void *obj);
+</pre>
+<p>
+The return value from <tt>zs_malloc()</tt> will be a pointer value, or NULL
+if the object cannot be allocated.  It would be a fatal mistake, though, to
+treat that pointer as if it were actually a pointer; it is actually a magic
+cookie that represents the allocated memory indirectly.  It might have been
+better to use a non-pointer type, but, again, that is how the API is
+designed.  Getting a pointer that can actually be used is done with:
+<p>
+<pre>
+    void *zs_map_object(struct zs_pool *pool, void *handle);
+    void zs_unmap_object(struct zs_pool *pool, void *handle);
+</pre>
+<p>
+The return value from zs_map_object() will be a kernel virtual address that
+can be used to access the actual object.  The return address is essentially
+a per-CPU object, so the calling code will be in
+atomic context until the object is freed with <tt>zs_unmap_object()</tt>.
+Note that the <tt>handle</tt> passed to <tt>zs_unmap_object()</tt> is the
+original cookie obtained from <tt>zs_malloc()</tt>, not the pointer from
+<tt>zs_map_object()</tt>.  Note also that only one object can be safely
+mapped at a time on any given CPU.
+<p>
+Internally, zsmalloc divides allocations by object size much like the slab
+allocators do, but with a much higher granularity - there are 254 possible
+allocation sizes all less than <tt>PAGE_SIZE</tt>.  For each size, the code
+calculates an optimum number of pages (up to 16) that will hold an array of
+objects of that size with minimal loss to fragmentation.  When an
+allocation is made, a "zspage" is created by allocating the calculated
+number of individual pages and tying them all together.  That tying is done
+by overloading some fields of <tt>struct page</tt> in a scary way (that is
+not a criticism of zsmalloc: <i>any</i> additional meanings overlaid onto
+the already heavily overloaded <tt>page</tt> structure are scary):
+<p>
+<ul>
+<li> The first page of a zspage has the <tt>PG_private</tt> flag set.  The
+     <tt>private</tt> field points to the second page (if any), while the
+     <tt>lru</tt> list structure is used to make a list of zspages of the
+     same size.
+<p>
+<li> Subsequent pages are linked to each other with the <tt>lru</tt>
+     structure, and are linked back to the first page with the
+     <tt>first_page</tt> field (which is another name for <tt>private</tt>,
+     if one looks at the structure definition).
+<p>
+<li> The last page has the <tt>PG_private_2</tt> flag set.
+</ul>
+<p>
+Within a zspage, objects are packed from the beginning, and may cross the
+boundary between pages.  The cookie returned from <tt>zs_malloc()</tt> is a
+combination of a pointer to the <tt>page</tt> structure for the first
+physical page and the offset of the object within the zspage.  Making that
+object accessible to the rest of the kernel at mapping time is a matter of
+calculating its location, then either (1)&nbsp;mapping it with
+<tt>kmap_atomic()</tt> if the object fits entirely within one physical
+page, or (2)&nbsp;assigning a pair of virtual addresses if the object
+crosses a physical page boundary.
+<p>
+The primary users of zsmalloc are the zcache and zram mechanisms, both of which are
+currently in staging.  These subsystems use the <a
+href="/Articles/454795/">transcendent memory</a> abstraction to store
+compressed copies of pages in memory.  Those compressed pages can still be
+a substantial fraction of the (uncompressed) page size, so fragmentation
+issue addressed by zsmalloc can be a real problem.  Given the specialized
+use case and the limitation imposed by zsmalloc, it is not clear that it
+will find users elsewhere in the kernel, but one never knows.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Internal_API">Memory management/Internal API</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Transcendent_memory">Transcendent memory</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/477067/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor477379"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Missing the primary author</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2012 16:25 UTC (Thu)
+                               by <b>sjennings</b> (guest, #74813)
+                              [<a href="/Articles/477379/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Just wanted to add that the primary designer and author of the zsmalloc allocator is Nitin Gupta.  I (Seth) helped with design/bug fixes and submitted the patches since his changes and mine had dependencies.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/477379/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor647423"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Missing the primary author</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2015 6:48 UTC (Mon)
+                               by <b>vivs0766</b> (guest, #99130)
+                              [<a href="/Articles/647423/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why can't we maintain a single free list for all free objects in pool of zspage's instead of maintaining a separate freelist for each zspages. I mean to say that if we maintain a single free list then it would be easy for us to allocate objects from freelist instead of looKing for freelist among zspages.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/647423/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor647422"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The zsmalloc allocator</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 8, 2015 6:44 UTC (Mon)
+                               by <b>vivs0766</b> (guest, #99130)
+                              [<a href="/Articles/647422/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why can't we maintain a single free list for all free objects in pool of zspage's instead of maintaining a separate freelist for each zspages. I mean to say that if we maintain a single free list then it would be easy for us to allocate objects from freelist instead of looKing for freelis among zspages. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/647422/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2012, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

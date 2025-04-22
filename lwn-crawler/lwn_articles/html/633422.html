@@ -1,0 +1,545 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Epoll evolving [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/633422/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/633105/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/633422/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Epoll evolving</h1>
+</div>
+<div class="ArticleText">
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>February 16, 2015</br>
+           </div>
+Epoll is a set of Linux-specific system calls intended to provide fast
+polling for large numbers of file descriptors.  The API has been in use
+since it was merged during the 2.5 development series but, like many
+interfaces, there is always room for improvement.  There are currently two
+patch sets making the rounds that would add functionality to this set of
+system calls.
+<p>
+<h4>An epoll overview</h4>
+<p>
+Epoll is designed to function somewhat like <tt>select()</tt> or
+<tt>poll()</tt>, but with more options and with higher performance when
+large numbers of file descriptors are in use.  Each call to
+<tt>select()</tt> or <tt>poll()</tt> can involve an entirely new set of
+file descriptors, so the kernel must go through the process of validating
+each one, checking for I/O readiness, and adding the polling process to the
+appropriate wait queue.  But the actual list of file descriptors tends not
+to change much between calls, so much of that work is unnecessary
+duplicated effort.  The epoll calls get around this problem by separating
+that setup work from the act of waiting for a file descriptor to become
+ready.
+<p>
+A process using this API must begin by creating a special file descriptor
+to use with polling; that is done with a call to one of:
+<p>
+<pre>
+    #include &lt;sys/epoll.h&gt;
+
+    int epoll_create(int size);
+    int epoll_create1(int flags);
+</pre>
+<p>
+
+Either call will return a file descriptor to be used with the remaining
+epoll functions.  The <tt>size</tt> parameter to <tt>epoll_create()</tt> is
+no longer used; the <tt>flags</tt> argument added for
+<tt>epoll_create1()</tt> can 
+be used to set the close-on-exec flag for the resulting file descriptor.
+<p><blockquote class="ad">
+<b><tt>$ sudo subscribe today</tt></b>
+<p>
+Subscribe today and elevate your LWN privileges. You’ll have
+access to all of LWN’s high-quality articles as soon as they’re
+published, and help support LWN in the process.  <a href="https://lwn.net/Promo/nst-sudo/claim">Act now</a> and you can start with a free trial subscription.
+</blockquote>
+<p>
+The next step is to add all of the file descriptors that are to be
+monitored, using:
+<p>
+<pre>
+    int epoll_ctl(int efd, int op, int fd, struct epoll_event *event);
+</pre>
+<p>
+If <tt>op</tt> is <tt>EPOLL_CTL_ADD</tt>, the given <tt>fd</tt> will be
+added to the set.  The <tt>event</tt> parameter is used to describe which
+events will be polled for; see <a
+href="http://man7.org/linux/man-pages/man2/epoll_ctl.2.html">the man
+page</a> for details.  <tt>epoll_ctl()</tt> can also be used to remove file
+descriptors or to modify how the polling is done.
+<p>
+Finally, actually waiting for one of the file descriptors in the set to
+become ready is done with:
+<p>
+<pre>
+    int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout);
+    int epoll_pwait(int epfd, struct epoll_event *events, int maxevents, int timeout,
+                    const sigset_t *sigmask);
+</pre>
+<p>
+The events that cause <tt>epoll_wait()</tt> to return (up to
+<tt>maxevents</tt>) will be stored in the
+<tt>events</tt> array; the <tt>timeout</tt> parameter is specified in
+milliseconds.  The <tt>epoll_pwait()</tt> version also allows the
+specification of a set of signals to be blocked (or unblocked) during the
+call.  Again, see <a
+href="http://man7.org/linux/man-pages/man2/epoll_wait.2.html">the man
+page</a> for details.
+<p>
+
+<h4>epoll_ctl_batch() and epoll_pwait1()</h4>
+<p>
+<a href="/Articles/633195/">This patch set from Fam Zheng</a> introduces two
+new system calls to the epoll family.  The first of these addresses a
+performance problem that comes up in situations where it is often necessary
+to make changes to the file descriptors in the epoll set.  A call to
+<tt>epoll_ctl()</tt> can only add, modify, or delete a single file
+descriptor; if a lot of descriptors need to be changed, there will need to
+be a lot of <tt>epoll_ctl()</tt> calls to get that work done.  The proposed
+<tt>epoll_ctl_batch()</tt> system call gets around that problem by processing
+multiple file descriptors in a single call:
+<p>
+<pre>
+    int epoll_ctl_batch(int epfd, int flags, int ncmds, struct epoll_ctl_cmd *cmds);
+</pre>
+<p>
+The <tt>cmds</tt> structure essentially duplicates all of the arguments
+that would have been passed to an <tt>epoll_ctl()</tt> call.  By passing an
+array of these structures, a program can perform operations on multiple
+file descriptors with a single system call.
+<p>
+Fam's other change is to add a new system call to perform the actual
+polling:
+<p>
+<pre>
+    struct epoll_wait_params {
+	int clockid;
+	struct timespec timeout;
+	sigset_t *sigmask;
+	size_t sigsetsize;
+    };
+
+    int epoll_pwait1(int epfd, int flags,
+                     struct epoll_event *events, int maxevents,
+                     struct epoll_wait_params *params);
+</pre>
+<p>
+
+This version of <tt>epoll_wait()</tt> adds a new <tt>flags</tt> parameter,
+but does not define any flag values, so <tt>flags</tt> must be zero.  The
+parameters shuffled off into the <tt>params</tt> structure are mainly
+intended to give the application more control over timeout processing.  The
+millisecond-resolution timeout understood by <tt>epoll_wait()</tt> has
+proved to be too coarse for a number of use cases.  The new system call
+defines a timeout with nanosecond resolution, getting around that problem. 
+
+<p>
+<a name="excl"></a>
+<h4>Better multi-threaded behavior</h4>
+<p>
+Jason Baron (of Akamai) has run into a different problem that only comes up
+with a relatively uncommon usage pattern.  Normally, there will only be one
+process using a polling function to monitor a given file descriptor.  But,
+in Jason's use case, there can be multiple threads, each of which is using
+epoll to track the same set of file descriptors.  In this setting, an event
+on any given file descriptor will cause <i>all</i> of the waiting processes
+to wake up, even though only one of them will be able to actually handle
+the event.  This thundering-herd problem is something that Jason would like
+to avoid.
+<p>
+His response is <a href="/Articles/632590/">this patch</a> adding a couple
+of new flags to be attached to file descriptors via <tt>epoll_ctl()</tt>.
+The first of these, <tt>EPOLLEXCLUSIVE</tt>, requests that only one process
+be woken up to handle an event on the associated file descriptor.
+Internally, the change is a simple matter of using
+<tt>add_wait_queue_exclusive()</tt> instead of <tt>add_wait_queue()</tt>
+when setting up the polling.  Obviously, all processes polling the same
+file descriptor would have to use the exclusive mode to get down to a
+single wakeup per event.
+<p>
+
+That change did not entirely solve Jason's problem, though, in that it
+ended up with the same process waking up in response to each event.  Since
+one of the reasons for epoll's existence is to allow processes to be left
+on all of the file-descriptor-specific wait queues between calls to
+<tt>epoll_wait()</tt>, the process that is at the head of any given queue
+will remain there.  It will thus be the one to receive all of the exclusive
+wakeups.  But the whole point of having multiple processes polling the same
+file descriptor is to spread the work around; waking the same process every
+time thwarts that objective.  To deal with that, Jason added another flag,
+called <tt>EPOLLROUNDROBIN</tt>, that causes the kernel to work through
+each of the polling processes in turn.
+
+<p>
+Support for this mode was added to the scheduler in the form of a new wait
+queue function:
+<p>
+<pre>
+    void add_wait_queue_rr(wait_queue_head_t *q, wait_queue_t *wait);
+</pre>
+<p>
+When waiting is done using <tt>add_wait_queue_rr()</tt>, only a single
+process will wake, just like with <tt>add_wait_queue_exclusive()</tt>.
+But, in addition, the process at the head of the wait queue will be moved
+to the tail, so it will not see another wakeup until all of the other
+processes have had their turn.
+<p>
+Jason's patch posting includes results from a little benchmark program
+showing a nearly 50% reduction in execution time when the exclusive mode is
+used.  When there are a lot of wakeups happening (as can be the case for
+many network-oriented workloads), the extra overhead caused by thundering
+herds can be crippling.
+<p>
+
+Both patches have received a fair number of review comments, and Fam's
+patches in particular have evolved quite a bit since <a
+href="/Articles/630097/">the first posting</a> in January.  Your editor's
+unscientific impression is that API-related patches are getting more
+attention than they once did.  That, of course, would be a good thing; APIs
+live forever, so it's better to get them right before shipping them to
+users and being committed to supporting them forever.  These patches seem
+close to being ready, though; they might make an appearance in the next
+merge window.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Epoll">Epoll</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/633422/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor634010"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Epoll evolving</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 19, 2015 13:44 UTC (Thu)
+                               by <b>tdz</b> (subscriber, #58733)
+                              [<a href="/Articles/634010/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wonder what program would listen on the same file descriptor in multiple threads. In the general case, I'd say that the program should be redesigned.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/634010/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor634026"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Listening from multiple threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 19, 2015 15:12 UTC (Thu)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/634026/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      That question was raised during the discussion; it seems to be a (valid) way of partitioning the load across a large system.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/634026/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor634082"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Listening from multiple threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 19, 2015 19:37 UTC (Thu)
+                               by <b>jeff_marshall</b> (subscriber, #49255)
+                              [<a href="/Articles/634082/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Interesting. It seems like it might also be useful to take advantage of receive flow steering to preferentially wake up a thread running on the same core that is handling the kernel-side packet processing. Of course, this won't always work (i.e., the user-mode processing is taking up 100% of that core), but it could provide some nice additional throughput thanks to cache locality.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/634082/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor634113"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Listening from multiple threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 19, 2015 21:44 UTC (Thu)
+                               by <b>kugel</b> (subscriber, #70540)
+                              [<a href="/Articles/634113/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But I wonder why thread N is less appropriate than that N+1 (or any other one) just because thread N already handled the last poll event(s). To me it seems that all threads that call epoll() are equally appropriate regardless the past, because all of them are equally idle waiting for I/O events. I mean, what is the technical rationale here to prefer switching threads when there is barely enough work for one?<br>
+<p>
+But I can fully understand that waking only one thread can give better results than waking all threads, if only one can successfully respond to the event anyway.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/634113/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor634171"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Listening from multiple threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 20, 2015 10:39 UTC (Fri)
+                               by <b>pbonzini</b> (subscriber, #60935)
+                              [<a href="/Articles/634171/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Because if you have N file descriptors that are ready, all of them gets signaled on the same thread.  Instead, with round-robin the behavior is more random.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/634171/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor638111"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Listening from multiple threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 26, 2015 20:29 UTC (Thu)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/638111/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I can't understand this feature, either.<br>
+<p>
+If you have multiple threads waiting on the same event, then presumably you're using EPOLLONESHOT. If you're not, then you're going to have races when you close a descriptor, whether or not you're using a mutex to synchronize operations on whatever object the descriptor is associated with.[1]<br>
+<p>
+If you're using EPOLLONESHOT, that means the event is disabled until the edge condition trigger is re-armed, which means only one thread would ever dequeue the event. So why shouldn't EPOLLEXCLUSIVE already be the default behavior for EPOLLONESHOT?<br>
+<p>
+The only situation where the above assumptions don't hold is calling accept(2). In a multi-threaded environment you definitely don't want to use EPOLLONESHOT, because you don't want the thread that woke up to dequeue _all_ incoming connections. However, the recent SO_REUSEPORT patch solved that particular problem. (See <a href="https://lwn.net/Articles/542629/">https://lwn.net/Articles/542629/</a> although the per-file descriptor queue is annoying because if a thread or process exits you drop any connections in the queue--a shared queue would be much nicer.)<br>
+<p>
+Plus, it you're only waking up one thread, that means latency will suffer, because the event won't be attended until that thread is finished with other work. If you're not worried about latency, why are you sharing events among multiple threads? Why not assign an event to a single thread from the very beginning? In such a case the round-robin behavior makes even less sense.<br>
+<p>
+Really shouldn't the behavior for EPOLLEXCLUSIVE (and EPOLLONESHOT, for that matter) be to wake up the _first_ thread that's sleeping on the wait queue, and no others?<br>
+<p>
+[1] Unless you go out of your way to make sure a quiescent period has elapsed, such as making sure every thread has be woken up once from epoll_wait after you deleted the descriptor from the epoll queue, and before you close the descriptor.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/638111/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor680039"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Listening from multiple threads</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 14, 2016 18:09 UTC (Mon)
+                               by <b>klempner</b> (subscriber, #69940)
+                              [<a href="/Articles/680039/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can reduce the severity of those races on descriptor close to merely looking like a spurious event -- which is generally fine, because there are little to no guarantees that you wont get spurious edges.<br>
+<p>
+All you need to do is freelist the structure you hand off to epoll. If that structure is still on the freelist when that extra event comes in, then great, no problem. If it has been reassigned, the event on the old file descriptor just looks like an event on the new one.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/680039/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor634296"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Epoll evolving</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 21, 2015 15:38 UTC (Sat)
+                               by <b>Yorick</b> (guest, #19241)
+                              [<a href="/Articles/634296/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Perhaps it is now (finally) standard practice for syscall additions, but I would still like to applaud Fam Zheng for including a proposed man page along with the actual code. If nothing else, it sets a good example for others to follow!<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/634296/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor635031"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Epoll evolving</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 26, 2015 20:06 UTC (Thu)
+                               by <b>sbohrer</b> (guest, #61058)
+                              [<a href="/Articles/635031/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Since the addition of timerfd we've had the ability to have nanosecond resolution timeouts in epoll.  I suppose this simplifies things a little, but it wasn't hard to put a timerfd in your epoll set.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/635031/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2015, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

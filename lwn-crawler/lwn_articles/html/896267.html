@@ -1,0 +1,604 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>splice() and the ghost of set_fs() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/896267/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/896350/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/896267/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>splice() and the ghost of set_fs()</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>LWN.net needs you!</b>
+<p>
+Without subscribers, LWN would simply not exist.  Please consider
+       <a href="/Promo/nst-nag2/subscribe">signing up for a subscription</a> and helping
+       to keep LWN publishing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>May 26, 2022</br>
+           </div>
+The normal rule of kernel development is that the creation of user-space
+regressions is not allowed; a patch that breaks a previously working
+application must be either fixed or reverted.  There are exceptions,
+though, including <a href="https://git.kernel.org/linus/36e2c7421f02">a
+5.10 patch</a> that has been turning up regressions ever since.  The story
+that emerges here shows what can happen when the goals of stability,
+avoiding security problems, and code cleanup run into conflict.
+<p>
+The <tt>set_fs()</tt> function was added to the kernel early in its
+history; it was not in the initial 0.01 release, but was added before the
+0.10 release in late 1991.
+Normally, kernel code that is intended to access user-space memory will
+generate an error if it attempts to access kernel space instead; this
+restriction prevents, for example, attempts by an attacker to access kernel
+memory via system calls.  A call to
+<tt>set_fs(KERNEL_DS)</tt> can be used to lift the restriction when the 
+need arises; a common use case for <tt>set_fs()</tt> is to be able to
+perform file I/O from within the kernel.  Calling <tt>set_fs(USER_DS)</tt>
+puts the restriction back.
+<p>
+The problem with <tt>set_fs()</tt> is that it turns out to be easy to
+forget the second <tt>set_fs()</tt> call to restore the protection of
+kernel space, leading directly to the "total compromise" scenario that
+kernel developers will normally take some pains to avoid.  Numerous such
+bugs have been fixed over the years, but it had long been clear that the
+real solution was to just get rid of <tt>set_fs()</tt> entirely and adopt
+safer ways of accessing kernel memory when needed.
+<p>
+Developers (and Christoph Hellwig in particular) got more serious about
+this objective in 2020 and <a href="/Articles/832121/">made a determined
+push</a> to eliminate <tt>set_fs()</tt> entirely.  Much of this work went
+into 5.10, though the final bits of the <tt>set_fs()</tt> infrastructure
+were only removed in 5.18.  Back in 2020, though, one question that
+provoked some discussion was what should be done about <a
+href="https://man7.org/linux/man-pages/man2/splice.2.html"><tt>splice()</tt></a>.
+<p>
+The <tt>splice()</tt> system call will connect an open file descriptor to a
+pipe, then move data between the two for as long as the data stream lasts.
+This movement happens entirely within the kernel, potentially eliminating
+the need for large numbers of system calls; in some settings, it can
+provide a significant performance improvement.  By its nature,
+<tt>splice()</tt> often has to move data to and from buffers that are in
+kernel space; to make that possible, it used <tt>set_fs()</tt>.
+<p>
+Hellwig duly came up with a new implementation that would keep
+<tt>splice()</tt> working in the absence of <tt>set_fs()</tt>, but Linus
+Torvalds <a
+href="/ml/linux-kernel/CAHk-=wit9enePELG=-HnLsr0nY5bucFNjqAqWoFTuYDGR1P4KA@mail.gmail.com/">rejected
+it</a>, saying that he didn't like the "<q>complexity and
+messiness</q>" of the implementation.  But he also made it clear that he
+didn't feel the need to guarantee that <tt>splice()</tt> would keep working
+at all; he felt that making <tt>splice()</tt> work by default on most file
+types led to a number of security issues.  Later in 2020, for example, he <a
+href="/ml/linux-kernel/CAHk-%3DwiXQVE_jGN0ajk%2BKm925WSbCL16mAZ-UXNkp%2Bnkc1nuQw%40mail.gmail.com/">said</a>:
+<p>
+<blockquote class="bq">
+	I'd rather limit splice (and kernel_read too, for that matter) as
+	much as possible. It was a mistake originally to allow it
+	everywhere, and it's come back to bite us.
+<p>
+	So I'd rather have people notice these odd corner cases and get
+	them fixed one by one than just say "anything goes".
+</blockquote>
+<p>
+So the patches that went into 5.10 ended up breaking <tt>splice()</tt> for
+any file 
+type that did not have explicit support for the new way of doing things;
+the idea was that the important cases would be noticed and fixed over time.
+That has indeed happened; if one looks for patches committed as explicit
+fixes to the disabling of <tt>splice()</tt> support, one finds fixes for
+<a href="https://git.kernel.org/linus/06a17bbe1d47">the AFS filesystem</a>,
+<a href="https://git.kernel.org/linus/cf03f316ad20">the 9p filesystem</a>,
+<a href="https://git.kernel.org/linus/c1048828c3db">the orangefs filesystem</a>,
+<a href="https://git.kernel.org/linus/14e3e989f6a5"><tt>/proc/mountinfo</tt></a>,
+<a href="https://git.kernel.org/linus/dd78b0c483e3">the TTY subsystem</a>,
+<a href="https://git.kernel.org/linus/f2d6c2708bd8">kernfs</a>,
+<a href="https://git.kernel.org/linus/f8ad8187c3b5"><tt>sendfile()</tt></a>,
+<a href="https://git.kernel.org/linus/a35d8f016e0b">the nilfs2
+filesystem</a>, and
+<a href="https://git.kernel.org/linus/42984af09afc">the JFFS2 filesystem</a>.
+<p>
+Most recently, Jens Axboe <a
+href="/ml/linux-kernel/20220519193133.194138-1-axboe@kernel.dk/">reported</a>
+that <tt>splice()</tt> no longer worked on <tt>/dev/random</tt> or
+<tt>/dev/urandom</tt>; he 
+included a patch to fix the problem as well.  These patches were later <a
+href="/ml/linux-kernel/20220520094459.116240-1-Jason@zx2c4.com/">reworked</a>
+by random-number-generator maintainer Jason Donenfeld and were applied to
+the mainline during the 5.19 merge window.
+
+Along the way, Donenfeld <a
+href="/ml/linux-kernel/Yoey+FOYO69lS5qP@zx2c4.com/">observed</a> that the
+necessary changes resulted in a performance regression of about 3% when
+reading from <tt>/dev/urandom</tt>.  That led him to ask whether the fix
+was something that was needed at all; after some discussion, Axboe <a
+href="/ml/linux-kernel/72344aad-b5ad-b317-d36d-385cb16d5204@kernel.dk/">gave
+him the lecture</a> on regressions:
+<p>
+<blockquote class="bq">
+	 If you have an application that is written using eg splice from
+	 /dev/urandom, then it should indeed be safe to expect that it will
+	 indeed continue working. If we have one core tenet in the kernel
+	 it's that you should ALWAYS be able to upgrade your kernel and not
+	 have any breakage in terms of userspace ABI. Obviously that can
+	 happen sometimes, but I think this one is exactly the poster child
+	 of breakage that should NOT happen. We took away a feature that
+	 someone depended on.
+</blockquote>
+<p>
+That is the sort of breakage that did indeed happen but, in this case, a
+change was made knowing that this kind of problem would result.  Hellwig
+<a href="/ml/linux-kernel/20220520060244.GA16503@lst.de/">said</a> in
+response to Axboe's patch set that "<q>compared to my initial fears the
+fallout actually isn't 
+that bad</q>", but a perusal of the above list of fixes might lead one
+to a different conclusion.
+<p>
+The removal of <tt>set_fs()</tt> is, in many ways, a model for what the
+kernel development process can do.  A fundamental piece of low-level
+structure that had been deeply wired into the kernel since the beginning
+was replaced with a much safer alternative without breaking the project's
+pace of a stable release every nine or ten weeks.  The steady stream of
+regressions resulting from this change, though, is not what the project
+sets out to do — and it seems 
+certain that this particular gift has not yet stopped giving.
+<p>
+The decision to take this path was driven by a fear of security problems,
+based on the past history of the <tt>splice()</tt> system call.  If those
+fears are still justified (and they might well be; consider, for example,
+that <tt>splice()</tt> 
+was a part of the <a href="https://dirtypipe.cm4all.com/">"Dirty Pipe"
+vulnerability</a> reported earlier this year), then refusing to make all
+existing <tt>splice()</tt> implementations just work without
+<tt>set_fs()</tt> may have prevented far worse regressions than the ones we
+have seen.  Having to fix a filesystem is annoying; having to endure yet
+another security drill for a branded vulnerability with a silly
+name is rather more so.
+<p>
+There is no way of knowing whether that is how things would have gone in
+this case.  But it is
+true that this type of episode makes the kernel's "no regressions" rule
+look a bit more like just a guideline.  It does not take too many of those
+to create breakage to the project's reputation that is hard to splice back together.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Development_model-Regressions">Development model/Regressions</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#set_fs">set_fs()</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/896267/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor896406"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">splice() and the ghost of set_fs()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2022 21:09 UTC (Thu)
+                               by <b>zx2c4</b> (subscriber, #82519)
+                              [<a href="/Articles/896406/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The ensuing performance discussion is somewhat interesting. Currently it&#x27;s taking place across a few threads. My tracking of it is:<br>
+<p>
+<p>
+- I noticed the slow down here:<br>
+<a href="https://lore.kernel.org/lkml/Yoey+FOYO69lS5qP@zx2c4.com/">https://lore.kernel.org/lkml/Yoey+FOYO69lS5qP@zx2c4.com/</a><br>
+- Jens confirmed it&#x27;s around 3%:<br>
+<a href="https://lore.kernel.org/lkml/0a6ed6b9-0917-0d83-5c45-70ff58fad429@kernel.dk/">https://lore.kernel.org/lkml/0a6ed6b9-0917-0d83-5c45-70ff...</a><br>
+- Relatedly, I had proposed doing the same thing to /dev/zero: <a href="https://lore.kernel.org/lkml/20220520135030.166831-1-Jason@zx2c4.com/">https://lore.kernel.org/lkml/20220520135030.166831-1-Jaso...</a><br>
+- Jens liked the idea, but Al pointed out the<br>
+performance issues, and later started figuring out why:<br>
+<a href="https://lore.kernel.org/lkml/Yokmu7bQpg70Bp8R@zeniv-ca.linux.org.uk/">https://lore.kernel.org/lkml/Yokmu7bQpg70Bp8R@zeniv-ca.li...</a><br>
+- Al references resurrecting a particularly relevent older thread on<br>
+fsdevel:<br>
+<a href="https://lore.kernel.org/linux-fsdevel/Yokl+uHTVWFxoQGn@zeniv-ca.linux.org.uk/">https://lore.kernel.org/linux-fsdevel/Yokl+uHTVWFxoQGn@ze...</a><br>
+- This thread is now a many messages deep. That&#x27;s where things are at now.<br>
+- Looks like Al&#x27;s got some patches he&#x27;s playing with in<br>
+<a href="https://git.kernel.org/pub/scm/linux/kernel/git/viro/vfs.git/log/?h=new.iov_iter">https://git.kernel.org/pub/scm/linux/kernel/git/viro/vfs....</a><br>
+<p>
+Hopefully those close the performance gap and then all drivers get faster.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896406/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor896414"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">splice() and the ghost of set_fs()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2022 22:23 UTC (Thu)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/896414/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+splice has to keep working; does it have to keep working *fast*? Could it become a wrapper around sendfile-like semantics, and then just have specific cases where it can go faster?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896414/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor896415"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">splice() and the ghost of set_fs()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 26, 2022 23:55 UTC (Thu)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/896415/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think that depends on the use case. When fd_in is a pipe, splice should be quite fast, because the man page says it just copies pointers to individual pages. If you use a naive sendfile-like implementation, suddenly you&#x27;re making real copies. Or at least, that&#x27;s what I was able to figure out from the man pages, anyway.<br>
+<p>
+Side note: Why are there so many syscalls that do almost, but not quite, entirely the same thing in this space? We&#x27;ve also got copy_file_range(2), which seems to be the same as splice(2) but both fds must be normal files. And then there&#x27;s vmsplice(2), which appears to be exactly the same as read(2)/write(2), but with an overly-complicated API, unless you pass SPLICE_F_GIFT, which looks to be the &quot;I&#x27;m doing something ridiculous, don&#x27;t judge me&quot; flag. And I imagine there&#x27;s also some io_uring equivalent to this madness, too. Why is there not a simple, all-purpose &quot;move data from here to here and don&#x27;t bother me about the details, just do whatever&#x27;s fastest or most reasonable&quot; syscall?<br>
+<p>
+* splice isn&#x27;t it, because splice requires one of the fds to be a pipe.<br>
+* copy_file_range isn&#x27;t it, because it requires *both* of the fds to be normal files.<br>
+* sendfile isn&#x27;t it, because it&#x27;s missing an offset argument for the output file, and the input file must not be a socket.<br>
+* io_uring isn&#x27;t it, because it&#x27;s like five syscalls and a userspace buffer, not one fire-and-forget syscall.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896415/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor896466"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">splice() and the ghost of set_fs()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 27, 2022 13:09 UTC (Fri)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/896466/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+vmsplice() is for sending the same data multiple times, I believe? E.g., pre-canned HTTP headers or small responses. vmsplice() once to get it from userspace into the kernel, then you can splice multiple times with copy.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896466/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor896494"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">splice() and the ghost of set_fs()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 27, 2022 17:42 UTC (Fri)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/896494/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That still doesn&#x27;t explain why you need the silly GIFT flag. Why can&#x27;t the kernel just mark the offending pages as COW, like fork(2) does? You could do that without a special flag, because it should be transparent to userspace. Indeed, you can do that even for write(2), if you really want to.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896494/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor896495"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">splice() and the ghost of set_fs()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 27, 2022 17:44 UTC (Fri)
+                               by <b>Sesse</b> (subscriber, #53779)
+                              [<a href="/Articles/896495/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe the gift flag is seen as a mistake in retrospect.<br>
+<p>
+FreeBSD has CoW on send(), I believe, but of course that means you need to go through a rather expensive page fault when/if the data changes.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896495/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor896527"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">splice() and the ghost of set_fs()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 28, 2022 2:37 UTC (Sat)
+                               by <b>wahern</b> (subscriber, #37304)
+                              [<a href="/Articles/896527/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>This was exactly Linus' original reasoning wrt vmsplice:</p>
+
+<blockquote><pre>
+On Thu, 20 Apr 2006, Piet Delaney wrote:
+&gt; 
+&gt; What about marking the pages Read-Only while it's being used by the
+&gt; kernel
+
+NO!
+
+That's a huge mistake, and anybody that does it that way (FreeBSD) is totally incompetent.
+
+[...]
+
+That cost is _bigger_ than the cost of just copying the page in the first place.
+</pre></blockquote>
+
+<p>Source: <a href="https://lkml.org/lkml/2006/4/20/310">https://lkml.org/lkml/2006/4/20/310</a></p>
+
+<p>See also <a href="https://lkml.org/lkml/2006/4/19/237">Linus' justifications of splice and tee</a> earlier in that thread. vmsplice is also briefly mentioned, and it's implicit from the context that much of the net value of vmsplice comes from combining with tee, as you mentioned earlier.</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896527/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor896420"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">splice() and the ghost of set_fs()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 27, 2022 1:03 UTC (Fri)
+                               by <b>gerdesj</b> (subscriber, #5446)
+                              [<a href="/Articles/896420/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+&quot;But it is true that this type of episode makes the kernel&#x27;s &quot;no regressions&quot; rule look a bit more like just a guideline.&quot;<br>
+<p>
+A bit like the Constitution for the UKoGBnNI - <a href="https://en.wikipedia.org/wiki/Constitution_of_the_United_Kingdom">https://en.wikipedia.org/wiki/Constitution_of_the_United_...</a> - &quot;Unlike in most countries, no attempt has been made to codify such arrangements into a single document.&quot; <br>
+<p>
+... and yet somehow we struggle along. <br>
+<p>
+It might look a bit daft to conflate the Linux kernel&#x27;s governance with the UK&#x27;s legal system but I think it is quite instructional.  One of our cherished principles is the idea that you should be able to &quot;quietly enjoy&quot; your property - I can&#x27;t remember the exact term.  I think a coal mine making a racket caused the formative judgment.<br>
+<p>
+So, the no regressions thing can be seen in similar terms:  Don&#x27;t break people&#x27;s code.<br>
+<p>
+However we have to be practical and sometimes stuff has to change.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896420/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor896496"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">splice() and the ghost of set_fs()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 27, 2022 18:02 UTC (Fri)
+                               by <b>SLi</b> (subscriber, #53131)
+                              [<a href="/Articles/896496/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Is this something that is a problem only because RAII is not used (and couldn&#x27;t you _really_ get something like that working for the kernel), or do I misunderstand the original problem?<br>
+<p>
+It seems like a silly limitation to me; as far as I can tell, it&#x27;s 100% knowable at the time of the initial set_fs() call that you want to reset it exactly when the current function (or block) exits. It&#x27;s not even something that would require producing code that is slower than the correct C code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896496/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor896531"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">splice() and the ghost of set_fs()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 28, 2022 3:56 UTC (Sat)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/896531/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That&#x27;s not the problem.<br>
+<p>
+The problem is twofold. One is that while set_fs() is active, various security measures (like SMEP and SMAP) are defeated. The other is that (on some architectures and eg on a 4GB/4GB split x86-32), you may not actually be able to access userspace because accessing userspace actually accesses kernel space. On x86-64, you can tell from the high bits of the pointer whether it&#x27;s userspace or kernel space, but that&#x27;s not true eg on SPARC or PARISC.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/896531/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor897418"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">splice() and the ghost of set_fs()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2022 17:06 UTC (Thu)
+                               by <b>stem</b> (guest, #83810)
+                              [<a href="/Articles/897418/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; One is that while set_fs() is active, various security measures (like SMEP and SMAP) are defeated.</font><br>
+Are you sure?<br>
+afaik, set_fs() has nothing to do with SM*P, it was abused wrt access_ok() - copy_*_user().<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/897418/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2022, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

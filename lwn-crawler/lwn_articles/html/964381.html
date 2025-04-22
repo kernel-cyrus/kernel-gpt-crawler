@@ -1,0 +1,748 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Better linked-list traversal in BPF [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/964381/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/964624/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/964381/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Better linked-list traversal in BPF</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 8, 2024</br>
+           </div>
+Before loading a BPF program, the kernel must verify that the program is
+safe to run; among other things, that verification includes ensuring that
+the program will terminate within a bounded time.  That requirement has
+long made writing loops in BPF a challenging task.  The situation has
+improved over the years for some types of loops, but others — including
+linked-list traversal — are still awkward in BPF programs.  A new set of
+BPF primitives aims to make life easier for this use case through the
+installation of what can be seen as a sort of circuit breaker.
+<p>
+Even relatively simple loops can be hard for the verifier to handle.  To
+the human eye, a loop like this looks safe:
+<p>
+<pre>
+    for (i = 1; i &lt; 10; i++)
+    	do_something(i);
+</pre>
+<p>
+It can be hard, though, for the verifier (which is dealing with lower-level
+code for the BPF virtual machine) to know that nothing will reset
+the value of the iteration variable in a loop, though; without that
+assurance, it cannot verify that the loop will terminate as expected.  Over
+the years, a number of helpers have been added to make this kind of
+iteration easier; they include the <a
+href="/Articles/877062/"><tt>bpf_loop()</tt> function</a> and <a
+href="/Articles/926041/">generic iterators</a>.  This sort of bounded
+iteration is now relatively easy to do in BPF programs.
+<p>
+If one is iterating through a linked list, though, there is no loop
+variable that can bound the number of times the loop will run.  There is no
+way for the verifier to know about the properties of a list that a program
+would like to traverse.  If the list is circular, traversal could go
+forever.  That prospect makes the verifier grumpy, forcing developers to
+engage in workarounds that make them even grumpier.  When Alexei
+Starovoitov recently <a
+href="/ml/bpf/20240227055235.23463-2-alexei.starovoitov@gmail.com/">proposed
+a solution</a> to this problem, he provided an example of the code needed
+(in current kernels) to go through a list stored in a <a
+href="/Articles/961941/">BPF arena</a>:
+<p>
+<pre>
+    for (struct bpf_iter_num ___it __attribute__((aligned(8),
+                                                  cleanup(bpf_iter_num_destroy))),
+		* ___tmp = (bpf_iter_num_new(&amp;___it, 0, (1000000)),
+                    	pos = list_entry_safe((head)-&gt;first,
+                                              typeof(*(pos)), member),
+	                (void)bpf_iter_num_destroy,
+		     	(void *)0);
+	bpf_iter_num_next(&amp;___it) &amp;&amp; pos &amp;&amp;
+            ({ ___tmp = (void *)pos-&gt;member.next; 1; });
+        pos = list_entry_safe((void __arena *)___tmp, typeof(*(pos)), member))
+</pre>
+<p>
+Briefly, this construct creates a new generic iterator (the
+<tt>bpf_iter_num_new()</tt> call) set for a maximum of 1,000,000
+iterations.  The <tt>bpf_iter_num_next()</tt> call increments that iterator
+and forces an exit from the loop if it goes too high.  The iterator is
+never expected to reach anything close to the maximum value; it exists only
+to reassure the verifier that something will force the loop to end at some
+point.
+<p>
+One might fairly conclude that this code is not pleasant to write — and
+even less pleasant to try to understand.  But, as Starovoitov put it:
+"<q>Unfortunately every 'for' in normal C code needs an equivalent monster
+macro</q>".  He initially proposed a solution (a function called
+<tt>bpf_can_loop()</tt>), but the shape of that solution changed fairly
+quickly.
+<p>
+As of <a
+href="/ml/bpf/20240306031929.42666-1-alexei.starovoitov@gmail.com/">the v6
+patch set</a>, the first step is to create a bit of infrastructure in the
+form of a new BPF instruction called <tt>may_goto</tt>.  This instruction
+has some interesting semantics.  If the kernel sees a <tt>may_goto</tt>
+instruction in a code block, it will automatically reserve space for an
+iteration count on the stack.  Each execution of <tt>may_goto</tt>
+increments that count and compares it to a kernel-defined maximum; if that
+maximum is exceeded, a <tt>goto</tt> will be executed to a point just far
+enough ahead to insert another <tt>goto</tt>.
+<p>
+This instruction is used to create a macro called <tt>cond_break</tt> that
+turns into BPF code like this:
+<p>
+<pre>
+    		 may_goto l_break;
+   		 goto l_continue;
+    l_break: 	 break;
+    l_continue:  ;
+</pre>
+<p>
+In words: the macro normally uses <tt>may_goto</tt> to cause (by way of a
+bit of a <tt>goto</tt> dance) a <tt>break</tt> to be executed when the loop
+count is exceeded.  This macro could, in turn, be used in this sort of
+loop:
+<p>
+<pre>
+    for (ptr = first_item; ptr; ptr = ptr-&gt;next)
+    {
+        do_something_with(ptr);
+	cond_break;
+    }
+</pre>
+<p>
+The presence of <tt>cond_break</tt> (which uses <tt>may_goto</tt>) in the
+loop causes stack space to be set aside for an iteration count; the maximum
+is set to <tt>BPF_MAX_LOOPS</tt>, which is defined as <tt>8*1024*1024</tt> in
+current kernels.  Each execution of <tt>cond_break</tt> checks the
+iteration count and forces an exit from the loop if the maximum is
+exceeded.
+<p>
+Should that forced exit ever happen, chances are good that something is
+going wrong.  Either some sort of out-of-control loop has been created, or
+the list to process is too long and the traversal will not be completed as
+expected.  But, again, in real programs, exceeding the loop count is not
+expected to ever happen.  It exists only as a sort of circuit breaker to
+reassure the verifier that the loop is safe to run.  Or, as Starovoitov <a
+href="/ml/bpf/CAADnVQKKFxioLAqLPNq7mvt4GOHpC0j80-SUYzYQkpno3d+49Q@mail.gmail.com/">put
+it</a>:
+<p>
+<blockquote class="bq">
+	In other words "cond_break" is a contract between the verifier and
+	the program. The verifier allows the program to loop assuming it's
+	behaving well, but reserves the right to terminate it.  So [a] bpf
+	author can assume that cond_break is a nop if their program is well
+	formed.
+</blockquote>
+<p>
+The promise of the BPF verifier — that it would be able to guarantee that
+BPF programs cannot harm the kernel — was always going to be hard to
+achieve without imposing significant limitations on developers.  Much of
+the work on BPF over the years has been aimed at lifting some of those
+limitations, which have only become more onerous as the complexity of BPF
+programs has increased.  As awkward as the new features may seem, they are
+less so than what came before.
+<p>
+Still, there is room for improvement.  Starovoitov said that relying on
+loop counts was not the best approach, and that "<q>the actual limit of
+BPF_MAX_LOOPS is a random number</q>"; he suggested that the kernel may
+eventually implement a watchdog timer to simply interrupt programs that run
+for too long.  That might remove some of the awkwardness, but would have
+some interesting implications; BPF programs are not written with the idea
+that they could be interrupted at an arbitrary point.  Addressing that
+could take a while; in the meantime, there is <tt>cond_break</tt>.  There
+do not seem to be objections to the changes, and the patch set <a
+href="/ml/bpf/170975102930.9518.8336084287032577662.git-patchwork-notify@kernel.org/">has
+been merged</a> into the bpf-next repository, so <tt>cond_break</tt> seems
+likely to show up in the mainline during the 6.9 merge window.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#BPF-Loops">BPF/Loops</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Releases-6.9">Releases/6.9</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/964381/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor964835"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2024 15:48 UTC (Fri)
+                               by <b>atnot</b> (subscriber, #124910)
+                              [<a href="/Articles/964835/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's interesting how this difficultly of analyzing linked list traversal in BPF mirrors the way CPUs struggle analyzing it. Which is a big reason why they are so disastrously slow and really shouldn't be used in any remotely performance sensitive context today. I guess the lesson is if BPF doesn't like your code, your cpu probably won't either :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964835/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964837"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2024 16:25 UTC (Fri)
+                               by <b>pj</b> (subscriber, #4506)
+                              [<a href="/Articles/964837/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Indeed, it's my understanding that it's more efficient for traversal to allocate an array of node records and then make a linked list based on array indices.  This may also shrink the memory footprint because the array index (aka 'pointer') may be smaller (u16 or even u8) than a machine pointer.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964837/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964838"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2024 16:52 UTC (Fri)
+                               by <b>atnot</b> (subscriber, #124910)
+                              [<a href="/Articles/964838/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you're creating a dependency between the next address to access and the contents of the previous address, that's going to be bad regardless of whether you use indexes or pointers. BPF wouldn't like that either. You really just want a count and some data; that's trivial to analyze.<br>
+<p>
+Allocating stuff together does make a big difference and you should definitely do it. But at that point you may as well just use the length and capacity values you have to store anyway to do a proper dynamic array. Then just swap elements in place or, if you must, have a separate table of indexes sorted by some other value, like in a hashtable. Or just use a well implemented tree or hash table outright. But really most of the time you don't need any of that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964838/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor964840"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2024 16:54 UTC (Fri)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/964840/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Demonstration code:<br>
+<p>
+<a href="https://www.infradead.org/~willy/linux/scan.c">https://www.infradead.org/~willy/linux/scan.c</a><br>
+<p>
+That doesn't actually do linked-list-by-index-instead-of-pointer. Someone who's interested can make that modification. But it's about 10x as fast to walk an array of random pointers as it is to walk a list of random pointers, depending on your CPU.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964840/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964843"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2024 17:48 UTC (Fri)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/964843/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Perhaps a useful optimization would be to define a magic pointer value which means “next one in memory”. You could even use null for that if you have some other way to signal end of list. Then your code would be like <br>
+<p>
+if (curr-&gt;next == MAGIC) ++curr;<br>
+else curr = curr-&gt;next;<br>
+<p>
+If the linked list is laid out mostly continuously in memory most of the time (perhaps not completely contiguous all of the time, because then you’d be using an array or vector instead) then the branch predictor should be able to learn the first case is more common and the code can run almost as fast as an ordinary loop over an array. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964843/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964846"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2024 18:14 UTC (Fri)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/964846/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You don't need magic for that:<br>
+<p>
+if (curr-&gt;next == curr + 1) ++curr;<br>
+else curr = curr-&gt;next;<br>
+<p>
+But I don't get why that would help.<br>
+You can just say curr = curr-&gt;next, because you need to load the next pointer anyway.<br>
+<p>
+I wouldn't be surprised if the compiler would optimize it into that.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964846/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964873"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 9, 2024 6:36 UTC (Sat)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/964873/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You need to load the next pointer but the processor can learn that it’s usually the following address and load it speculatively. Whereas if you simply dereference it the processor might not be able to look so far ahead. That’s my thinking. <br>
+<p>
+If the flag to say “just increment” were included in a part of the data structure you have to load anyway, then it might save some memory access too. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964873/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964928"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 9, 2024 18:08 UTC (Sat)
+                               by <b>Baughn</b> (subscriber, #124425)
+                              [<a href="/Articles/964928/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Correct, so it would be faster on average, and a lot of the time the next location will be loaded whether or not it’s useful, regardless of list design — cache lines can only be loaded as a whole. <br>
+<p>
+This isn’t a new approach, by the way. LISP famously uses lists a lot, and LISP machines needed to process them quickly. Even with memory latency at the time being much lower relative to CPU speeds, laying them out contiguously in memory was a standard trick. One way to do that is to use a copying garbage collector, which if coded correctly will automatically defragment the lists when they’re copied. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964928/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor964847"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2024 18:59 UTC (Fri)
+                               by <b>atnot</b> (subscriber, #124910)
+                              [<a href="/Articles/964847/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's hash tables that do this. But I think in reality that's kind of just otherthinking it. Very few C programs use linked lists for good reasons and want or need any of the very few positive properties of them. It's mostly just used because it's the first thing you learn in school and perhaps more importantly the only datastructure that's easy to implement and use in C without macro hell. That and not nearly enough people tell programmers it's a bad idea.*<br>
+<p>
+* this goes beyond just performance implications but architectural decisions too. One of the "advantages" of linked lists is that list items rarely move once they get created. This inevitably leads to things like structures getting bloated with information really only needed by one user and people stashing long-lived pointers to objects on lists somewhere without really worrying about how long they'll stay valid for, which ossifies into the familiar pointer hell codebase where you're scared of changing anything because something might still be holding a pointer to it and 5% of your CPU time is refcounting. But I digress.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964847/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964920"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 9, 2024 15:51 UTC (Sat)
+                               by <b>adobriyan</b> (subscriber, #30858)
+                              [<a href="/Articles/964920/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How would you structure (pardon the repetition) data structures?<br>
+<p>
+Userspace have a luxury of kernel doing equivalent of vmalloc for their std::vector's, but kernel have to deal with fragmentation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964920/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964938"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 9, 2024 20:24 UTC (Sat)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/964938/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's no real reason the kernel can't allocate its internal data in a contiguous virtual RAM. It's just that right now the kernel has one simple 1-to-1 mapping.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964938/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor964844"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2024 18:01 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/964844/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So now they rediscovered runtime metering at backbranches, as WASM did years ago.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964844/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964860"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2024 22:42 UTC (Fri)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/964860/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, and<br>
+<p>
+<span class="QuotedText">&gt; he suggested that the kernel may eventually implement a watchdog timer to simply interrupt programs that run for too long.</span><br>
+<p>
+It's a long and winding path towards BPF being just a bad version of WebAssembly. (Bad because, among other reasons, it will be encrusted with all these different attempts to avoid just using a watchdog timer, which will have to be supported indefinitely.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964860/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor964861"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2024 22:47 UTC (Fri)
+                               by <b>cytochrome</b> (subscriber, #58718)
+                              [<a href="/Articles/964861/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I was wondering when someone would bring up WASM.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964861/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964862"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2024 23:01 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/964862/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Me too. It should have been done about 5 years ago.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964862/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964865"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 9, 2024 0:02 UTC (Sat)
+                               by <b>cytochrome</b> (subscriber, #58718)
+                              [<a href="/Articles/964865/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ Close your eyes, and tap your heels together three times, and think to yourself, 'There's no place like WASM…'<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964865/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor964866"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 9, 2024 0:04 UTC (Sat)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/964866/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+OK, I did this. Now my kernel transformed into NetBSD with Lua modules.<br>
+<p>
+Please send help.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964866/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor964965"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Better linked-list traversal in BPF</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 10, 2024 11:12 UTC (Sun)
+                               by <b>ballombe</b> (subscriber, #9523)
+                              [<a href="/Articles/964965/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What ? You are bringing WASM in about every other kernel posts<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/964965/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2024, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

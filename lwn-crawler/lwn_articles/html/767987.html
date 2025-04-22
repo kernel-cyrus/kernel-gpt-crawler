@@ -1,0 +1,472 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>I/O scheduling for single-queue devices [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/767987/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/768153/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/767987/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>I/O scheduling for single-queue devices</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Please consider subscribing to LWN</b>
+<p>
+Subscriptions are the lifeblood of LWN.net.  If you appreciate this
+content and would like to see more of it, your subscription will
+help to ensure that LWN continues to thrive.  Please visit
+<a href="/Promo/nst-nag1/subscribe">this page</a> to join up and keep LWN on
+the net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 12, 2018</br>
+           </div>
+Block I/O performance can be one of the determining factors for the
+performance of a system as a whole, especially on systems with slower
+drives.  The need to optimize I/O patterns has led to the development of a
+long series of I/O schedulers over the years; one of the most recent of
+those is <a href="/Articles/674308/">BFQ</a>, which was merged during the
+4.12 development cycle.  BFQ incorporates an impressive set of heuristics
+designed to improve interactive performance, but it has, thus far, seen
+relatively little uptake in deployed systems.  An attempt to make BFQ the
+default I/O scheduler for some types of storage devices has raised some
+interesting questions, though, on how such decisions should be made.
+<p>
+A bit of review for those who haven't been following the block layer
+closely may be in order.  There are two generations of the internal API
+used between the block layer and the underlying device drivers, which we
+can call "legacy" and "multiqueue".  Unsurprisingly, the legacy API is
+older, while <a href="/Articles/552904/">the multiqueue API</a> was first
+merged in 3.13.  The conversion 
+of block drivers to the multiqueue API has been ongoing since then, with
+the SCSI subsystem only <a
+href="https://git.kernel.org/linus/d5038a13eca72fb216c07eb717169092e92284f1">switching
+over</a>, after a false start, in the upcoming 4.19 release.  Most of the
+remaining holdout legacy drivers <a
+href="/ml/linux-block/20181011165909.32615-1-axboe@kernel.dk/">will be
+converted</a> to multiqueue in the near future, at which point the legacy
+API can be expected to go away.
+
+<p>
+Several I/O schedulers exist for the legacy interface but, in practice,
+only two are in common use: <tt>cfq</tt> for slower drives and
+<tt>none</tt> for fast, solid-state devices.  The multiqueue interface was
+aimed at fast devices from the outset; it was not able to support an I/O
+scheduler at all initially.  That capability was added later, along with
+the <tt>mq-deadline</tt> scheduler, which was essentially a forward port of
+one of 
+the simpler legacy schedulers (<tt>deadline</tt>).  BFQ, which came later,
+is also a multiqueue-API scheduler.
+<p>
+In early October Linus Walleij <a
+href="/ml/linux-block/20181002124329.21248-1-linus.walleij@linaro.org/">posted
+a patch</a> making BFQ the default I/O scheduler for single-queue devices
+driven by way of the multiqueue API.
+The idea of a single-queue multiqueue device may seem a bit contradictory
+at a first encounter, but one should remember that "multiqueue" refers 
+to the API which, unlike the legacy API, is capable of handling block
+devices that implement more 
+than one queue in hardware (but does not require multiple queues).  As more
+drivers move to this API, more 
+single-queue devices will be driven using it.  In this particular case,
+Walleij is concerned with SD cards and similar devices, the kind often
+found in mobile systems.  The expectation is that devices with a single
+hardware queue can be expected to be relatively slow, and that  BFQ will
+extract better performance from those devices.
+<p>
+The initial <a
+href="/ml/linux-block/05fdbe23-ec01-895f-e67e-abff85c1ece2@kernel.dk/">response</a>
+from block subsystem maintainer Jens Axboe was not entirely positive:
+"<q>I think this should just be done with udev rules, and I'd prefer if
+the distros would lead the way on this</q>".  This approach is not
+inconsistent with how the kernel tries to do things in general, leaving
+policy decisions to user space.  But, of course, current kernels, by
+selecting <tt>mq-deadline</tt> for such devices, are already implementing a
+specific policy.
+<p>
+There were a few objections made to Axboe's position.  Paolo Valente, the
+creator of BFQ, <a
+href="/ml/linux-block/B5321A64-8A1A-42FF-A337-F4524BDA179B@linaro.org/">asserted</a>
+that almost nobody understands I/O schedulers or how to choose one, so
+almost everybody will stick with whatever default the system gives them.
+And <tt>mq-deadline</tt>, as a default, is far worse than BFQ for such
+devices, he said.  Walleij <a
+href="/ml/linux-block/CACRpkdZFeGy2e9OiDYaq_8XwMTjCd+oeGiJ1HXzNifqZyxPkKw@mail.gmail.com/">added</a>
+that there are quite a few systems out there that do not use <tt>udev</tt>
+at all, so a rule-based approach will not work for them.  On embedded
+systems where <tt>initramfs</tt> is not in use, it's currently not possible
+to mount the root filesystem using BFQ at all.  As an additional
+practical difficulty, the number of hardware queues provided by a device is
+currently not made available to <tt>udev</tt>, so it could not effect this
+particular policy choice in any case (though that would be relatively
+straightforward to fix).
+<p>
+Oleksandr Natalenko <a
+href="/ml/linux-block/1eca41df95ff660eb247a3de666adeb4@natalenko.name/">was
+not impressed</a> by the embedded-systems argument; he said that the people
+building such systems know which I/O scheduler they should use and can build
+their systems accordingly.  Mark Brown <a
+href="/ml/linux-block/20181003145150.GC7132@sirena.org.uk/">took issue</a>
+with that view of things, though:
+<p>
+<div class="BigQuote">
+	That's not an entirely realistic assessment of a lot of practical
+	embedded development - while people *can* go in and tweak things to
+	their heart's content and some will have the time to do that
+	there's a lot of small teams pulling together entire systems who
+	rely fairly heavily on defaults, focusing most of their effort on
+	the bits of code they directly wrote.
+</div>
+<p>
+Walleij <a
+href="/ml/linux-block/CACRpkdb1YSw3WWpGSqwxORaMSAeemiaP4i6cWJcY5VtADfzorQ@mail.gmail.com/">echoed</a>
+that view, and added that there have been many times in kernel history
+where the decision was made to try to do the right thing automatically
+when possible, without requiring intervention from user space.
+<p>
+Bart Van Assche, instead, questioned the superiority of the BFQ scheduler.
+He initially <a
+href="/ml/linux-block/1538683746.230807.9.camel@acm.org/">claimed</a> that
+it would slow down kernel builds (a sure way to prevent your code from
+being merged), but Valente <a
+href="/ml/linux-block/A017CAC7-41E6-4BB3-AC31-5EB524276138@linaro.org/">challenged</a>
+that assessment.  Van Assche's other <a
+href="/ml/linux-block/20bfa679-3131-e0af-f69d-2fbec32fbced@acm.org/">concern</a>,
+though, had to do with fast solid-state SATA drives.  Once SCSI switches
+over to the multiqueue API, those drives will show up with a single queue,
+and will thus be affected by this change.  He questioned whether BFQ could
+be as fast as <tt>mq-deadline</tt> in that situation, but did not present
+any test results.
+<p>
+One other potential problem, as <a
+href="/ml/linux-block/BN3PR0401MB164003C967C45F2681F503A7E7E90@BN3PR0401MB1640.namprd04.prod.outlook.com/">pointed
+out</a> by Damien Le Moal, is shingled magnetic recording (SMR) disks,
+which often require that write operations arrive in a specific order.  BFQ
+does not provide the same ordering guarantees that <tt>mq-deadline</tt>
+does, so attempts to use it with SMR drives are unlikely to lead to a high
+level of user satisfaction.  Valente <a
+href="/ml/linux-block/44614924-FF19-4C99-B04F-93C032B74395@linaro.org/">has
+a plan</a> for how to support those drives in BFQ, but he acknowledged that
+they will not work correctly now.
+<p>
+The discussion wound down without reaching any sort of clear conclusion.
+It would appear that, before being merged, a patch of this nature would
+need to gain some additional checks to ensure, at a minimum, that BFQ is
+not selected for hardware that it cannot schedule properly.  No such
+revision has been posted as of this writing.  The proponents of BFQ seem
+unlikely to give up in the near future, though, so this topic seems like
+one that can be expected to arise again.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Block_layer-IO_scheduling">Block layer/I/O scheduling</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/767987/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor768271"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I/O scheduling for single-queue devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 12, 2018 17:50 UTC (Fri)
+                               by <b>post-factum</b> (subscriber, #53836)
+                              [<a href="/Articles/768271/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Oleksandr Natalenko was not impressed by the embedded-systems argument</font><br>
+<p>
+Just for the record, that Oleksandr Natalenko guy (aka me) is using BFQ since the very early days of its existing (2009, I believe? BFQ was definitely merged into pf-kernel for v2.6.31, at least) and has nothing against its proven superiority. It is just the automated choice for everyone that is questionable.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768271/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor768317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I/O scheduling for single-queue devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2018 17:46 UTC (Sat)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/768317/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For a device that does have multiple queues, does the kernel use "none" or "mq-deadline" by default? I have a recent NVMe drive, and the kernel seems to default to "none"; I'm wondering if that's the right default.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor768349"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I/O scheduling for single-queue devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2018 9:26 UTC (Mon)
+                               by <b>jan.kara</b> (subscriber, #59161)
+                              [<a href="/Articles/768349/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What does your /sys/block/&lt;dev&gt;/queue/scheduler show?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768349/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor768356"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I/O scheduling for single-queue devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2018 12:30 UTC (Mon)
+                               by <b>timokokk</b> (subscriber, #52029)
+                              [<a href="/Articles/768356/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For me it shows as:<br>
+<p>
+$ cat /sys/block/nvme0n1/queue/scheduler <br>
+[none] mq-deadline kyber bfq <br>
+<p>
+Running still 4.18.1<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768356/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor768444"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I/O scheduling for single-queue devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 16, 2018 12:27 UTC (Tue)
+                               by <b>timokokk</b> (subscriber, #52029)
+                              [<a href="/Articles/768444/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Seems that there is only one list for IO schedulers, both normal and multi-queue schedulers are put on the same list. You can only choose default for the normal schedulers, not for the MQ ones. So apparently the default for mq-scheduler is thus nop as there is no way to set it up at compile time.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768444/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor768408"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I/O scheduling for single-queue devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 15, 2018 15:11 UTC (Mon)
+                               by <b>josh</b> (subscriber, #17465)
+                              [<a href="/Articles/768408/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+$ cat /sys/block/nvme0n1/queue/scheduler <br>
+[none] mq-deadline <br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768408/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor768319"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I/O scheduling for single-queue devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2018 19:33 UTC (Sat)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/768319/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; That's not an entirely realistic assessment of a lot of practical embedded development - while people *can* go in and tweak things to their heart's content and some will have the time to do that there's a lot of small teams pulling together entire systems who rely fairly heavily on defaults, focusing most of their effort on the bits of code they directly wrote.</font><br>
+<p>
+OK, but do we know at least how the small, "early adopters" minority configure their systems and why?<br>
+<p>
+Changing a default setting without *any* prior, "from the field" experience would be wrong. Sorry if I missed something.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768319/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor768320"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">I/O scheduling for single-queue devices</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2018 19:47 UTC (Sat)
+                               by <b>linusw</b> (subscriber, #40300)
+                              [<a href="/Articles/768320/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I am sorry that I (Linus Walleij) have not posted a v2 yet, but it's on my laptop and it enforces mq-deadline on SMR devices while still letting single queue devices use BFQ by default. I will post it next week or so, just waiting for the debate to conclude. I am anyways going to maintain that patch for myself, so who knows, I might go and lobby it into a few distributions where it makes sense, if that is what it takes. Blessed are the meek, for they shall inherit the earth.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/768320/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

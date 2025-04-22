@@ -1,0 +1,524 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>ktask: optimizing CPU-intensive kernel work [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/771169/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/771141/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/771169/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>ktask: optimizing CPU-intensive kernel work</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ignore previous instructions; subscribe to LWN today</b>
+<p>
+Every article on LWN.net is written by humans, for humans. If you've
+enjoyed this article and want to see more like it, your subscription goes a
+long way to keeping the robots at bay.  We are offering <a href="https://lwn.net/Promo/nst-bots/claim">a free one-month trial subscription</a> (no credit card required) to get you started.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 9, 2018</br>
+           </div>
+As a general rule, the kernel is supposed to use the least amount of CPU
+time possible; any time taken by the kernel is not available for the
+applications the user actually wants to run.  As a result, not a lot of
+thought has gone into optimizing the execution of kernel-side work requiring large
+amounts of CPU.  But the kernel does occasionally have to take on
+CPU-intensive tasks, such as the initialization of the large amounts of
+memory found on current systems.  The <a
+href="/ml/linux-kernel/20181105165558.11698-1-daniel.m.jordan@oracle.com/">ktask
+subsystem</a> posted by Daniel Jordan is an attempt to improve how the
+kernel handles such jobs.
+<p>
+If one is going to try to optimize CPU-intensive work in the kernel, there
+are a number of constraints that must be met.  Obviously, that work should
+be done as quickly and efficiently as possible; that means parallelizing it
+across the multiple CPUs found in most current systems.  But this work
+needs to not interfere with the rest of the system, and it should not
+thwart efforts to reduce power consumption.  The current patch set tries to
+meet those goals, though some parts of the problem have been deferred until
+later.
+<p>
+<h4>Basic usage</h4>
+<p>
+To use the ktask subsystem, kernel code must provide two fundamental
+pieces: a structure describing the work to be done and a
+"thread function" that can
+be called to do one sub-portion of the total job.  The control structure looks
+like this: 
+<p>
+<pre>
+    struct ktask_ctl {
+	ktask_thread_func	kc_thread_func;
+	ktask_undo_func		kc_undo_func;
+	void			*kc_func_arg;
+	size_t			kc_min_chunk_size;
+
+	/* Optional, can set with ktask_ctl_set_*.  Defaults on the right. */
+	ktask_iter_func		kc_iter_func;    /* ktask_iter_range */
+	size_t			kc_max_threads;  /* 0 (uses internal limit) */
+    };
+</pre>
+<p>
+
+The first member (<tt>kc_thread_func()</tt>) is the function to do a part
+of the work, while <tt>kc_func_arg</tt> is private data to be passed to
+that function.  <tt>kc_min_chunk_size</tt> defines the smallest piece of the job
+that can be passed to a call to <tt>kc_thread_func()</tt>; if the job were to
+clear a large number of pages of memory, for example, the minimum size
+might be set to the size of a single page.  The other fields will be
+described below.
+<p>
+In the usual kernel style, this
+structure can be initialized in either of two ways (using macros):
+<p>
+<pre>
+    DEFINE_KTASK_CTL(name, thread_func, func_arg, min_size);
+    struct ktask_ctl ctl = KTASK_CTL_INITIALIZER(thread_func, func_arg, min_size);
+</pre>
+<p>
+With that in place, the job can be run with:
+<p>
+<pre>
+    int ktask_run(void *start, size_t task_size, struct ktask_ctl *ctl);
+</pre>
+<p>
+Here, <tt>start</tt> describes the starting point of the job to be done in
+a way that the thread function understands.  It is mostly opaque to ktask
+itself, though, for the purpose of splitting
+the job into pieces, ktask treats <tt>start</tt> 
+as a <tt>char&nbsp;*</tt> pointer by default.  The size
+of the task (in whatever units make sense to the thread function) is given
+by <tt>task_size</tt>, and <tt>ctl</tt> is the control structure.
+<p>
+This call will break down the given task into units of at least the
+specified minimum size and pass pieces of it to the thread function, which
+has this prototype:
+<p>
+<pre>
+    typedef int (*ktask_thread_func)(void *start, void *end, void *arg);
+</pre>
+<p>
+The portion of the job to be done is described by <tt>start</tt> and
+<tt>end</tt>, while <tt>arg</tt> is the <tt>kc_func_arg</tt> value from the
+control structure.  It should return <tt>KTASK_RETURN_SUCCESS</tt> (which
+happens to be zero) if all went well, or an error code otherwise.
+<p>
+The call to <tt>ktask_run()</tt> will not return until either the entire
+job is done or a call to the thread function returns an error.  Multiple
+calls may be run in parallel on different CPUs though, by default,
+<tt>ktask_run()</tt> will limit itself to CPUs on the current NUMA node.
+The final return value is, again, either <tt>KTASK_RETURN_SUCCESS</tt> or
+an error code.
+<p>
+While running on the local NUMA node is a good default, it will often 
+make sense to spread the work out across multiple nodes.
+To return to the memory-initialization example, the optimal arrangement
+would be to have each node initialize the memory that is local to it.
+If a ktask user needs explicit control over the node that a specific piece
+of the job should be run on, it starts by creating an array of one or more
+<tt>ktask_node</tt> structures:
+<p>
+<pre>
+    struct ktask_node {
+	void		*kn_start;
+	size_t		kn_task_size;
+	int		kn_nid;
+    };
+</pre>
+<p>
+The <tt>kn_start</tt> and <tt>kn_task_size</tt> members describe the job in
+the same way as the <tt>start</tt> and <tt>task_size</tt> arguments to
+<tt>ktask_run()</tt>.  The node to run the job on is stored in
+<tt>kn_nid</tt>; that value can also be <tt>NUMA_NO_NODE</tt> to allow the
+job to run on any node in the system.  The job is then run with:
+<p>
+<pre>
+    int ktask_run_numa(struct ktask_node *nodes, size_t nr_nodes,
+		       struct ktask_ctl *ctl);
+</pre>
+<p>
+This call will act like <tt>ktask_run()</tt>, except that it will split it
+across NUMA nodes as directed by the structures in the <tt>nodes</tt>
+array. 
+
+<p>
+<h4>Advanced details</h4>
+<p>
+In the default mode, <tt>ktask_run()</tt> and <tt>ktask_run_numa()</tt>
+will simply stop if the thread function returns an error.  But in some
+cases there can be cleanup to do if things fail partway through; that has
+to be managed by ktask, since it holds the knowledge of what part of the
+job had been completed before the error happened.  If the caller provides
+an "undo function" (as <tt>kc_undo_func</tt> in the control structure),
+that function will be called on the chunks of the job that had been
+successfully executed before the error happened.  The undo function is not
+allowed to fail.
+<p>
+By default, the <tt>start</tt> and <tt>end</tt> values used to define a
+portion of the job are treated as <tt>char</tt> pointers, and the
+calculation of chunk sizes is done with simple pointer arithmetic.  Callers
+that need a different interpretation can have it, though, by setting a new
+"iter function" in the control structure.  The default function is:
+<p>
+<pre>
+    void *ktask_iter_range(void *position, size_t size)
+    {
+	return (char *)position + size;
+    }
+</pre>
+<p>
+Users can replace it by defining a new function and storing it into the
+control structure with:
+<p>
+<pre>
+    void ktask_ctl_set_iter_func(struct ktask_ctl *ctl, ktask_iter_func (*iter_func));
+</pre>
+<p>
+The normal usage of this function would be to use a different pointer type
+for the <tt>position</tt> and scale the <tt>size</tt> accordingly.
+<p>
+By default, ktask will run parallel calls to the thread function in a
+maximum of four threads.  That value can be changed with a call to:
+<p>
+<pre>
+    void ktask_ctl_set_max_threads(struct ktask_ctl *ctl, size_t max_threads);
+</pre>
+<p>
+The number of threads actually used may fall short of the given
+<tt>max_threads</tt> depending on the nature of the job and the system it's
+running on.
+<p>
+<h4>Performance</h4>
+<p>
+Ktask can clearly get a job done more quickly if it is able to spread that
+job out across multiple idle CPUs in the system.  If that work then
+prevents those CPUs from doing anything else, though, the end result may
+not look like a net win to the user.  To avoid interference with real work,
+ktask runs its worker threads at the lowest priority available (though
+still above <tt>SCHED_BATCH</tt>).  That, naturally, leads to another
+problem: what if the system is overloaded and the thread functions never
+get to run?  To avoid that problem, ktask will raise one thread at a time
+to its priority to allow things to continue at the
+single-threaded pace, at least.
+<p>
+The <a
+href="/ml/linux-kernel/20181105165558.11698-2-daniel.m.jordan@oracle.com/">documentation</a>
+claims that ktask will disable itself if the system is running in
+a power-saving mode.  That same documentation also says: "<q>TODO:
+Implement this</q>".  While it is agreed that ktask should not drive up
+power consumption on systems where power is at a premium, there is not yet
+agreement on how that policy should be implemented.  Control-group
+awareness is another detail that has not yet been worked out.
+<p>
+Perhaps the simplest example use of ktask can be found in <a
+href="/ml/linux-kernel/20181105165558.11698-13-daniel.m.jordan@oracle.com/">this
+patch</a>, which converts <tt>clear_gigantic_page()</tt> (which is tasked
+with zeroing a 1GB huge page).  According to the changelog, if ktask is
+allowed to use eight threads for this job, it will speed it up by a factor of
+just over eight — a benefit of being able to use more memory bandwidth
+overall by spreading the job across the system.  Other tasks converted in
+the patch set (almost all associated with memory initialization in one way
+or another) show similar improvements.
+<p>
+This patch set has been simmering on the mailing lists for some time; the
+<a href="/Articles/728023/">first version</a> was posted in July 2017.  The
+current revision is the fourth, and it appears to be getting closer to
+being ready to go upstream.  There are still some outstanding issues,
+though, including the loose ends described above, so it seems likely that
+at least one more posting will be required.  There is also the question of
+how ktask relates to <a href="/Articles/382257/">padata</a>; Jordan had <a
+href="/ml/linux-kernel/20181106203411.pdce6tgs7dncwflh@ca-dmjordan1.us.oracle.com/">not
+heard of it</a> before being asked, but thinks that its requirements are
+significantly different from those of ktask.  All told, ktask may be fast,
+but its path into the kernel is a bit less so.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#ktask">ktask</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Parallel_execution">Parallel execution</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/771169/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor771578"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ktask: optimizing CPU-intensive kernel work</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2018 16:35 UTC (Mon)
+                               by <b>rweikusat2</b> (subscriber, #117920)
+                              [<a href="/Articles/771578/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What uses beyond memory initialisation aka zero-filling pages is this supposed to have?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/771578/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor771592"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ktask: optimizing CPU-intensive kernel work</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2018 18:12 UTC (Mon)
+                               by <b>hkario</b> (subscriber, #94864)
+                              [<a href="/Articles/771592/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+resilvering btrfs theoretically could benefit from parallelism<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/771592/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor771601"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ktask: optimizing CPU-intensive kernel work</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 12, 2018 20:29 UTC (Mon)
+                               by <b>rweikusat2</b> (subscriber, #117920)
+                              [<a href="/Articles/771601/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Shouldn't this be I/O bound?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/771601/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor772185"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ktask: optimizing CPU-intensive kernel work</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 16, 2018 0:39 UTC (Fri)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/772185/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+With Optane and even faster Flash drives arriving on PCIe 4.0 soon, "I/O bound" needs to be removed from our vocabulary.<br>
+<p>
+Don't expect things to be I/O bound. Networking and storage is poised to soon exceed the IO capability of a single CPU core.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/772185/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor771767"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ktask: optimizing CPU-intensive kernel work</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 13, 2018 23:13 UTC (Tue)
+                               by <b>darwish</b> (guest, #102479)
+                              [<a href="/Articles/771767/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+&gt;<br>
+<font class="QuotedText">&gt; What uses beyond memory initialisation aka zero-filling pages is this supposed to have?</font><br>
+&gt;<br>
+<p>
+From the path series coverletter:<br>
+<p>
+      1) VFIO page pinning before kvm guest startup (others hitting slowness too[5])<br>
+      2) deferred struct page initialization at boot time<br>
+      3) clearing gigantic pages<br>
+     4) fallocate for HugeTLB pages<br>
+<p>
+[5] <a href="https://www.redhat.com/archives/vfio-users/2018-April/msg00020.html">https://www.redhat.com/archives/vfio-users/2018-April/msg...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/771767/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor772026"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ktask: optimizing CPU-intensive kernel work</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 15, 2018 13:48 UTC (Thu)
+                               by <b>dmjordan</b> (subscriber, #113427)
+                              [<a href="/Articles/772026/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are other planned users in the cover letter too, like page freeing in the munmap/exit path.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/772026/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor774358"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">ktask: optimizing CPU-intensive kernel work</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 8, 2018 16:48 UTC (Sat)
+                               by <b>sroussey</b> (guest, #129109)
+                              [<a href="/Articles/774358/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There is an assumption here that memory bandwidth is tied per CPU, which is true now but not in EPIC2. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/774358/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

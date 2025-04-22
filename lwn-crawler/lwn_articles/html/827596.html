@@ -1,0 +1,1715 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Netgpu and the hazards of proprietary kernel modules [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/827596/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/827598/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/827596/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Netgpu and the hazards of proprietary kernel modules</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 31, 2020</br>
+           </div>
+On its face, the <a
+href="/ml/netdev/20200727224444.2987641-1-jonathan.lemon@gmail.com/">netgpu
+patch set</a> appears to add a useful feature: the ability to copy network
+data directly between a network adapter and a GPU without moving it through
+the host CPU.  This patch set has quickly become an example of how not to get
+work into the kernel, though; it has no chance of being merged in anything
+like its current form and has created a backlash designed to keep modules
+like it from ever working in mainline kernels.  It all comes down to one
+fundamental mistake: basing kernel work on a proprietary kernel module.
+<p>
+The use case for netgpu appears to be machine-learning applications that
+consume large amounts of data.  The processing of this data is offloaded to
+a GPU for performance reasons.  That GPU must be fed a stream of data,
+though, that comes from elsewhere on the network; this data follows the
+usual path of first being read into main memory, then written out to the
+GPU.  The extra copy hurts, as does the memory-bus traffic and the CPU time
+needed to manage this data movement.
+<p>
+This overhead could be significantly reduced if the network adapter were to
+write the data directly into the GPU's memory, which is accessible via the
+PCI bus.  A suitably capable network adapter could place packet data in GPU
+memory while writing packet headers to normal host memory; that allows the
+kernel's network stack to do the protocol processing as usual.  The netgpu
+patch exists to support this mode of operation, seemingly yielding improved
+performance at the cost of losing some functionality; anything that
+requires looking at the packet payload is going to be hard to support
+if that data is routed directly to GPU memory.
+<p>
+A lot of work has been done in recent years to enable just this kind of
+zero-copy, device-to-device data transfer, so one might expect this
+functionality to be well received.  And, indeed, the code was reviewed
+normally until <a
+href="/ml/netdev/20200727224444.2987641-22-jonathan.lemon@gmail.com/">the
+last patch</a> in this 21-part series, where things ran into a snag.  This
+is the patch that interfaces between the netgpu module and the proprietary
+NVIDIA GPU driver; it can't even be built without the NVIDIA driver's files
+on disk.  On seeing this, Greg Kroah-Hartman <a
+href="/ml/netdev/20200728163100.GD4181352@kroah.com/">stopped and
+complained</a>:
+<p>
+<div class="BigQuote">
+	Ok, now you are just trolling us.
+<p>
+	Nice job, I shouldn't have read the previous patches.
+<p>
+	Please, go get a lawyer to sign-off on this patch, with their
+	corporate email address on it.  That's the only way we could
+	possibly consider something like this.
+</div>
+<p>
+What followed was an occasionally harsh and acrimonious 
+discussion on whether
+the patches should have ever been posted in the first place.  Jonathan
+Lemon, the author of the patches, <a
+href="/ml/netdev/20200728014812.izihmnon3khzyr32@bsd-mbp.dhcp.thefacebook.com/">insisted</a>
+that they were not about providing functionality to the proprietary NVIDIA
+module in particular:
+<p>
+<div class="BigQuote">
+	This is not in support of a proprietary driver.  As the cover
+	letter notes, this is for data transfers between the NIC/GPU, while
+	still utilizing the kernel protocol stack and leaving the
+	application in control.
+<p>
+	While the current GPU utilized is nvidia, there's nothing in the
+	rest of the patches specific to Nvidia - an Intel or AMD GPU
+	interface could be equally workable.
+</div>
+<p>
+Others disagreed, though, stating that the code was clearly designed around
+the NVIDIA module from the beginning.  Christoph Hellwig <a
+href="/ml/netdev/20200728172703.GA5667@infradead.org/">argued</a> that any
+upstream-oriented driver should be based on the existing <a
+href="/Articles/767281/">P2PDMA</a> framework, which exists just to support
+device-to-device data transfers.  Jason Gunthorpe <a
+href="/ml/netdev/20200728181904.GA138520@nvidia.com/">agreed</a>, and
+<a href="/ml/netdev/20200728233806.GC16789@nvidia.com/">argued</a> that the
+design of the module as a whole was driven by NVIDIA's choices:
+<p>
+<div class="BigQuote">
+	The design copied the nv_p2p api design directly into struct
+	netgpu_functions and then aligned the rest of the parts to use it
+	too. Yes, other GPU drivers could also be squeezed into this API,
+	but if you'd never looked at the NVIDIA driver you'd never pick
+	such a design. It is inherently disconnected from the
+	[memory-management subsystem].
+</div>
+<p>
+By the time the discussion wound down, it was clear that this patch set
+wasn't going anywhere in its current form.  Large amounts of work will have
+to be done to build it on top of the existing kernel mechanisms for
+cross-device data movement — P2PDMA, the <a
+href="https://www.kernel.org/doc/html/v5.6/driver-api/dma-buf.html">DMA-buf
+subsystem</a>, etc.  This work may have achieved its initial goal, but it
+clearly went far down the wrong path when it comes to being merged into the
+mainline kernel.
+<p>
+The sad part is that, by all appearances, the goal of this work was not to
+add functionality for NVIDIA GPUs in particular.  Lemon does not seem to
+be an NVIDIA employee; the patches included a Facebook email address.  But
+NVIDIA, with its proprietary module, was what was at hand, so that is the
+device that the patch set was designed to work with.  Designing the module
+to work with free GPU drivers from the outset would have driven a number of
+decisions in different directions and avoided much of the trouble that has
+ensued.
+<p>
+Meanwhile, in an attempt to make this sort of mistake harder to make (and,
+surely only by coincidence, make life a bit harder for proprietary modules
+in general), Hellwig has posted <a
+href="/ml/linux-kernel/20200730061027.29472-1-hch@lst.de/">a patch set</a>
+changing the way GPL-only symbols are handled.  Symbols exported as
+GPL-only by the kernel are made unavailable to proprietary modules, but
+there has always been a bit of a loophole in how this is enforced.  A
+proprietary module can be broken into two parts, one of which is a minimal shim
+layer that interfaces between the kernel and the proprietary code.  If the
+shim module is GPL-licensed, it can access GPL-only symbols, which it can
+then make available to the proprietary module.
+<p>
+Hellwig's patch does not entirely close this loophole, but it makes
+exploiting it a
+bit harder.  With this patch applied, any module that imports symbols from
+a proprietary module is itself marked as being proprietary, denying it
+access to GPL-only symbols.  If the shim module has already accessed
+GPL-only symbols by the time it gets around to importing symbols from the
+proprietary module, that import will not be allowed.  This new restriction
+would keep the netgpu-NVIDIA interface module from loading, impeding the
+development of such modules in the future.  It still does not cover the
+case, though, of a shim module that exports its own symbols to a
+proprietary module without importing anything from that module.
+<p>
+For as long as the kernel has had a module loader, there have been debates
+over proprietary modules.  In 2006, the development community <a
+href="/Articles/215075/">seriously discussed</a> banning them entirely.
+Two years later, a long list of kernel developers signed <a
+href="/Articles/287056/">a position statement</a> stating that proprietary
+modules are "<q>detrimental to Linux users, businesses, and
+the greater Linux ecosystem</q>".  These modules continue to exist,
+though, and do not appear to be going away anytime soon.  This episode,
+where a proprietary module helped send a significant development project in
+the wrong direction and makes it nearly impossible to implement this
+functionality in a way that works with all GPUs,
+demonstrates one of the reasons why the development community sees
+those modules as being harmful.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Copyright_issues">Copyright issues</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Modules-Exported_symbols">Modules/Exported symbols</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/827596/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor827743"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 1, 2020 0:03 UTC (Sat)
+                               by <b>gus3</b> (guest, #61103)
+                              [<a href="/Articles/827743/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I&#x27;m pretty sure I know how the BSD&#x27;s would move forward with such a question (&quot;no, it isn&#x27;t KISS&quot;). And I know also how Microsoft Windows and Apple MacOS would move forward (&quot;yes, we can manage it with lots of new API&#x27;s&quot;).<br>
+<p>
+The fact that this strange argument presents as such a grey area in Linux, is part of its charm for me. Maybe it&#x27;ll happen, probably not, but the lessons coming out of the discussion will be on the Internet, forever, for anyone to study and learn from.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827743/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor827755"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 1, 2020 5:49 UTC (Sat)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/827755/">Link</a>] (27 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The easiest way to get the Linux kernel community to handwave your GPL violations through remains to call it firmware. nVidia keeps making this rookie mistake of trying to do it on the “central” processor, while the ARM crowd&#x27;s had it all sussed out since the RPi 1.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827755/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827760"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 1, 2020 8:41 UTC (Sat)
+                               by <b>mfuzzey</b> (subscriber, #57966)
+                              [<a href="/Articles/827760/">Link</a>] (19 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don&#x27;t see how anything that is really firmware, by which I mean that runs on a different processer / core / hardware module to Linux can be a GPL violation since it shares no code with Linux. <br>
+<p>
+Unless, it is also based on Linux, which could be a GPL violation even if the main processor were running Windows.<br>
+But most coprecessor devices don&#x27;t have the power / memory to run Linux anyway so they&#x27;re normally bare metal or some RTOS.<br>
+<p>
+Of course, there are plenty of other reasons to prefer open source firmware, including security in some cases. But I don&#x27;t think it&#x27;s a GPL issue.<br>
+ <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827760/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827827"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2020 1:06 UTC (Mon)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/827827/">Link</a>] (18 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I don&#x27;t see how anything that is really firmware, by which I mean that runs on a different processer / core / hardware module to Linux can be a GPL violation since it shares no code with Linux.</font><br>
+<p>
+It typically shares a number of .h files.<br>
+<p>
+You can call your lawyer now.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827827/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827838"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2020 11:35 UTC (Mon)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/827838/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+At least on RPi, I don&#x27;t think the firmware uses any headers that originated from Linux. The shared headers were generally written by Broadcom, so Broadcom can freely use them in the proprietary firmware, then dual-licensed as GPL and BSD for use by Linux drivers etc. And the headers are not trying to copy the shape of the kernel&#x27;s internal API and export it to the firmware: they have their own custom interface design, because historically the firmware interfaces were mainly used by other code within the firmware and by Linux userspace blobs, then the kernel support was added later (with the kernel drivers responsible for translating things to/from the proprietary interface). So the firmware is not derived from the Linux kernel in any meaningful way, and isn&#x27;t violating the GPL.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827838/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor827949"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2020 20:25 UTC (Mon)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/827949/">Link</a>] (16 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The legal status of &quot;it uses .h files&quot; is extremely murky. On the one hand, if you assume that any .h file automatically makes anything that includes it a derivative work, you&#x27;re basically taking the &quot;APIs are copyrightable&quot; stance, which is problematic for a number of reasons. On the other hand, the FSF does have good legal arguments that a binary which dynamically links to X may well be a derivative work of X.<br>
+<p>
+I&#x27;ve often wondered what would happen if someone released a &quot;library&quot; with a minimal implementation of readline(3) under a permissive license. This would not be particularly difficult, although you&#x27;d obviously lose most of the functionality of GNU Readline (you&#x27;d basically end up with a combined printf(3)-and-then-getline(3)). But then you could link proprietary code against that minimal library, and end users could re-link against GNU Readline (so long as they don&#x27;t redistribute the resulting binary). Arguably, distros could even design their package managers to do this re-linking automatically once both packages are installed. That can&#x27;t be how the FSF intends the GPL to operate, but I&#x27;m not sure if I&#x27;ve missed something, or if it really does have such a gaping hole in its linking rules.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827949/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827955"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2020 23:08 UTC (Mon)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/827955/">Link</a>] (13 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I believe many GPL discussions give way too much importance to linking. What the GPL (deeply) cares about is &quot;derivative work&quot; and linking is IMHO/IANAL never a proof of being a derivative work. It&#x27;s just warning sign.<br>
+<p>
+Let&#x27;s say I write a POSIX compliant application on Solaris/Illumos/whatever and I don&#x27;t care about Linux at all. Someone else links it (statically or dynamically; doesn&#x27;t matter) to some GPLed libc implementation and redistributes it - without even touching my code. Why the hell would that other person make _me_ commit a GPL violation? That wouldn&#x27;t make any kind of legal sense.<br>
+<p>
+Now of course to avoid this situation (and maintain some linker fear FUD?) most (all?) libc implementation are LGPL at most. But you get the idea. Maybe there&#x27;s a better, real GPL example.<br>
+<p>
+<font class="QuotedText">&gt; I&#x27;ve often wondered what would happen if someone released a &quot;library&quot; with a minimal implementation of readline(3) under a permissive license. </font><br>
+<p>
+- Either you assume anything that reproduces the readline _interface_ is a derivative work of readline. Then your minimal, non-GPL implementation is already a violation.<br>
+<p>
+- Or you assume merely reproducing the readline interface is not a derivative work of readline. Then you can do anything with the readline interface.<br>
+<p>
+Either way your indirection is pointless.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827955/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828045"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2020 22:31 UTC (Tue)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/828045/">Link</a>] (12 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Either you assume anything that reproduces the readline _interface_ is a derivative work of readline. Then your minimal, non-GPL implementation is already a violation.</font><br>
+<p>
+Which would, of course, be equally problematic for all the open-source reimplementations of proprietary libraries, including projects like LessTif (Motif), Wine (MS Windows), various system emulators, and perhaps even Mesa (OpenGL / Vulkan).<br>
+<p>
+IANAL but IMHO there is no reason why it should matter, legally, whether there actually *is* an alternative implementation. The mere fact that any library *could* be reimplemented with a compatible license should be enough to prove that source code or dynamically-linked object code is not automatically a derivative work of some library just because it makes use of that library&#x27;s interfaces. Macros and inline functions could be an issue, but only for object code, and only then if they contain enough non-functional &quot;expression&quot; in the compiled object code to qualify for copyright on their own merit. You&#x27;re not embedding the source code, and most of the creative expression which copyright is *supposed* to cover gets left behind during compilation.<br>
+<p>
+The concept of &quot;derivative work&quot; is supposed to apply to cases where the original work is copied and somehow transformed or translated as an integral part of some new creative work. It was never meant to cover *functional* dependencies; copyright was never intended to apply to functional elements in the first place, and linking and runtime considerations are 100% a matter of function, not creative expression. Even if you distributed the third-party library along with your own program on the same storage medium (or in the same archive) that ought to be considered &quot;mere aggregation&quot; and have no effect on the status of your own work.<br>
+<p>
+The closest analog to &quot;linking&quot; I can think of outside of software is a bibliography, but you don&#x27;t hear anyone trying to claim that citing someone else&#x27;s paper in your own research makes your publication a derivative work of theirs for the purpose of copyright law.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828045/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828048"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2020 23:00 UTC (Tue)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/828048/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Which would, of course, be equally problematic for all the open-source reimplementations of proprietary libraries,...</font><br>
+<p>
+I don&#x27;t remember the license of any proprietary library using the &quot;derivative work&quot; concept like copyleft licenses do, so &quot;equally&quot; is too much. I agree it would raise similar and very interesting questions there too.<br>
+<p>
+<font class="QuotedText">&gt;  just because it makes use of that library&#x27;s interfaces. Macros and inline functions could be an issue, but only for object code, and only then if they contain enough non-functional &quot;expression&quot; in the compiled object code to qualify for copyright on their own merit.</font><br>
+<p>
+I wish you were right and I wish it were that simple but playing the devil&#x27;s advocate:<br>
+<p>
+- Why a complex API with elaborate data structures be less copyrightable than a simple macro? In other words, why are Nouns less copyrightable than Verbs? <a href="http://steve-yegge.blogspot.com/2006/03/execution-in-kingdom-of-nouns.html">http://steve-yegge.blogspot.com/2006/03/execution-in-king...</a><br>
+<p>
+- More importantly, we have one-click buy patents and copyright extended 70+ years after the author death, so why do you assume common sense applies to intellectual property law? Copyright is a legal and political question, not a technical one. This means it doesn&#x27;t get decided by engineers like us but by lawyers like this (random) guy:<br>
+<p>
+<a href="https://www.ipwatchdog.com/2020/02/18/earth-google-heres-apis-need-copyrightable/id=118999/">https://www.ipwatchdog.com/2020/02/18/earth-google-heres-...</a><br>
+<p>
+<font class="QuotedText">&gt; APIs are like the turbocharger in a car engine. They speed up the process of retrieving Google’s search results and enhance the user’s experience. To users of a search engine, speed and accuracy of search results are the most important factors affecting their choice. Oracle’s APIs essentially make Google’s search engine hum.</font><br>
+<p>
+(no comment)<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828048/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828050"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2020 0:12 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/828050/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; - Why a complex API with elaborate data structures be less copyrightable than a simple macro? In other words, why are Nouns less copyrightable than Verbs?</font><br>
+<p>
+I believe, under American law at least, that copyright cannot be used to interfere with interoperability, so if I want to interface with your code I can use your elaborate data structures and they are not protected.<br>
+<p>
+On the other hand, I can rewrite your macro differently to the same effect in which case it&#x27;s not a derivative, or if its function is such that your implementation is the obvious one and I come up with the same implementation, then it&#x27;s too simple to be copyrightable.<br>
+<p>
+(I believe that SCOTUS ruled that the string &quot;copyright (C) Nintendo&quot; was required for interoperability because the console checked for it, and therefore Nintendo couldn&#x27;t claim copyright, or passing off, or anything else to stop competitors using it. Something like that anyway.)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828050/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828062"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2020 7:38 UTC (Wed)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/828062/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; (I believe that SCOTUS ruled that the string &quot;copyright (C) Nintendo&quot; was required for interoperability because the console checked for it, and therefore Nintendo couldn&#x27;t claim copyright, or passing off, or anything else to stop competitors using it. Something like that anyway.)</font><br>
+<p>
+It wasn&#x27;t just a string, it was an actual image of their logo which was supposed to be displayed during initialization for &quot;official&quot; games. If a game didn&#x27;t embed the logo then the console wouldn&#x27;t run it. The ruling granted competing developers permission to embed the image in their games for the purpose of interoperability without licensing the image from Nintendo. By making the logo image a required part of the functional interface Nintendo basically forfeited their copyright over it.<br>
+<p>
+There have been similar cases where various parties attempted to use copyright (and the DMCA) to block things like third-party ink cartridges. Those haven&#x27;t been any more successful. The courts have been pretty consistent in upholding the principle that copyright does not extend to functional elements of a design required for interoperability.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828062/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor828052"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2020 1:20 UTC (Wed)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/828052/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I don&#x27;t remember the license of any proprietary library using the &quot;derivative work&quot; concept like copyleft licenses do, so &quot;equally&quot; is too much. I agree it would raise similar and very interesting questions there too.</font><br>
+<p>
+The concept of &quot;derivative work&quot; is not part of the license. It&#x27;s part of copyright law. By default, you&#x27;re not allowed to create derivative works at all. The GPL relaxes this restriction, but only if the derivative is also distributed under the GPL (and complies with all the other rules w.r.t. source code etc.).<br>
+<p>
+Proprietary licenses (usually) don&#x27;t mention derivative works, which implies that you don&#x27;t have permission to create them, much less redistribute them.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828052/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828184"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2020 13:03 UTC (Thu)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/828184/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><em>Proprietary licenses (usually) don't mention derivative works, which implies that you don't have permission to create them, much less redistribute them.</em></blockquote>
+<p>
+To a copyright lawyer, a “derivative work” based on a software program would be one where all messages are translated into Swahili, or one that adds a command or menu item to the original program, with the rest of the program substantially unchanged. These are the derivative works that the manufacturers of proprietary software do not like to see third parties create or distribute without permission.
+</p>
+<p>
+It's not at all obvious why a program that just calls a published interface of another software program would be “derivative” of that program, because unlike the other examples its source code (or object code, given dynamic linking) doesn't incorporate any copyrightable part of the original program.
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828184/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828186"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2020 13:47 UTC (Thu)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/828186/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; doesn&#x27;t incorporate any copyrightable part of the original program.</font><br>
+<p>
+We wish it were that simple<br>
+<p>
+<a href="https://en.wikipedia.org/wiki/Google_v._Oracle_America">https://en.wikipedia.org/wiki/Google_v._Oracle_America</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828186/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828189"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2020 14:44 UTC (Thu)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/828189/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+Note that Google's conduct in this case does in fact involve copying stuff from Oracle, and the court case hinges mainly on (a) whether the Oracle stuff in question that Google copied is copyrightable in the first place, and (b) if it is, whether it was OK for Google to copy it under the doctrine of  “fair use”. It doesn't really help us with the question of whether program A is “derivative” of program B if it calls program B without incorporating copyrightable stuff from B.
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828189/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828221"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2020 23:07 UTC (Thu)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/828221/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think you&#x27;re making a distinction between re-implementing an API versus using it. I doubt this makes a legal difference, references?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828221/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor834158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 13, 2020 16:07 UTC (Tue)
+                               by <b>immibis</b> (guest, #105511)
+                              [<a href="/Articles/834158/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There may be a difference between writing a compatible implementation of a proprietary library, and actually copying the header files from the proprietary library into your one (which Google did).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/834158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor828502"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 11, 2020 8:16 UTC (Tue)
+                               by <b>daenzer</b> (subscriber, #7050)
+                              [<a href="/Articles/828502/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; [...] open-source reimplementations of proprietary libraries, including projects like [...] perhaps even Mesa (OpenGL / Vulkan).</font><br>
+<p>
+OpenGL / Vulkan aren&#x27;t proprietary libraries, but open specifications under the umbrella of the Khronos group: <a href="https://www.khronos.org/registry/">https://www.khronos.org/registry/</a><br>
+<p>
+Mesa has officially passed OpenGL / Vulkan conformance for some (not all) driver / hardware combinations:<br>
+<p>
+<a href="https://www.khronos.org/conformance/adopters/conformant-products/vulkan">https://www.khronos.org/conformance/adopters/conformant-p...</a> (&quot;Mesa&quot; / &quot;RADV&quot; under driver version)<br>
+<a href="https://www.khronos.org/conformance/adopters/conformant-products/opengl">https://www.khronos.org/conformance/adopters/conformant-p...</a> (&quot;Mesa&quot;, plus some of the AMD Linux entries)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828502/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828729"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 13, 2020 11:42 UTC (Thu)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/828729/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe it&#x27;s time to remove the:<br>
+<font class="QuotedText">&gt;WARNING: radv is not a conformant vulkan implementation, testing use only.</font><br>
+message? ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828729/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828731"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 13, 2020 12:37 UTC (Thu)
+                               by <b>daenzer</b> (subscriber, #7050)
+                              [<a href="/Articles/828731/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That message currently still appears when using an older AMD GPU (pre-Volcanic Islands) or the new ACO shader compiler backend (which is enabled by default as of the upcoming Mesa 20.2 release), because RADV hasn&#x27;t officially passed conformance yet with those.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828731/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor828040"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2020 17:57 UTC (Tue)
+                               by <b>madscientist</b> (subscriber, #16861)
+                              [<a href="/Articles/828040/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I&#x27;ve often wondered what would happen if someone released a &quot;library&quot; with</font><br>
+<font class="QuotedText">&gt; a minimal implementation of readline(3) under a permissive license.</font><br>
+<p>
+That was already done, a long long time ago.  See for example <a href="https://thrysoee.dk/editline/">https://thrysoee.dk/editline/</a><br>
+<p>
+It&#x27;s not even really &quot;minimal&quot;; it&#x27;s a pretty robust and complete implementation of the API.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828040/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor828220"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 6, 2020 21:15 UTC (Thu)
+                               by <b>ecree</b> (guest, #95790)
+                              [<a href="/Articles/828220/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That&#x27;s not even hypothetical: <a href="https://yarchive.net/comp/linux/gpl.html#57">https://yarchive.net/comp/linux/gpl.html#57</a><br>
+<p>
+tl;dr: the GPL has nothing to do with &#x27;linking&#x27; and everything to do with &#x27;derivative work&#x27;, which is a legal rather than a technical predicate.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828220/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor827764"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 1, 2020 9:41 UTC (Sat)
+                               by <b>blackwood</b> (guest, #44174)
+                              [<a href="/Articles/827764/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The gpu driver for the all-firmware RPi gpu stack never made it to upstream. It&#x27;s not that easy, upstream maintainers aren&#x27;t idiots, an obvious &quot;hide it in firmware&quot; just pisses them off more. The actual upstream rpi stack has a fully open gpu driver running on the cpu.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827764/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827781"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 1, 2020 21:25 UTC (Sat)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/827781/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Radeons used to be entirely firmware-free and in the spirit of the GPL&#x27;s “preferred form for modification” until AMD (and someone with root access to the fdo git server) infamously sabotaged the radeonhd effort. Someone then went and retroactively added firmware blob dependencies as far back as R200, which was a fully functional driver without it.<br>
+<p>
+And upstream was rightly pissed off when the DC pull request farce happened, but I think they should&#x27;ve pushed back more instead of capitulating. The kernel&#x27;s now basically carrying around multiple megabytes of disassembly dumps. Maybe nVidia should try it next.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827781/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827796"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2020 11:03 UTC (Sun)
+                               by <b>airlied</b> (subscriber, #9104)
+                              [<a href="/Articles/827796/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wow, did you try to be wrong in as many ways as possible in one comment or did it just come naturally?<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827796/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor827825"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2020 23:05 UTC (Sun)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/827825/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; until AMD (and someone with root access to the fdo git server) infamously sabotaged the radeonhd effort.</font><br>
+<p>
+Wait, what?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827825/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828245"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 7, 2020 10:42 UTC (Fri)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/828245/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      What, you aren't aware of the rabbit hole that leads to <a href="https://cgit.freedesktop.org/xorg/driver/xf86-video-radeonhd/commit/?h=spigot">this masterpiece</a>? Maybe you're better off not knowing.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828245/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor827941"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2020 17:13 UTC (Mon)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/827941/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To others who are interested in deciphering these half-truths and lies:<br>
+<p>
+Early Radeon 200 series had completely open drivers, that didn&#x27;t require any firmware, they included OpenGL support and other nice things. Unfortunately, the later R300/R500/R600 cards had only closed-source drivers (and shitty ones at that). <br>
+<p>
+At this time there were already a pretty decent reverse-engineering NVidia driver. So a reverse-engineering project was started (&quot;avivo&quot;) for Radeon 500 series as well. Fortunately, ATI was acquired by AMD and they released a lot of documentation after some back-and-forths about NDAs and legal reviews.<br>
+<p>
+With the availability of the documentation two projects were started: RadeonHD and new code in the existing xf86-video-ati driver (mostly added by airlied and Alex Deucher). The difference was that RadeonHD used direct register manipulation and xf86-video-ati used AtomBIOS. <br>
+<p>
+AtomBIOS is basically an interpreted firmware that is used to manipulate power states, engine intialization and other utility stuff. Supporting it allowed the xf86-video-ati driver to not care about these details, that were also not documented in the released official documents. There was a fair amount of free tools created to reverse-engineer the proprietary drivers, and they could be used to RE the AtomBIOS as well so initially RadeonHD actually worked better than xf86-video-ati ( <a href="https://airlied.livejournal.com/53129.html">https://airlied.livejournal.com/53129.html</a> ).<br>
+<p>
+But this was not sustainable. AtomBIOS is developed internally in the AMD/ATI and replicating it in RadeonHD with all the device-specific quirks was not possible. And eventually RadeonHD just died. xf86-video-ati is still being developed.<br>
+<p>
+RadeonHD sources are still available for anyone interested: <a href="https://github.com/freedesktop-unofficial-mirror/xorg__driver__xf86-video-radeonhd">https://github.com/freedesktop-unofficial-mirror/xorg__dr...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827941/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827945"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2020 18:32 UTC (Mon)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/827945/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I&#x27;d also add that not relying on AtomBIOS didn&#x27;t mean RadeonHD was free of firmware dependencies - as far as I know all Radeon hardware has always needed firmware to be uploaded, but back in the day the firmware was just embedded directly into the radeon DRM kernel module instead of being pulled off disk. 70967ab9c0c9017645d167d33675eab996633631 changed that in 2009, but before that there was certainly still a firmware dependency all the way back to r100.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827945/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor827757"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 1, 2020 6:47 UTC (Sat)
+                               by <b>gioele</b> (subscriber, #61675)
+                              [<a href="/Articles/827757/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; With this patch applied, any module that imports symbols from a proprietary module is itself marked as being proprietary, denying it access to GPL-only symbols. If the shim module has already accessed GPL-only symbols by the time it gets around to importing symbols from the proprietary module, that import will not be allowed.</font><br>
+<p>
+Will this have an impact on the ZFS module as well?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827757/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827801"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2020 14:20 UTC (Sun)
+                               by <b>Baughn</b> (subscriber, #124425)
+                              [<a href="/Articles/827801/">Link</a>] (13 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+ZFS isn&#x27;t proprietary, so I don&#x27;t see why it would.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827801/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827802"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2020 14:35 UTC (Sun)
+                               by <b>rahulsundaram</b> (subscriber, #21946)
+                              [<a href="/Articles/827802/">Link</a>] (12 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; ZFS isn&#x27;t proprietary, so I don&#x27;t see why it would.</font><br>
+<p>
+It could impact non-GPL compatible modules<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827802/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827815"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2020 19:11 UTC (Sun)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/827815/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My question is, supposing this (or some future policy change) does impact ZFS, what will Canonical do about it? They&#x27;re already distributing ZFS binaries, which is (maybe, depending on which lawyers you ask) a GPL violation in its own right. So will they bite the bullet and start shipping a modified kernel that doesn&#x27;t enforce non-GPL taint? Or will they hack the hell out of the ZFS module to work around whatever the problem ends up being?<br>
+<p>
+(I would also be very interested in seeing whether the GPLv2&#x27;s freedom to modify implicitly overrides the DMCA&#x27;s anti-circumvention provisions, should this ever get litigated. GPLv3 has an explicit term overriding that, but the kernel&#x27;s not under GPLv3...)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827815/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827817"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2020 20:16 UTC (Sun)
+                               by <b>nivedita76</b> (guest, #121790)
+                              [<a href="/Articles/827817/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It should, the GPLv2 gives you authority to modify, so it gives you authority to circumvent, so DMCA shouldn&#x27;t apply, since it has an exception if the copyright owner gave you permission. It would be a pretty bad look for the FSF or the Linux kernel trying to enforce DMCA against anyone, in any case.<br>
+<p>
+(A) to “circumvent a technological measure” means to descramble a scrambled work, to decrypt an encrypted work, or otherwise to avoid, bypass, remove, deactivate, or impair a technological measure, without the authority of the copyright owner<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827817/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor827944"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2020 17:50 UTC (Mon)
+                               by <b>rahvin</b> (guest, #16953)
+                              [<a href="/Articles/827944/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are a lot of people that already believe Canonical&#x27;s distribution of the CDDL licensed ZFS is already a copyright violation. The CDDL was specifically designed to prevent the code being merged and/or distributed with GPL code. Distributing the two together is already legally dangerous, I don&#x27;t see how this kernel discussion impacts that. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827944/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827957"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2020 23:38 UTC (Mon)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/827957/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The CDDL was specifically designed to prevent the code being merged and/or distributed with GPL code.</font><br>
+<p>
+Just like any other simplistic/anthropomorphic &quot;Bigcorp X wants Y&quot; statement, I expect this will never be proved one way or the other.<br>
+<p>
+There was a great comment about this on this site about a few months back, I wish I were still using bookmarks...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827957/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor827959"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2020 1:06 UTC (Tue)
+                               by <b>rahulsundaram</b> (subscriber, #21946)
+                              [<a href="/Articles/827959/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<p>
+Instead of rehashing the same discussion, here is one of the prior ones<br>
+<p>
+<a href="https://lwn.net/Articles/676442/">https://lwn.net/Articles/676442/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827959/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828039"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CDDL compatibility</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2020 18:20 UTC (Tue)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/828039/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks, very useful! So this CDDL story is like pretty much everything on TV and social media: a tiny grain of truth that has been 1. ridiculously oversimplified, and 2. blown completely out of proportion.<br>
+<p>
+I just found out how to save humanity (no less): propaganda classes in school. Very simple: Step 1, one student finds and tells a complex story in class. Step 2,  small groups of students report it like it would be on social media or TV news. No, wait: they actually report it on social media, cause why not. Their grades are based on the number of likes and re-shares. <br>
+<p>
+No they understand how the world works and are really prepared for adult life.<br>
+<p>
+This new class is even compatible with pandemics and home schooling.<br>
+<p>
+Immoral? No because unlike all the grown-ups doing this for profit all day long they unmask themselves a few weeks later, after they&#x27;ve been graded - educating not just themselves but all the people they fooled too. Plus the only way to discredit fake news is more fake news.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828039/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828228"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CDDL compatibility</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 7, 2020 4:25 UTC (Fri)
+                               by <b>liam</b> (guest, #84133)
+                              [<a href="/Articles/828228/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      From <a href="https://books.google.com/books?id=0fpdDwAAQBAJ&amp;lpg=PP1&amp;pg=PT9#v=onepage&amp;q&amp;f=false">Think Again: How to Reason and Argue</a>
+
+<blockquote>
+<p>
+&nbsp;&nbsp;&nbsp;I have taught courses on reason and argument for over thirty-five years at Dartmouth College and now Duke University. Many students tell me that my courses have helped them in various areas of their lives. They motivate me to keep going.
+<br>
+&nbsp;&nbsp;&nbsp;While my students learned to argue, the rest of the world lost that skill. The level of discourse and communication in politics and also in personal life has reached new lows. During election years, my course has always discussed examples of arguments during presidential debates. During the 1980s, I had no trouble finding arguments on both sides in the debates. Today all I find are slogans, assertions, jokes, and gibes but very few real arguments. I see dismissals, put-downs, abuse, accusations, and avoiding the issue more than actual engagement with problems that matter. There might be fewer protests in the streets today than in the 1960s, but there are still fewer serious attempts to reason together and understand each other.
+</p>
+<hr>
+<p>
+&nbsp;&nbsp;&nbsp;My goal is to show what arguments are and what good they can do. This book is <u>not about winning arguments or beating opponents. Instead, it is about understanding each other and appreciating strong evidence</u>. It teaches logic instead of rhetorical tricks.
+</p>
+</blockquote>
+
+It's that last part that's really tricky.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828228/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828234"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CDDL compatibility</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 7, 2020 8:10 UTC (Fri)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/828234/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+What to expect when TV and social media are &quot;free&quot; (= you&#x27;re the product) while education becomes more and more inaccessible.<br>
+<p>
+The super rich need to wake up, pay taxes and fund education (and a few other things) as they used to do in the previous few decades. Quick before the next idiots start world war 3 somewhere.<br>
+<p>
+<a href="https://en.m.wikipedia.org/wiki/Weimar_Republic#Economic_problems">https://en.m.wikipedia.org/wiki/Weimar_Republic#Economic_...</a><br>
+<p>
+It has to come from the top because the poor are unfortunately now too often too ignorant to even  understand the numbers showing how much they&#x27;re screwed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828234/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828391"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CDDL compatibility</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 8, 2020 23:26 UTC (Sat)
+                               by <b>liam</b> (guest, #84133)
+                              [<a href="/Articles/828391/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Ah, you missed the first part. He&#x27;s talking about the &quot;elites&quot;  (Dartmouth &amp; Duke).<br>
+My point in posting this was, one, your comment immediately brought it to mind, and two, virtually no one is adept at accepting a good argument and recognizing good data unless it can be easily incorporated into their worldview.<br>
+We give far greater scrutiny to the opposition than our allies. To do otherwise is exhausting and, possibly, bad for our well being. That&#x27;s why it&#x27;s so tricky. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828391/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828392"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CDDL compatibility</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 8, 2020 23:58 UTC (Sat)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/828392/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And that&#x27;s why, to really win an argument, you need to understand your opponent&#x27;s. You never win an argument by telling your opponent they are wrong. You need to ask them questions, that throw their beliefs into question - &quot;if you believe A, then surely B must be true too, no?&quot; &quot;no? Well if A is true, how come B isn&#x27;t?&quot;.<br>
+<p>
+If you&#x27;ve done it right, you now leave them questioning their own beliefs. At which point, you can explain your own. Just expect them to poke holes in your beliefs, just like you&#x27;ve done to them :-)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828392/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828393"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">CDDL compatibility</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 9, 2020 0:25 UTC (Sun)
+                               by <b>liam</b> (guest, #84133)
+                              [<a href="/Articles/828393/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That&#x27;s a good methodology if the goal is to win arguments.<br>
+What was interesting to me was the idea that rhetoric (not big &quot;R&quot;😂) could be genuinely helpful, and not simply a program for making an opponent submit.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828393/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor828041"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2020 18:21 UTC (Tue)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/828041/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I tried harder and found the great comment I was referring to:<br>
+<a href="https://lwn.net/Articles/817671/">https://lwn.net/Articles/817671/</a><br>
+<font class="QuotedText">&gt; There is a tendency in these discussions to anthropomorphize large corporations. Which is dangerous, because it is grossly inaccurate to reality...</font><br>
+<p>
+The keywords are &quot;LWN antropomorphize corporations&quot;<br>
+<a href="https://www.google.com/search?q=site:lwn.net+anthropomorphize+corporations">https://www.google.com/search?q=site:lwn.net+anthropomorp...</a><br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828041/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor827828"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">at least two independent and inter-operable implementations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2020 1:10 UTC (Mon)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/827828/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; While the current GPU utilized is nvidia, there&#x27;s nothing in the rest of the patches specific to Nvidia - an Intel or AMD GPU interface could be equally workable.</font><br>
+<p>
+For the IETF &quot;could&quot; isn&#x27;t enough:<br>
+<p>
+<a href="https://www.ietf.org/how/runningcode/implementation-reports/">https://www.ietf.org/how/runningcode/implementation-reports/</a><br>
+<p>
+<font class="QuotedText">&gt; The IETF Standards Process (RFC 2026, updated by RFC 6410) requires at least two independent and inter-operable implementations for advancing a protocol specification to Internet Standard.</font><br>
+<p>
+Because the devil is always in the details.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/827828/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828055"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">at least two independent and inter-operable implementations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2020 3:36 UTC (Wed)
+                               by <b>gdt</b> (subscriber, #6284)
+                              [<a href="/Articles/828055/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I would be cautious when presenting IETF processes as an ideal.  See rfc8789 for the latest developments; correcting an undesirable outcome where documents which had not achieved &quot;rough consensus&quot; were being published as Informational RFCs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828055/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828057"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">at least two independent and inter-operable implementations</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 5, 2020 6:07 UTC (Wed)
+                               by <b>marcH</b> (subscriber, #57642)
+                              [<a href="/Articles/828057/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I would be cautious when presenting IETF processes as an ideal.</font><br>
+<p>
+Good thing I gave only a very narrow quote then.<br>
+<p>
+<font class="QuotedText">&gt; ... where documents which had not achieved &quot;rough consensus&quot; were being published as Informational RFCs.</font><br>
+<p>
+My quote refers to the Standards Track.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828057/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor829047"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2020 2:54 UTC (Wed)
+                               by <b>rlhamil</b> (guest, #6472)
+                              [<a href="/Articles/829047/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My basic problem with GPL (as contrasted with BSD, MIT, etc licenses) is that somehow legal trickery is ok, but only if it&#x27;s in support of ideology.<br>
+<p>
+I&#x27;m not a huge fan of ideology, thinking it seldom worth the benefits it claims to offer. I prefer results. As long as something open isn&#x27;t suddenly closed (Oracle, I hate you forever! OpenSolaris could have been the BEST OS around, if you weren&#x27;t such jerks!), one can always re-implement replacements for closed code, if one wants/needs to go to the bother. Otherwise, I want my dang commercially available gizmo to work and be cheap, and whether it runs Linux or some embedded BSD just isn&#x27;t that interesting to me. If I really want to hack it, I probably can even with closed code, and if I&#x27;m too lazy to reverse-engineer, then I&#x27;m probably too lazy even if I don&#x27;t have to.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/829047/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor829049"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2020 10:39 UTC (Wed)
+                               by <b>ldearquer</b> (guest, #137451)
+                              [<a href="/Articles/829049/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; My basic problem with GPL (as contrasted with BSD, MIT, etc licenses) is that somehow legal trickery is ok, but only if it&#x27;s in support of ideology.</font><br>
+<p>
+As long as you have a view of the world, you have an ideology. Calling something &quot;ideology&quot; to discredit it makes no sense, as you probably are reflecting your own ideology by doing so. Believe it or not, even putting ahead any &quot;results&quot; (of whatever kind) to other considerations is already an ideology on its own.<br>
+<p>
+<font class="QuotedText">&gt; As long as something open isn&#x27;t suddenly closed</font><br>
+<p>
+Well, that&#x27;s the whole point of the GPL<br>
+<p>
+<font class="QuotedText">&gt; If I really want to hack it, I probably can even with closed code, and if I&#x27;m too lazy to reverse-engineer, then I&#x27;m probably too lazy even if I don&#x27;t have to.</font><br>
+<p>
+Can&#x27;t disagree more. Either you are way more skilled than me (quite probably this is case), or you never truly reverse-engineered something<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/829049/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor829051"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Netgpu and the hazards of proprietary kernel modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 19, 2020 11:06 UTC (Wed)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/829051/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; I&#x27;m not a huge fan of ideology, thinking it seldom worth the benefits it claims to offer. I prefer results. As long as something open isn&#x27;t suddenly closed (Oracle, I hate you forever! OpenSolaris could have been the BEST OS around, if you weren&#x27;t such jerks!),</font><br>
+<p>
+Idealogy, as you call it, is required to deliver the results - what actually is the difference in meaning between &quot;benefits&quot; and &quot;results&quot;?<br>
+<p>
+Your Oracle story is all too common in the software world - and many others - and the real harm caused to real people is immense.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/829051/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2020, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

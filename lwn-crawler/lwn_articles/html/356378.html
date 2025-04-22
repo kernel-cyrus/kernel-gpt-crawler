@@ -1,0 +1,663 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Fixing kmap_atomic() [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/356378/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/356034/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/356378/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Fixing kmap_atomic()</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>We're bad at marketing</b>
+<p>
+We can admit it, marketing is not our strong suit. Our strength is
+writing the kind of articles that developers, administrators, and
+free-software supporters depend on to know what is going on in the
+Linux world. Please <a href="/Promo/nsn-bad/subscribe">subscribe today</a> to help us keep doing that, and so
+we don’t have to get good at marketing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>October 13, 2009</br>
+           </div>
+Once upon a time, Linux was limited to less than 1GB of physical memory on
+32-bit systems.  This limit was imposed by two technical decisions:
+processes run with the same page tables in both kernel and user mode, and
+all physical memory had to be directly addressable by the kernel.  Not
+changing page tables at every transition between kernel and user space is a
+significant performance win, but it forces the two modes to share the same
+4GB address space.  The directly-addressable requirement meant that total
+physical memory could not exceed the amount of virtual memory address space
+assigned to the kernel.  Indeed, not even the full kernel space was
+available, due to the need to leave some space for I/O memory,
+<tt>vmalloc()</tt>, and so on.  The normal split is 3GB for user space and
+1GB for kernel space; that limited systems to a bit less than 1GB of
+physical memory.
+<p>
+The way this problem was fixed was to create the concept of "high memory":
+memory which is not directly addressable by the kernel.  Most of the time,
+the kernel does not need to directly manipulate much of the memory on the
+system; almost all user-space pages, for example, are usually only accessed in user
+mode.  But, occasionally, the kernel must be able to
+reach into any page in the system.  Zeroing new pages is one example;
+reading system call arguments from a user-space page is another.  Since
+high-memory pages cannot live permanently in the kernel's virtual address
+space, the kernel needs a mechanism by which it can temporarily create a
+kernel-space address for specific high-memory pages.
+<p>
+That mechanism is called <tt>kmap()</tt>; it takes a pointer to a
+<tt>struct page</tt> and returns a kernel-space virtual address for the
+page.  When the kernel is done with the page, it must use <tt>kunmap()</tt>
+to unmap the page and make the address available for other mappings.
+<tt>kmap()</tt> works, but it can be slow; it requires translation
+lookaside buffer flushes and, potentially, cross-CPU interrupts for every
+mapping.  Linus recently <a href="/Articles/356724/">commented</a> on the
+costs of high memory:
+<p>
+<div class="BigQuote">
+	 HIGHMEM accesses really are very slow.  You don't see that in user
+	 space, but I really have seen 25% performance differences between
+	 non-highmem builds and CONFIG_HIGHMEM4G enabled for things that
+	 try to put a lot of data in highmem (and the 64G one is even more
+	 expensive). And that was just with 2GB of RAM.
+</div>
+<p>
+All that costly work is done to keep the kernel-space mapping
+consistent across all processors in the system, even though many of these
+mappings are used only briefly, and only on a single CPU.
+<p>
+To improve performance, the kernel developers introduced a special version:
+<p>
+<pre>
+    void *kmap_atomic(struct page *page, enum km_type idx);
+</pre>
+<p>
+
+<table align="right" cellpadding=2 
+       style="border-style: groove; margin-left: 3px" hspace=2>
+<tr><th>Atomic kmap slots</th></tr>
+<tr class="Odd"><td><tt>KM_BOUNCE_READ</tt></td></tr>
+<tr class="Even"><td><tt>KM_SKB_SUNRPC_DATA</tt></td></tr>
+<tr class="Odd"><td><tt>KM_SKB_DATA_SOFTIRQ</tt></td></tr>
+<tr class="Even"><td><tt>KM_USER0</tt></td></tr>
+<tr class="Odd"><td><tt>KM_USER1</tt></td></tr>
+
+<tr class="Even"><td><tt>KM_BIO_SRC_IRQ</tt></td></tr>
+<tr class="Odd"><td><tt>KM_BIO_DST_IRQ</tt></td></tr>
+<tr class="Even"><td><tt>KM_PTE0</tt></td></tr>
+<tr class="Odd"><td><tt>KM_PTE1</tt></td></tr>
+<tr class="Even"><td><tt>KM_IRQ0</tt></td></tr>
+<tr class="Odd"><td><tt>KM_IRQ1</tt></td></tr>
+<tr class="Even"><td><tt>KM_SOFTIRQ0</tt></td></tr>
+<tr class="Odd"><td><tt>KM_SOFTIRQ1</tt></td></tr>
+<tr class="Even"><td><tt>KM_SYNC_ICACHE</tt></td></tr>
+<tr class="Odd"><td><tt>KM_SYNC_DCACHE</tt></td></tr>
+<tr class="Even"><td><tt>KM_UML_USERCOPY</tt></td></tr>
+<tr class="Odd"><td><tt>KM_IRQ_PTE</tt></td></tr>
+<tr class="Even"><td><tt>KM_NMI</tt></td></tr>
+<tr class="Odd"><td><tt>KM_NMI_PTE</tt></td></tr>
+</table>
+
+
+This function differs from <tt>kmap()</tt> in some important ways.  It only
+creates a mapping on the current CPU, so there is no need to bother other
+processors with it.  It also creates the mapping using one of a very small
+set of kernel-space addresses.  The caller must specify which address to
+use by way of the <tt>idx</tt> argument; these addresses are specified by a
+set of "slot" constants.  For example, <tt>KM_USER0</tt> and
+<tt>KM_USER1</tt> are set aside for code called directly from user context
+- system call implementations, generally.  <tt>KM_PTE0</tt> is used for
+page table operations, <tt>KM_SOFTIRQ0</tt> is used in software interrupt
+mode, etc.  There are about twenty of these slots defined in current
+kernels; see the list at the right for the 2.6.32 slots.
+<p>
+The use of fixed slots requires that the code using these mappings be
+atomic - hence the name <tt>kmap_atomic()</tt>.  If code holding an atomic
+kmap could be preempted, the thread which takes its place could use the
+same slots, with unfortunate results.  The per-CPU nature of atomic
+mappings means that any cross-CPU migration would be disastrous.
+It's worth noting that there is no
+other protection against multiple use of specific slots; if two functions
+in a given call chain disagree about the use of <tt>KM_USER0</tt>, bad
+things are going to happen.  In practice, this problem does not seem to
+actually bite people, though.
+<p>
+
+This API has seen little change for years, but Peter Zijlstra has recently decided
+that it could use a face lift.  The result is <a
+href="http://lwn.net/Articles/356376/">a patch series</a> changing this
+fundamental interface and fixing the resulting compilation problems in over
+200 files. 
+The change is conceptually simple: the slots disappear, and the range of
+addresses is managed as a stack instead.  After all, users of
+<tt>kmap_atomic()</tt> don't really care about which address they get; they
+just want an address that nobody else is using.  The new API does force
+map and unmap operations to nest properly, but the atomic nature of these
+mappings means that usage generally fits that pattern anyway.
+<p>
+There seems to be little question of this change being merged; Linus <a
+href="/Articles/356386/">welcomed it</a>, saying "<q>I think this is how
+we should have done it originally.</q>"  There were some quibbles about
+the naming in the first version of the patch (<tt>kmap_atomic()</tt> had
+become <tt>kmap_atomic_push()</tt>), but that was easily fixed for the
+second iteration.
+<p>
+It is also interesting to look at how this patch series was reworked.  The
+first version was a single patch which did all of the changes at once.  In
+response to reviewers, Peter broke the second version down into four steps:
+<p>
+<ol>
+<li> Make sure that all atomic kmaps are created and destroyed in a 
+     strictly nested manner.  There were a few places in the code where
+     that did not happen; fixing it was usually just a matter of reordering
+     a couple of <tt>kunmap_atomic()</tt> calls.
+<p>
+<li> Switch to the stack-based mode without changing the
+     <tt>kmap_atomic()</tt> prototype.  So, after this patch,
+     <tt>kmap_atomic()</tt> simply ignores the <tt>idx</tt> argument.
+<p>
+<li> The <tt>kmap_atomic()</tt> prototype loses the <tt>idx</tt> argument;
+     this is, by far, the largest patch of the series.
+<p>
+<li> Various final details are fixed up.
+</ol>
+<p>
+Doing things this way will make it a lot easier to debug any strange
+problems which result from the changes.  The most significant change in
+terms of how the kernel works is step&nbsp;2, so that's the patch which is
+most likely to create problems.  But this organization makes that patch
+relatively small, so tracking down any residual bugs should be relatively
+easy.  Instead, the really huge patch (part&nbsp;3) should not really
+change the binary kernel at all, so the chances of it being problem-free
+are quite high.
+<p>
+All that remains is getting this change merged.  It's too late for 2.6.32,
+but putting it into linux-next is likely to create large numbers of
+patch conflicts.  That is a common problem with wide-ranging patches like
+this, though; developers have gotten better over the years at maintaining
+them against a rapidly-changing kernel<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#kmap_atomic">kmap_atomic()</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Internal_API">Memory management/Internal API</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/356378/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor357445"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How expensive is highmem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 18, 2009 19:41 UTC (Sun)
+                               by <b>kleptog</b> (subscriber, #1183)
+                              [<a href="/Articles/357445/">Link</a>] (11 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I work with machines that have 8GB+ of memory but are only 32-bit builds. It seems to me that highmem would indeed cost something, but it's entirely unclear to me how much. How could you measure it?<br>
+<p>
+I've been thinking of just installing a 64-bit kernel but leaving the userspace unchanged. ISTM this should cut out the cost of highmem. But I have no way of measuring any difference and I havn't found any place discussing this combination.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/357445/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor357469"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How expensive is highmem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 19, 2009 4:44 UTC (Mon)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/357469/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+a64bit kernel with 32 bit userspace is reasonably common.<br>
+<p>
+I've seen significant (double digit percentage) benifits from going from 32 bit to 64 bit kernels, even without himem involved (probably due to the fact that in 64 bit mode the x86 cpu's have twice as many registers available to use)<br>
+<p>
+when you add the benifits of eliminating himem overhead, you should relly find it a win.<br>
+<p>
+several years ago there were problems with 32 bit userspace and 64 bit kernels, but at this point I have not heard of any interface compatibility problems for a year or two.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/357469/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor358227"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How expensive is highmem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2009 18:28 UTC (Thu)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/358227/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;a64bit kernel with 32 bit userspace is reasonably common.</font><br>
+<p>
+[citation needed]. It is common on arches where 64-bit is considered expensive - such as sparc64. But on x86, people have obviously made sure 64-bit mode runs at least at the same effective speed because otherwise it would be harder in selling it. Plus, in precompiled distros, the 32-bit objects often do not contain SSE/SSE2 because it is not guaranteed to be available in all cases (and in fact, libvorbis/oggenc will speed up by 17% when adding -msse -mfpmath=sse on ye olde 2003ish AMD Athlon XP); on 64-bit however, SSE is always available, so naturally it comes faster compared to precompiled 32 bit objects. (IOW, Gentoo is exempt because you can add -mfpmath=sse at your leisure.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358227/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor358235"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How expensive is highmem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 22, 2009 18:49 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/358235/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+there is a bunch of software that is not available in 64 bit mode. As a result a lot of people on x86 use a 64 bit kernel so that they can efficiently use all of their ram, but then use 32 bit userspace so that all their apps still work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358235/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor358326"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How expensive is highmem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2009 7:36 UTC (Fri)
+                               by <b>Cato</b> (guest, #7643)
+                              [<a href="/Articles/358326/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Does anyone know if a 32 bit userland with 64 bit kernel is supported in Debian or Ubuntu?  Sounds like this would be a better option than a PAE kernel for some uses.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358326/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor358327"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How expensive is highmem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2009 7:53 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/358327/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+how do you define 'supported'?<br>
+<p>
+32 bit userspace with a 64 bit kernel is absolutly supported by the kernel developers<br>
+<p>
+I don't think either debian or ubuntu include the option to do this in their installers, but since the packages are available if you force overriding the checks you can install the 64 bit kernel on an otherwise 32 bit install (and it will even leave your old kernel available to boot from)<br>
+<p>
+will you get some people who question why you are doing this when you ask on mailing lists? yes. will you get people who are doing this on their systems when you ask on mailing lists? yes (not always at the same time)<br>
+<p>
+are you talking about paid support for either of these? if so you would have to ask the support orginization. if they are any good (and are charging you enough to really offer support) I would expect them to do so.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358327/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor358344"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How expensive is highmem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2009 11:52 UTC (Fri)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/358344/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's supported in the sense that anything that doesn't work is a bug, but not supported in the sense that it's basically untested. There are certainly missing ioctl translations and suchlike, and random applications may fail as a result.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358344/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor358433"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How expensive is highmem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 23, 2009 22:02 UTC (Fri)
+                               by <b>paulj</b> (subscriber, #341)
+                              [<a href="/Articles/358433/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Now we just need distros to support 64bit/primarily-32bit kernel/userspace.<br>
+<p>
+(Fedora is tantalisingly close, but yum updates don't quite work right)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358433/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor358483"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How expensive is highmem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2009 10:54 UTC (Sat)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/358483/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In practice it works well enough for normal userspace apps. It might not <br>
+work for things that do Linux-specific stuff like iptables, but if you're <br>
+running a 64-bit userspace with some 32-bit apps that you can't get 64-bit <br>
+equivalents for (like World of Goo ;) ) then it should just work.<br>
+<p>
+The POSIX subset of what Linux can do absolutely does work in 32-bit <br>
+compat mode.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358483/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor358523"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How expensive is highmem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2009 20:23 UTC (Sat)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/358523/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+actually, no.<br>
+<p>
+one thing I ran into is trying to get the citrix client working (yes, a binary-only app), it needs various other libraries, including X libraries. these are not part of the stuff supported by the 32 bit compatibility libraries.<br>
+<p>
+I don't run many 32 bit apps, but I've run across a half dozen of them that have required that I manually download and install some 32 bit versions of packages on my 64 bit machine before they work.<br>
+<p>
+however, I have been able to get every one of them to work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358523/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor358457"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How expensive is highmem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2009 2:23 UTC (Sat)
+                               by <b>ccurtis</b> (guest, #49713)
+                              [<a href="/Articles/358457/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I find this question so strange ... as in, why is it even a concern?<br>
+<p>
+But supported or not, my Debian servers have no issues running 32-bit userland apps.  'apt-get install ia32-libs' should be all you need.<br>
+<p>
+My desktop is Ubuntu, and it appears that this package is also required for flash (nonfree).  Now, as for stability I can't say I have _too_ many problems, but I wouldn't attribute any I do have to 32bit-ness.<br>
+<p>
+Audio on the other hand...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358457/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor358458"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How expensive is highmem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 24, 2009 2:28 UTC (Sat)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/358458/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+installing the ia32-libs package does not take care of everything (unfortunantly)<br>
+<p>
+it makes most things run, but I have run across many things that require additional 32 bit packages be installed to make them work.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/358458/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor357490"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Fixing kmap_atomic()</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Oct 19, 2009 16:04 UTC (Mon)
+                               by <b>pflugstad</b> (subscriber, #224)
+                              [<a href="/Articles/357490/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So, let's see if I can explain this in my terms.<br>
+<p>
+When the kernel is running on a machine with &lt;1GB of physical RAM, and CONFIG_HIGMEM (of any variety) is not enabled, then the kernel just maps all of physical ram to it's virtual memory entries.  This kernel is effectively limited to 1GB physical RAM (or so).  Additionally, for each userspace process, the top 1GB of it's virtual address space is mapped to this same 1GB slice, so that it effectively shares a virtual address space with the kernel. <br>
+<p>
+Then when some userspace process transitions into kernel space, nothing needs to change w.r.t. virtual memory - the kernel can access all of userspace memory directly (the lower 3GB of virtual RAM), since it's already in the same virtual address space, without mucking about with address space mappings which would cause a TLB flush. <br>
+<p>
+But, when you enable CONFIG_HIGHMEM4G, things change a little bit.  The kernel still maps the lowest 1GB of physical RAM to it's virtual address space, but if you have, say, 2GB of RAM, then that other 1GB of RAM is not mapped to the kernels virtual address space.  This RAM is still accessible directly to the CPU, and user space processes can run from it just fine.  <br>
+<p>
+However, when the user space process transitions into the kernel (system call, etc), any pointers the user space process may pass may point to memory that is not currently mapped in the kernels virtual memory setup.  <br>
+<p>
+So this is where kmap_atomic comes into play: it grabs some chunk of unused virtual memory in the kernel (I assume some is set aside up front for this?) and sets up a temporary virtual&lt;-&gt;physical mapping to the chunk of physical memory that is not currently mapped.  So now the kernel can use that virtual memory address to access the chunk of RAM above 1GB that is not permanently mapped.   But since you changed the virtual&lt;-&gt;physical mapping, now you have to flush your TLB, which is relatively expensive to rebuild, in addition to the overhead in managing these mappings. <br>
+<p>
+Now, prior to this patch, the chunks of unused virtual memory in the kernel were divided into "slots" dedicated to specific uses.  The change discussed in this article is to treat those temporary mappings all the same, and just do a stack of available virtual memory - grab the next chunk of available virtual address space and hand it out, then when it's done, that is "popped" off again.  <br>
+<p>
+Actually, it seems like you don't even need to treat the available virtual addresses as a stack - just manage it like you do the heap: hand out how ever much is requested, and when it's "free'd" you put it back into the heap?  I guess you could get fragmentation that way.  Maybe use one of the SLxB allocators on it?<br>
+<p>
+Now, to just carry this a little bit farther - when you have &gt;4GB on a 32-bit machine, this is where PAE comes into play?  Is PAE basically just another extension to the above process - only instead of mapping a 32-bit physical address into the kernel, you map a 36-bit physical address, which is a chunk of RAM somewhere above 4GB, into the kernel's 32-bit virtual address space?   So again there's extra overhead in changing virtual to physical mappings, so you get a TLB flush and so on...<br>
+<p>
+Thanks!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/357490/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2009, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

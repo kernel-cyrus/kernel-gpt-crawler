@@ -1,0 +1,604 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>RCU and Unloadable Modules [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/217484/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/217119/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/217484/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>RCU and Unloadable Modules</h1>
+</div>
+<div class="ArticleText">
+<div class="GAByline">
+           <p>January 14, 2007</p>
+           <p>This article was contributed by Paul McKenney</p>
+           </div>
+RCU (read-copy update) is a synchronization mechanism that can be thought
+of as a replacement for read-writer locking (among other things),
+but with very low-overhead readers that are immune to deadlock,
+priority inversion, and unbounded latency.
+RCU read-side critical sections are delimited by <TT>rcu_read_lock()</TT>
+and <TT>rcu_read_unlock()</TT>, which, in non-<TT>CONFIG_PREEMPT</TT>
+kernels, generate no code whatsoever.
+
+<P>
+This means that RCU writers are unaware of the presence of concurrent
+readers, so that RCU updates to shared data must be undertaken quite
+carefully, leaving an old version of the data structure in place
+until all pre-existing readers have finished.
+These old versions are needed because
+such readers might hold a reference to them.
+RCU updates can therefore be rather expensive, and RCU is thus best
+suited for read-mostly situations.
+
+<P>
+How can an RCU writer possibly determine when all readers are finished, given
+that readers might well leave absolutely no trace of their presence?
+There is a <TT>synchronize_rcu()</TT> primitive that blocks until
+all pre-existing readers have completed.
+An updater wishing to delete an element <TT>p</TT> from a linked
+list might do the following, while holding an appropriate lock,
+of course:
+
+<LISTING>
+	list_del_rcu(p);
+	synchronize_rcu();
+	kfree(p);
+</LISTING>
+
+But the above code cannot be used in IRQ context -- the
+<TT>call_rcu()</TT> primitive must be used instead.
+This primitive takes a pointer to an <TT>rcu_head</TT> struct placed
+within the RCU-protected data structure and another pointer
+to a function that may be invoked later to free that structure.
+Code to delete an element <TT>p</TT> from the linked list from IRQ
+context might then be as follows:
+
+<LISTING>
+	list_del_rcu(p);
+	call_rcu(&amp;p-&gt;rcu, p_callback);
+</LISTING>
+
+Since <TT>call_rcu()</TT> never blocks, this code can safely be used
+from within IRQ context.
+The function <TT>p_callback()</TT> might be defined as follows:
+
+<LISTING>
+	static void p_callback(struct rcu_head *rp)
+	{
+		struct pstruct *p = container_of(rp, struct pstruct, rcu);
+
+		kfree(p);
+	}
+</LISTING>
+
+<H3>Unloading Modules That Use call_rcu()</H3>
+
+But what if <TT>p_callback</TT> is defined in an unloadable module?
+
+<P>
+<img src="https://static.lwn.net/images/ns/kernel/rcu-drop.jpg" width=313 height=357
+alt="[Cartoon]" align="right" hspace=2>
+
+If we unload the module while some RCU callbacks are pending, the CPUs
+executing these
+callbacks are going to be severely disappointed when they are later invoked,
+as fancifully depicted on the right.
+
+<P>
+
+We could try placing a <TT>synchronize_rcu()</TT> in the module-exit
+code path, but this is not sufficient.
+Although <TT>synchronize_rcu()</TT> does wait for a grace period
+to elapse, it does <I>not</I> wait for the callbacks to complete.
+
+<P>
+One might be tempted to try several back-to-back
+<TT>synchronize_rcu()</TT> calls, but this is still not guaranteed to work.
+If there is a very heavy RCU-callback load, then some of the callbacks might
+be deferred in order to allow other processing to proceed.
+Such deferral is required in realtime kernels in order to avoid excessive
+scheduling latencies.
+
+<H3>rcu_barrier()</H3>
+
+We instead need the <TT>rcu_barrier()</TT> primitive.
+This primitive is similar to <TT>synchronize_rcu()</TT>, but instead of
+waiting solely for a grace period to elapse, it also waits for
+all outstanding RCU callbacks to complete.
+Pseudo-code using <TT>rcu_barrier()</TT> is as follows:
+
+<OL>
+<LI>	Prevent any new RCU callbacks from being posted.</LI>
+<LI>	Execute <TT>rcu_barrier()</TT>.</LI>
+<LI>	Allow the module to be unloaded.</LI>
+</OL>
+
+<B>Quick Quiz #1</B>: Why is there no <TT>srcu_barrier()</TT>?
+
+<P>
+<B>Quick Quiz #2</B>: Why is there no <TT>rcu_barrier_bh()</TT>?
+
+<P>
+The rcutorture module makes use of <TT>rcu_barrier</TT> in its exit function
+as follows:
+
+<LISTING>
+  1 static void
+  2 rcu_torture_cleanup(void)
+  3 {
+  4   int i;
+  5 
+  6   fullstop = 1;
+  7   if (shuffler_task != NULL) {
+  8     VERBOSE_PRINTK_STRING("Stopping rcu_torture_shuffle task");
+  9     kthread_stop(shuffler_task);
+ 10   }
+ 11   shuffler_task = NULL;
+ 12 
+ 13   if (writer_task != NULL) {
+ 14     VERBOSE_PRINTK_STRING("Stopping rcu_torture_writer task");
+ 15     kthread_stop(writer_task);
+ 16   }
+ 17   writer_task = NULL;
+ 18 
+ 19   if (reader_tasks != NULL) {
+ 20     for (i = 0; i &lt; nrealreaders; i++) {
+ 21       if (reader_tasks[i] != NULL) {
+ 22         VERBOSE_PRINTK_STRING(
+ 23           "Stopping rcu_torture_reader task");
+ 24         kthread_stop(reader_tasks[i]);
+ 25       }
+ 26       reader_tasks[i] = NULL;
+ 27     }
+ 28     kfree(reader_tasks);
+ 29     reader_tasks = NULL;
+ 30   }
+ 31   rcu_torture_current = NULL;
+ 32 
+ 33   if (fakewriter_tasks != NULL) {
+ 34     for (i = 0; i &lt; nfakewriters; i++) {
+ 35       if (fakewriter_tasks[i] != NULL) {
+ 36         VERBOSE_PRINTK_STRING(
+ 37           "Stopping rcu_torture_fakewriter task");
+ 38         kthread_stop(fakewriter_tasks[i]);
+ 39       }
+ 40       fakewriter_tasks[i] = NULL;
+ 41     }
+ 42     kfree(fakewriter_tasks);
+ 43     fakewriter_tasks = NULL;
+ 44   }
+ 45 
+ 46   if (stats_task != NULL) {
+ 47     VERBOSE_PRINTK_STRING("Stopping rcu_torture_stats task");
+ 48     kthread_stop(stats_task);
+ 49   }
+ 50   stats_task = NULL;
+ 51 
+ 52   /* Wait for all RCU callbacks to fire.  */
+ 53   rcu_barrier();
+ 54 
+ 55   rcu_torture_stats_print();  /* -After- the stats thread is stopped! */
+ 56 
+ 57   if (cur_ops-&gt;cleanup != NULL)
+ 58     cur_ops-&gt;cleanup();
+ 59   if (atomic_read(&amp;n_rcu_torture_error))
+ 60     rcu_torture_print_module_parms("End of test: FAILURE");
+ 61   else
+ 62     rcu_torture_print_module_parms("End of test: SUCCESS");
+ 63 }
+</LISTING>
+
+Line 6 sets a global variable that prevents any RCU callbacks from
+re-posting themselves.
+This will not be necessary in most cases, since RCU callbacks rarely
+include calls to <TT>call_rcu()</TT>.
+However, the rcutorture module is an exception to this rule, and
+therefore needs to set this global variable.
+
+<P>
+Lines 7-50 stop all the kernel tasks associated with the
+rcutorture module.
+Therefore, once execution reaches line 53, no more rcutorture
+RCU callbacks will be posted.
+The <TT>rcu_barrier()</TT> call on line 53 waits for any pre-existing
+callbacks to complete.
+
+<P>
+Then lines 55-62 print status and do operation-specific cleanup,
+and then return, permitting the module-unload operation to be completed.
+
+<P>
+<B>Quick Quiz #3</B>: Is there any other situation where
+<TT>rcu_barrier()</TT> might be required?
+
+<P>
+Your module might have additional complications.
+For example, if your module invokes <TT>call_rcu()</TT> from
+timers, you will need to first cancel all the timers, and only
+then invoke <TT>rcu_barrier()</TT> to wait for any remaining
+RCU callbacks to complete.
+
+<H2>Implementing rcu_barrier()</H2>
+
+Dipankar Sarma's implementation of <TT>rcu_barrier()</TT>
+makes use of the fact that RCU callbacks are never reordered once
+queued on one of the per-CPU queues.
+His implementation queues an RCU callback on each of
+the per-CPU callback queues, and then waits until they have all
+started executing, at which point, all earlier RCU callbacks are
+guaranteed to have completed.
+
+<P>
+The code for <TT>rcu_barrier()</TT> is as follows:
+
+<LISTING>
+  1 void rcu_barrier(void)
+  2 {
+  3     BUG_ON(in_interrupt());
+  4   	/* Take cpucontrol mutex to protect against CPU hotplug */
+  5   	mutex_lock(&amp;rcu_barrier_mutex);
+  6   	init_completion(&amp;rcu_barrier_completion);
+  7   	atomic_set(&amp;rcu_barrier_cpu_count, 0);
+  8   	on_each_cpu(rcu_barrier_func, NULL, 0, 1);
+  9   	wait_for_completion(&amp;rcu_barrier_completion);
+ 10   	mutex_unlock(&amp;rcu_barrier_mutex);
+ 11 }
+</LISTING>
+
+Line 3 verifies that the caller is in process context, and
+lines 5 and 10 use <TT>rcu_barrier_mutex</TT> to ensure that
+only one <TT>rcu_barrier()</TT> is using the global completion
+and counters at a time, which are initialized on lines 6 and 7.
+Line 8 causes each CPU to invoke <TT>rcu_barrier_func()</TT>,
+which is shown below.
+Note that the final "1" in <TT>on_each_cpu()</TT>'s argument list
+ensures that all the calls to <TT>rcu_barrier_func()</TT> will
+have completed before <TT>on_each_cpu()</TT> returns.
+Line 9 then waits for the completion.
+
+<P>
+The <TT>rcu_barrier_func()</TT> runs on each CPU, where it invokes
+<TT>call_rcu()</TT> to post an RCU callback, as follows:
+
+<LISTING>
+  1 static void rcu_barrier_func(void *notused)
+  2 {
+  3     int cpu = smp_processor_id();
+  4   	struct rcu_data *rdp = &amp;per_cpu(rcu_data, cpu);
+  5   	struct rcu_head *head;
+  6 
+  7	head = &amp;rdp-&gt;barrier;
+  8   	atomic_inc(&amp;rcu_barrier_cpu_count);
+  9   	call_rcu(head, rcu_barrier_callback);
+ 10 }
+</LISTING>
+
+Lines 3 and 4 locate RCU's internal per-CPU <TT>rcu_data</TT> structure,
+which contains the <TT>struct rcu_head</TT> that needed for the later
+call to <TT>call_rcu()</TT>.
+Line 7 picks up a pointer to this <TT>struct rcu_head</TT>, and line 8
+increments a global counter.
+This counter will later be decremented by the callback.
+Line 9 then registers the <TT>rcu_barrier_callback()</TT>
+on the current CPU's queue.
+
+<P>
+The <TT>rcu_barrier_callback()</TT> function simply atomically
+decrements the <TT>rcu_barrier_cpu_count</TT> variable and finalizes
+the completion when it reaches zero, as follows:
+
+<LISTING>
+  1 static void rcu_barrier_callback(struct rcu_head *notused)
+  2 {
+  3     if (atomic_dec_and_test(&amp;rcu_barrier_cpu_count))
+  4         complete(&amp;rcu_barrier_completion);
+  5 }
+</LISTING>
+
+<P>
+<B>Quick Quiz #4</B>: What happens if CPU 0's <TT>rcu_barrier_func()</TT>
+executes immediately (thus incrementing <TT>rcu_barrier_cpu_count</TT>
+to the value one), but the other CPU's <TT>rcu_barrier_func()</TT>
+invocations are delayed for a full grace period?
+Couldn't this result in <TT>rcu_barrier()</TT> returning prematurely?
+
+<H3>rcu_barrier() Summary</H3>
+
+<P>
+The <TT>rcu_barrier()</TT> primitive has seen relatively little use,
+since most code using RCU is in the core kernel rather than in modules.
+However, if you are using RCU from an unloadable module, you need to use
+<TT>rcu_barrier()</TT> so that your module may be safely unloaded.
+
+<H3>Answers to Quick Quizzes</H3>
+
+<B>Quick Quiz #1</B>: Why is there no <TT>srcu_barrier()</TT>?
+
+<P>
+Since there is no <TT>call_srcu()</TT>, there can be no outstanding
+SRCU callbacks.
+Therefore, there is no need to wait for them.
+
+<P>
+<B>Quick Quiz #2</B>: Why is there no <TT>rcu_barrier_bh()</TT>?
+
+<P>
+Because no one has needed it yet.
+As soon as someone needs to use <TT>call_rcu_bh()</TT> from within an
+unloadable module, they will need an <TT>rcu_barrier_bh()</TT>.
+
+<P>
+<B>Quick Quiz #3</B>: Is there any other situation where
+<TT>rcu_barrier()</TT> might be required?
+
+<P>
+Interestingly enough, <TT>rcu_barrier()</TT> was not originally
+implemented for module unloading.
+Nikita Danilov was using RCU in a filesystem, which resulted in a
+similar situation at filesystem-unmount time.
+Dipankar Sarma coded up <TT>rcu_barrier()</TT> in response, so that
+Nikita could invoke it during the filesystem-unmount process.
+
+<P>
+Much later, yours truly hit the RCU module-unload problem
+when implementing rcutorture, and found that <TT>rcu_barrier()</TT>
+solves this problem as well.
+
+<P>
+<B>Quick Quiz #4</B>: What happens if CPU 0's <TT>rcu_barrier_func()</TT>
+executes immediately (thus incrementing <TT>rcu_barrier_cpu_count</TT>
+to the value one), but the other CPU's <TT>rcu_barrier_func()</TT>
+invocations are delayed for a full grace period?
+Couldn't this result in <TT>rcu_barrier()</TT> returning prematurely?
+
+<P>
+This cannot happen.
+The reason is that <TT>on_each_cpu()</TT> has its last argument,
+the <TT>wait</TT> flag, set to "1".
+This flag is passed through to <TT>smp_call_function()</TT> and
+further to <TT>smp_call_function_on_cpu()</TT>, causing this latter
+to spin until the cross-CPU invocation of rcu_barrier_func() has completed.
+This by itself would prevent a grace period from completing on
+non-CONFIG_PREEMPT kernels, since each CPU must undergo a context switch
+(or other quiescent state) before the grace period can complete.
+However, this is of no use in CONFIG_PREEMPT kernels.
+
+<P>
+Therefore, <TT>on_each_cpu()</TT> disables preemption across its
+call to <TT>smp_call_function()</TT> and also across the local
+call to <TT>rcu_barrier_func()</TT>.
+This prevents the local CPU from context switching, again preventing
+grace periods from completing.
+This means that all CPUs have executed <TT>rcu_barrier_func()</TT>
+before the first <TT>rcu_barrier_callback()</TT> can possibly execute,
+in turn preventing <TT>rcu_barrier_cpu_count</TT> from prematurely
+reaching zero.
+
+<P>
+Currently, -rt implementations of RCU keep but a single global queue
+for RCU callbacks, and thus do not suffer from this problem.
+However, when the -rt RCU eventually does have per-CPU callback
+queues, things will have to change.
+One simple change is to add an <TT>rcu_read_lock()</TT> before line 8
+of <TT>rcu_barrier()</TT> and an <TT>rcu_read_unlock()</TT> after
+line 8 of this same function.
+If you can think of a better change, please let me know!<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Read-copy-update">Read-copy-update</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#McKenney_Paul_E.">McKenney, Paul E.</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/217484/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor218340"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RCU and Unloadable Modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 19, 2007 17:34 UTC (Fri)
+                               by <b>jonabbey</b> (guest, #2736)
+                              [<a href="/Articles/218340/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Bravo for this sort of detailed technical content, folks.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/218340/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor218377"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RCU and Unloadable Modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 19, 2007 22:09 UTC (Fri)
+                               by <b>droundy</b> (subscriber, #4559)
+                              [<a href="/Articles/218377/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      I second that! This is the sort of article that makes me very glad I subscribe to LWN.  Of course, reading it a week late wouldn't hurt me, but it's worth contributing something to get articles like this.<br>
+<p>
+David<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/218377/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor218462"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RCU and Unloadable Modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 21, 2007 11:04 UTC (Sun)
+                               by <b>ortalo</b> (guest, #4654)
+                              [<a href="/Articles/218462/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Non malicious kernel drivers is probably reasonable; but, IMHO, non-malicious kernel modules is not so (depends on the context).<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/218462/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor219145"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RCU and Unloadable Modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2007 1:00 UTC (Fri)
+                               by <b>PaulMcKenney</b> (<b>&#x272D; supporter &#x272D;</b>, #9624)
+                              [<a href="/Articles/219145/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Certainly malicious kernel modules and drivers could cause arbitrary mischief!  But I am curious what added complication you see with non-malicious kernel modules (as opposed to non-malicious kernel drivers.<br>
+<p>
+The rcutorture module is an example of a kernel module that is (more or less) non-malicious, and rcu_barrier() seems to work OK for it.<br>
+<p>
+Please let me know what I am missing!<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/219145/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor219320"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RCU and Unloadable Modules</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 26, 2007 21:47 UTC (Fri)
+                               by <b>ortalo</b> (guest, #4654)
+                              [<a href="/Articles/219320/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      IIRC I posted the comment erroneously (I wanted to post it on the previous article: "KHB: Recovering Device Drivers: From Sandboxing to Surviving").<br>
+Anyway, my idea was that regular device drivers modules are usually associated with hardware management and loaded according to some hardware-related event (possibly kernel-controlled in the first place). So you can build something where such kernel code could be trusted, even if loaded dynamically.<br>
+However, with a security orientation, one usually try to refrain from using admnistrator-loadable modules in order to avoid that a successful attack enables the attacker to install kernel level backdoors (nearly impossible to detect).<br>
+<p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/219320/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2007, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

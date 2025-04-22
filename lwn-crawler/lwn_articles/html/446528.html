@@ -1,0 +1,485 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>On vsyscalls and the vDSO [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/446528/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/446125/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/446528/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>On vsyscalls and the vDSO</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Please consider subscribing to LWN</b>
+<p>
+Subscriptions are the lifeblood of LWN.net.  If you appreciate this
+content and would like to see more of it, your subscription will
+help to ensure that LWN continues to thrive.  Please visit
+<a href="/Promo/nst-nag1/subscribe">this page</a> to join up and keep LWN on
+the net.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>June 8, 2011</br>
+           </div>
+The "vsyscall" and "vDSO" segments are two mechanisms used to accelerate
+certain system calls in Linux.  While their basic function (provide fast access
+to functionality which does not need to run in kernel mode) is the same,
+there are some distinct differences between them.  Recently vsyscall has
+come to be seen as an enabler of security attacks, so some patches have
+been put together to phase it out.  The discussion of those patches shows
+that the disagreement over how security issues are handled by the community
+remains as strong as ever.
+<p>
+The vsyscall area is the older of these two mechanisms.  It was added as a
+way to execute specific system calls which do not need any real level of
+privilege to run.  The classic example is <tt>gettimeofday()</tt>; all it
+needs to do is to read the kernel's idea of the current time.  There are
+applications out there that call <tt>gettimeofday()</tt> frequently, to the
+point that they care about even a little bit of overhead.  To address that
+concern, the kernel allows the page containing the current time to be
+mapped read-only into user space; that page also contains a fast
+<tt>gettimeofday()</tt> implementation.  Using this virtual system call,
+the C library can provide a fast <tt>gettimeofday()</tt> which never
+actually has to change into kernel mode.
+<p>
+Vsyscall has some limitations; among other things, there is only space for
+a handful of virtual system calls.  As those limitations were hit, the
+kernel developers introduced the more flexible vDSO implementation.  A
+quick look on a contemporary system will show that both are still in use:
+<p>
+<pre>
+    $ cat /proc/self/maps
+    ...
+    7fffcbcb7000-7fffcbcb8000 r-xp 00000000 00:00 0            [vdso]
+    ffffffffff600000-ffffffffff601000 r-xp 00000000 00:00 0    [vsyscall]
+</pre>
+<p>
+The key to the current discussion can be seen by typing the same command
+again and comparing the output:
+<p>
+<pre>
+    7fff379ff000-7fff37a00000 r-xp 00000000 00:00 0             [vdso]
+    ffffffffff600000-ffffffffff601000 r-xp 00000000 00:00 0     [vsyscall]
+</pre>
+<p>
+Note that the vDSO area has moved, while the vsyscall page remains at the
+same location.  The location of the vsyscall page is nailed down in the
+kernel ABI, but the vDSO area - like most other areas in the user-space
+memory layout - has its location randomized every time it is mapped.
+<p>
+Address-space layout randomization is a form of defense against security
+holes.  An attacker who is able to overrun the stack can often arrange for
+a function in the target process to "return" to an arbitrary address.
+Depending on what instructions are found at that address, this return can
+cause almost anything to happen.  Returning into the <tt>system()</tt>
+function in the C library is an obvious example; it can be used to execute
+arbitrary commands.  If the location of the C library in memory is not
+known, though, then it becomes difficult or impossible for an exploit to
+jump into a useful place.
+<p>
+There is no <tt>system()</tt> function in the vsyscall page, but there are
+several machine instructions that invoke system calls.  With just a bit of setup, these
+instructions might be usable in a stack overrun attack to invoke an
+arbitrary system call with attacker-defined parameters - not a desirable
+outcome.  So it would be nice to get rid of - or at least randomize the
+location of - the vsyscall page to thwart this type of attack.
+Unfortunately, applications depend on the existence and exact address of
+that page, so nothing can be done.
+<p>
+Except that Andrew Lutomirski <a href="/Articles/446220/">found something
+that could be done</a>: remove all of the useful instructions from the
+vsyscall page.  One was associated with the <tt>vsyscall64</tt> sysctl
+knob, which is really only useful for user-mode Linux (and does not work
+properly even there); it was simply deleted.  Others weren't actually
+system call instructions as such: the system time, if jumped into (and,
+thus, executed as if it were code) when it held just
+the right value, looks like a system call instruction.  To address that problem,
+variables have been moved into a separate page with execute permission
+turned off.
+<p>
+The remaining code in the vsyscall page has simply been removed and
+replaced by a special trap instruction.  An application trying to call into
+the vsyscall page will trap into the kernel, which will then emulate the
+desired virtual system call in kernel space.  The result is a kernel system
+call emulating a virtual system call which was put there to avoid the
+kernel system call in the first place.  The result is a "vsyscall" which
+takes a fraction of a microsecond longer to execute but, crucially, does
+not break the existing ABI.  In any case, the slowdown will only be seen if
+the application is trying to use the vsyscall page instead of the vDSO.
+<p>
+Contemporary applications should not be doing that most of the time, except
+for one little problem: glibc still uses the vsyscall version of
+<tt>time()</tt>.  That has been fixed in the glibc repository, but the fix
+may not find its way out to users for a while; meanwhile, <tt>time()</tt>
+calls will be a little slower than they were before.  That should not
+really be an issue, but one never knows, so Andy put in a configuration
+option to preserve the old way of doing things.  Anybody worried about the
+overhead of an emulated vsyscall page can set
+<tt>CONFIG_UNSAFE_VSYSCALLS</tt> to get the old behavior.
+<p>
+Nobody really objected to the patch series as a whole, but Linus hated the
+name of the configuration option; he asked that it be called
+<tt>CONFIG_LEGACY_VSYSCALLS</tt> instead.  Or, even better, the change
+could just be done unconditionally.  That led to a fairly predictable
+<a href="/Articles/446542/">response</a>
+from the PaX developer on how the kernel community likes to hide security
+problems, to which Linus <a href="/Articles/446539/">said</a>:
+<p>
+<div class="BigQuote">
+	Calling the old vdso "UNSAFE" as a config option is just plain
+	stupid.  It's a politicized name, with no good reason except for
+	your political agenda. And when I call it out as such, you just
+	spout the same tired old security nonsense.
+</div>
+<p>
+Suffice to say that the conversation went downhill from there; interested
+parties can follow the thread links in the messages cited above.  
+<p>
+
+One useful point from that discussion is that the static vsyscall page is
+not, in fact, a security vulnerability; it's simply a resource which can
+make it easier for an attacker to exploit a vulnerability elsewhere in the
+system.  Whether that aspect makes that page "unsafe" or merely "legacy" is
+left as an exercise for the reader.  Either way, removing it is seen as a
+good idea even though that removal might, arguably, cause real security
+bugs to remain unfixed in the kernel; the argument is all about naming.
+
+<p>
+Final versions of the patches have not been posted as of this writing, but
+the shape they will take is fairly clear.  The static vsyscall page will
+not continue to exist in its current form, and applications which still use
+it will continue to work but will get a little bit slower.  The
+configuration option controlling this 
+behavior may or may not exist, but any distribution shipping a kernel
+containing this change (presumably 3.1 or later) will also have a C library
+which no longer tries to use the vsyscall page.  And, with luck, exploiting
+vulnerabilities will get just a little bit harder.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Security">Security</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#vDSO">vDSO</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/446528/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor446761"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">On vsyscalls and the vDSO</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2011 5:04 UTC (Thu)
+                               by <b>idupree</b> (guest, #71169)
+                              [<a href="/Articles/446761/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Perhaps CONFIG_LESS_SAFE_VSYSCALLS?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/446761/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor446775"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">On vsyscalls and the vDSO</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2011 8:05 UTC (Thu)
+                               by <b>dmk</b> (guest, #50141)
+                              [<a href="/Articles/446775/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's just like you can't say coffee is unsafe, just because sometimes it's hot and there is a possibility of spilling it over you. <br>
+<p>
+coffee is not unsafe.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/446775/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor446799"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">On vsyscalls and the vDSO</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2011 10:53 UTC (Thu)
+                               by <b>gerdesj</b> (subscriber, #5446)
+                              [<a href="/Articles/446799/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is in the quantities I dddddddrink 8)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/446799/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor446840"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">On vsyscalls and the vDSO</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2011 14:46 UTC (Thu)
+                               by <b>zakalwe2</b> (guest, #50472)
+                              [<a href="/Articles/446840/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+CONFIG_ASLR_BACKDOOR<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/446840/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor448300"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">On vsyscalls and the vDSO</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 18, 2011 21:34 UTC (Sat)
+                               by <b>oak</b> (guest, #2786)
+                              [<a href="/Articles/448300/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Who doesn't associate "legacy" with "insecure"?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/448300/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor446905"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">vdso time change is in glibc-2.14</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 9, 2011 18:21 UTC (Thu)
+                               by <b>vapier</b> (guest, #15768)
+                              [<a href="/Articles/446905/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+the vdso time change has hit a release (2.14), but it still will probably take some time to make it out to users<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/446905/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor447140"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">vdso time change is in glibc-2.14</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 11, 2011 13:37 UTC (Sat)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/447140/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not least because there is a spray of reports of what look like rather serious bugs in 2.14 on libc-alpha, but (as usual) no movement at all from the libc maintainers towards anything like a backport. So we have to wait until a 2.14 maintainer gets sorted out and figures out what patches might fix it, with the usual no help at all from the people who introduced the bugs in the first place.<br>
+<p>
+glibc development is *sick*.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/447140/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor447069"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cost of vDSO at random address</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 10, 2011 18:20 UTC (Fri)
+                               by <b>jreiser</b> (subscriber, #11027)
+                              [<a href="/Articles/447069/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      On i386, randomizing the address of the vDSO slows down the loading of prelinked shared libraries.  Even /bin/cat, which uses just /lib/libc.so, suffers on 7% of invocations.  Large GUI executables with many shared libraries suffer 60% of the time or more.  <a href="https://bugzilla.redhat.com/show_bug.cgi?id=162797#c4">https://bugzilla.redhat.com/show_bug.cgi?id=162797#c4</a>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/447069/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor447141"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Cost of vDSO at random address</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jun 11, 2011 13:40 UTC (Sat)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/447141/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+But that's marked FIXED, yet the vDSO's address is still randomized. What was done to fix it, and can we do something similar again?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/447141/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2011, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,377 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>The LRU lock and mmap_sem [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/753058/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/752930/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/753058/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>The LRU lock and mmap_sem</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Benefits for LWN subscribers</b>
+<p>
+The primary benefit from <a href="/Promo/nst-nag5/subscribe">subscribing to LWN</a>
+       is helping to keep us publishing, but, beyond that, subscribers get
+       immediate access to all site content and access to a number of extra
+       site features.  Please sign up today!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>April 30, 2018</br>
+           <hr>
+<a href="/Articles/lsfmm2018/">LSFMM</a>
+</div>
+The kernel's memory-management subsystem has to manage a great deal of
+concurrency; that leads to an ongoing series of locking challenges that
+sometimes seem intractable.  Two recurring locking issues — the LRU locks
+and the <tt>mmap_sem</tt> lock — were the topic of sessions held during the
+memory-management track of the 2018 Linux Storage, Filesystem, and
+Memory-Management Summit.  In both cases, it quickly became clear that,
+while some interesting ideas are being pursued, easy
+solutions are not on offer.
+<p>
+<h4>Too-frequently used LRU locks</h4>
+<p>
+The kernel maintains a set of least-recently-used (LRU) lists to track both
+anonymous and page-cache pages; when the time comes to reclaim some memory
+for other uses, the pages that have been idle the longest are the first to
+go, since they are, with luck, the pages that are least likely to be needed
+in the near future.  The LRU lists (which exist for each NUMA node) are
+dynamic, with pages being added, removed, or reordered frequently.  Daniel
+Jordan started his session by noting that Oracle has been running into
+problems with contention for the LRU locks that serialize access to the
+lists; about 1% of query time, he said, is spent waiting on those locks.
+<p>
+The problem, he said, is that the LRU lock is "a big hammer" controlling
+access to an entire LRU list.  There should be no need for such a hammer;
+
+<a href="/Articles/753060/"><img
+src="https://static.lwn.net/images/conf/2018/lsfmm/DanielJordan-sm.jpg" alt="[Daniel Jordan]"
+title="Daniel Jordan" class="lthumb"></a>
+
+multiple threads should be able to operate on different parts of an LRU
+list concurrently.  Getting there, he said, requires moving to a special
+type of per-page lock that uses the list structure itself.
+<p>
+Under his proposed scheme, the first step to remove a page from an LRU list
+is to put a special value
+into the "next" pointer of the <i>previous</i> page on the list.  A
+compare-and-swap (CAS) operation would be used to change this pointer,
+making it possible to detect contention with another thread trying to
+make a change at the same place at the same time.  The page being removed
+would also have its "next" pointer changed to a sentinel value as well.
+<p>
+At this point, any other thread traversing the LRU list will, when it hits
+the sentinel value, know that things are being changed; it will then spin
+on the pointer until it returns to a normal value.  With traversals and
+concurrent changes blocked, the page of interest can now be removed from
+the LRU.  The "next" pointer in the previous page, which remains on the
+list, can now be set to the page that followed the removed page, removing
+the lock and re-enabling concurrent operations.
+<p>
+A similar algorithm can be used for adding pages to the list.  The list
+head itself can also be set to the sentinel value when pages are added to
+the front of the list.
+<p>
+Jordan said that contention is almost never encountered when using this
+algorithm, so the problems with the LRU lock essentially go away.  Johannes
+Weiner suggested that it could be reduced further during addition
+operations by searching for an uncontended point rather than spinning; the
+exact position of new pages in the list isn't particularly important.
+Andrew Morton said that this algorithm could prove to be useful for a
+number of busy lists in the kernel.
+<p>
+Dave Hansen, instead, said that this idea was "cool", but that the real
+contention problem is the zone lock, which should be dealt with first.  He
+noted that Aaron Lu has <a
+href="/ml/linux-kernel/20180320085452.24641-1-aaron.lu@intel.com/">done
+some work</a> in this area, and suggested that this "CAS trick" could
+perhaps work there as well.  Hugh Dickins said that the algorithm is more
+interesting as a general approach to list manipulation than as a specific
+solution to LRU-lock contention, which isn't a problem for everybody.  The
+session then wound down with a brief discussion of perhaps increasing
+batching in page management as another way of reducing contention.
+<p>
+<h4>mmap_sem</h4>
+<p>
+The <tt>mmap_sem</tt> semaphore is used to control access to a process's
+address space — and to a variety of other, related data structures.  It has
+long been a contention point in the memory-management subsystem, but it has
+proved resistant to change.  Laurent Dufour's session, held immediately
+after the LRU-lock discussion, started with a complaint that
+<tt>mmap_sem</tt> is the source of a great deal of contention on large
+systems that are running a lot of threaded applications.  Can something be
+done about that?
+<p>
+The place to start, he said, is figuring out just what <tt>mmap_sem</tt>
+protects.  That is not an easy answer to find.  It covers access
+to many fields in the <a
+href="https://elixir.bootlin.com/linux/latest/source/include/linux/mm_types.h#L349"><tt>mm_struct</tt>
+structure</a>.  It is also used for the <a
+href="https://elixir.bootlin.com/linux/latest/source/include/linux/mm_types.h#L268">virtual
+memory area (VMA)</a> red-black tree, the process VMA list, and various
+fields within the VMA structure itself.  But that is just a beginning, he
+said; a serious audit will be needed to find the rest.
+<p>
+What are the options for reducing <tt>mmap_sem</tt> contention?  One is <a
+href="/Articles/730531/">speculative page-fault handling</a>, an area
+Dufour has been working on for a while.  It allows the handling of page
+faults, in many cases, without the need to grab <tt>mmap_sem</tt> at all.
+
+
+<a href="/Articles/753061/"><img
+src="https://static.lwn.net/images/conf/2018/lsfmm/LaurentDufour-sm.jpg" alt="[Laerant Dufour]"
+title="Laurent Dufour" class="lthumb"></a>
+
+Breaking up <tt>mmap_sem</tt> into finer-grained locks is possibly
+interesting he said.  A variant of that is <a
+href="/Articles/724502/">range locking</a>, which would support locking a
+portion of the address space rather than the whole thing; range locking
+won't solve all of the problems, though.  There may be places where <a
+href="/Articles/202847/">SRCU</a> could be used to reduce contention.
+Finally, he noted that splitting and merging of VMAs is a contention point
+that could perhaps be resolved by deferring the merging of VMAs.
+<p>
+Hansen said that there were a lot of solutions in this list, but asked for
+a list of the problems being solved.  He noted that even read access to
+<tt>mmap_sem</tt> hurts, since it bounces the reader count between
+processor caches.  He suggested picking one specific problem and working on
+a solution.
+<p>
+Michal Hocko said that the real problem is applications "pretending they
+can have thousands of threads and it will still work".  He, too, suggested
+prioritizing problems and picking the one that seems most important.
+Speculative page faults are nice, he said, but the patch also adds a lot of
+complexity to the page-fault path — which is already complex.  There has
+been a lack of use cases that would show a real benefit from range locking,
+so that work has been stalled for a while.  Smaller steps, he said, would
+be a better way to go.
+<p>
+There was a side discussion on range locking and how to pick the proper
+range to lock.  It was pointed out that, for many operations, locking the
+range covered by a specific VMA would not be enough; it would also be
+necessary to lock one page on either side of the VMA to prevent concurrent
+merging.  It is not clear that range locking is worth the effort,
+especially since many applications consist of one large VMA containing the
+bulk of the address space.
+<p>
+One area of contention is the <tt>mprotect()</tt> system call, which can
+cause a lot of splitting and merging of VMAs.  Applications could reduce
+that contention in many cases by using <a href="/Articles/689395/">memory protection
+keys</a> instead.  It was also suggested that the kernel could just avoid
+merging VMAs after <tt>mprotect()</tt> calls.  Memory-management developers
+have long wanted to minimize the number of VMAs, but perhaps that doesn't
+really matter.
+<p>
+Hocko brought the session to a close with the conclusion that there is a
+lot of work to do in this area, and that no "single bullet" exists to solve
+the problem.  He suggested getting rid of the worst abuses of
+<tt>mmap_sem</tt> as a starting point; there are <tt>/proc</tt> interfaces
+that use it, for example.  Once that has been done, maybe the search could
+begin for a sane range-locking approach.  Hansen said that the lock itself
+is often not the problem, and that the place to start is by better
+documenting how <tt>mmap_sem</tt> is actually used.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-mmap_sem">Memory management/mmap_sem</a></td></tr>
+            <tr><td><a href="/Archives/ConferenceIndex/">Conference</a></td><td><a href="/Archives/ConferenceIndex/#Storage_Filesystem_and_Memory-Management_Summit-2018">Storage, Filesystem, and Memory-Management Summit/2018</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/753058/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor753158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The LRU lock and mmap_sem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2018 17:07 UTC (Mon)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/753158/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm surprised that range locking is seen as insufficient.  I've seen severe performance issues where a page fault gets stuck behind IO triggered by munmap() or similar on an entirely different VMA.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor753165"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The LRU lock and mmap_sem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2018 18:25 UTC (Mon)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/753165/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If there is lock contention on the LRU list, can't you just reclaim a random page-cache page?  Or some best guess of a fairly unused one.  As long as it's a relatively rare event, it shouldn't matter if the page evicted is not the least recently used, and maybe locking could disappear altogether.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753165/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor753168"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The LRU lock and mmap_sem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Apr 30, 2018 19:22 UTC (Mon)
+                               by <b>willy</b> (subscriber, #9762)
+                              [<a href="/Articles/753168/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have an entirely different approach in mind which I need to get to the top of my investigation list in the next year or so.<br>
+<p>
+list_heads suck. To remove something from a list you touch three cachelines. By using a data structure like the XArray (currently called the XQueue), you can get all the functionality of a list (insert anywhere, delete any element) with reduced memory consumption and reduced cacheline usage. It gets even better when you take advantage of the data structure to do something like "remove batch from head of list" and get an array of between 1 and 64 pointers to process.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753168/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor753971"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The LRU lock and mmap_sem</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted May 9, 2018 8:41 UTC (Wed)
+                               by <b>jan.kara</b> (subscriber, #59161)
+                              [<a href="/Articles/753971/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm not sure you need the full power (and thus complexity) of the radix tree (which is what is currently behind XArray) for replacement of list_heads. But I was also thinking a few times whether we would not be better off replacing some of the linked lists with a linked list of smallish arrays (essentially the lowest level of the radix tree + neighbor pointers).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/753971/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2018, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

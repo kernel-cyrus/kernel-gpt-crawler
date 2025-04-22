@@ -1,0 +1,621 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Optimizing VMA caching [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/589475/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/588623/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/589475/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Optimizing VMA caching</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>March 5, 2014</br>
+           </div>
+The kernel divides each process's address space into virtual memory areas
+(VMAs), each of which describes where the associated range of addresses
+has its backing store, its protections, and more.  A mapping created by
+<tt>mmap()</tt>, for example, will be represented by a single VMA, while mapping an
+executable file into memory may require several VMAs;  the list of VMAs for
+any process can be seen by looking at <tt>/proc/<i>PID</i>/maps</tt>.
+Finding the VMA
+associated with a specific virtual address is a common operation in the
+memory management subsystem; it must be done for every page fault, for
+example.  It is thus not surprising that this mapping is highly optimized;
+what may be surprising is the fact that it can be optimized further.
+<p>
+The VMAs for each address space are stored in a <a
+href="/Articles/184495/">red-black tree</a>, which enables a specific VMA
+to be looked up in logarithmic time.  These trees scale well, which is
+important; some processes can have hundreds of VMAs (or more) to sort
+through.  But it still takes time to walk down to a leaf in a red-black
+tree; it would be nice to avoid that work at least occasionally if it were
+possible.  Current kernels work toward that goal by caching the results of
+the last VMA lookup in each address space.  For workloads with any sort of
+locality, this simple cache can be quite effective, with hit rates of 50%
+or more.
+<p>
+But Davidlohr Bueso thought it should be possible to do better.  Last
+November, he posted <a href="/Articles/572629/">a patch</a> adding a second
+cache holding a pointer to the largest VMA in each address space.  The logic
+was that the VMA with the most addresses would see the most lookups, and
+his results seemed to bear that out; with the largest-VMA cache in place,
+hit rates went to over 60% for some workloads.  It was a good improvement,
+but the patch did not make it into the mainline.  Looking at the
+discussion, one can quickly come up with a useful tip for aspiring kernel
+developers: if Linus <a
+href="http://thread.gmane.org/gmane.linux.kernel/1589230">responds</a> by
+saying "<q>This patch makes me angry<q>", the chances of it being
+merged are relatively small.
+<p>
+Linus's complaint was that caching the largest VMA seemed "<q>way too
+ad-hoc</q>" and wouldn't be suitable for a lot of workloads.  He
+suggested caching a small number of recently used VMAs instead.
+Additionally, he noted that maintaining a single cache per address space,
+as current kernels do, might not be a good idea.  In situations where
+multiple threads are running in the same address space, it is likely that
+each thread will be working with a different set of VMAs.  So making the
+cache per-thread, he said, might yield much better results.
+<p>
+A few iterations later, Davidlohr has posted <a href="/Articles/588807/">a
+VMA-caching patch set</a> that appears to be about ready to go upstream.
+Following Linus's suggestion, the single-VMA cache (<tt>mmap_cache</tt> in
+<tt>struct mm_struct</tt>) has been replaced by a small array called
+<tt>vmacache</tt> in <tt>struct task_struct</tt>, making it per-thread.  On
+systems with a memory management unit (almost all systems), that array
+holds four entries.  There are also new sequence numbers stored in both
+<tt>struct mm_struct</tt> (one per address space) and in
+<tt>struct task_struct</tt> (one per thread).  
+<p>
+The purpose of the sequence numbers is to ensure that the cache does not
+return stale results.  Any change to the address space (the addition or
+removal of a VMA, for example) causes the per-address-space sequence number
+to be incremented.  Every attempt to look up an address in the per-thread
+cache first 
+checks the sequence numbers; if they do not match, the cache is deemed to
+be invalid and will be reset.  Address-space changes are relatively rare in
+most workloads, so the invalidation of the cache should not happen too
+often.
+<p>
+Every call to <tt>find_vma()</tt> (the function that locates the VMA for a
+virtual address) first does a linear search through the cache to see if the
+needed VMA is there.  Should the VMA be found, the work is done; otherwise,
+a traversal of the red-black tree will be required.  In this case, the
+result of the lookup will be stored back into the cache.  That is done by
+overwriting the entry indexed by the lowest bits of the page-frame number
+associated with the original virtual address.  It is, thus, a random replacement
+policy for all practical purposes.  The caching mechanism is meant to be
+fast so there would probably be no benefit from trying to implement
+a more elaborate replacement policy.
+<p>
+How well does the new scheme work?  It depends on the workload, of course.
+For system boot, where almost everything running is single-threaded,
+Davidlohr reports that the cache hit rate went from 51% to 73%.  Kernel
+builds, unsurprisingly, already work quite well with the current scheme 
+with a hit rate of 75%, but, even in this case, improvement is possible:
+that rate goes to 88% with Davidlohr's patch applied.  The real benefit,
+though, can be seen with benchmarks like <a
+href="http://sourceforge.net/projects/ebizzy/">ebizzy</a>, which is
+designed to simulate a multithreaded web server workload.  Current kernels
+find a cached VMA in a mere 1% of lookup attempts; patched kernels,
+instead, show a 99.97% hit rate.
+<p>
+With numbers like that, it is hard to find arguments for keeping this patch
+out of the mainline.  At this point, the stream of suggestions and comments
+has come to a halt.  Barring surprises, a new VMA lookup caching mechanism
+seems likely to find its way into the 3.15 kernel.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management">Memory management</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/589475/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor589597"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing VMA caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2014 2:27 UTC (Thu)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/589597/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This reminds me:<br>
+<p>
+Why is a red-black tree a good data structure for VMAs?  Wouldn't something like a crit-bit tree or other trie be better for this kind of use case?  It gets rid of rebalancing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/589597/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor589627"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Red-black trees considered almost, but not quite, harmful</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2014 9:59 UTC (Thu)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/589627/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      A red-black tree is rarely a good data structure, for any use.  However, it is often the easiest thing to chuck in, and good enough.  Then, it is usually just <i>barely</i> good enough to keep anybody from doing the work to replace it with a data structure that actually <i>is</i> good.
+<p>
+This means that if you find something spending a displeasing amount of time on lookups in a red-black tree, you have been handed a golden opportunity to replace a red-black tree with something actually, y'know, good.  Or, you can stick a wee cache in front of it and move along, secure in the knowledge that while that red-black tree was not even barely good enough to keep anybody from doing anything about it -- it is now.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/589627/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor590010"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Red-black trees considered almost, but not quite, harmful</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2014 5:24 UTC (Sat)
+                               by <b>flewellyn</b> (subscriber, #5047)
+                              [<a href="/Articles/590010/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I wasn't aware red-black trees were considered harmful.  Can you elaborate on why?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590010/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor590018"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Red-black trees considered almost, but not quite, harmful</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2014 8:06 UTC (Sat)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/590018/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not harmful, just almost harmful.  See my other comment below.  CS professors' harping on the merits of "n log n" behavior while ignoring memory hierarchy nonlinearies has doomed us all to suboptimal SaaS service.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590018/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor590128"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Red-black trees considered almost, but not quite, harmful</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 10, 2014 4:36 UTC (Mon)
+                               by <b>flewellyn</b> (subscriber, #5047)
+                              [<a href="/Articles/590128/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That's interesting.  So, the failures of red-black trees are to do with cache coherence and locality?  That makes sense.<br>
+<p>
+I looked at the "crit-bit tree" idea from DJB.  Looks very interesting, but it looks like it's tuned to be very very fast as long as the tree stays within a cache line.  What happens, I wonder, when the tree spills out of cache?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590128/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor589660"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing VMA caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2014 12:09 UTC (Thu)
+                               by <b>matthias</b> (subscriber, #94967)
+                              [<a href="/Articles/589660/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Red-black trees might have the advantage that the depth is strictly limited by log(n). In crit-bit trees, the depth limit is the bit-length of the string (i.e. 64 for 64-bit pointers)*.<br>
+<p>
+Rebalancing is probably not an issue, because the data structure is mostly static (i.e. very few updates).<br>
+<p>
+* I am aware that todays architectures do not really use all 64 bits and that the lowest 12 bits are zero if we address 4k pages.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/589660/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor589672"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing VMA caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 6, 2014 12:55 UTC (Thu)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/589672/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Binary trees, howsoever balanced, if they are big enough that it matters, are hell on cache locality. Unless you need to do sorted-order traversal, you're usually much better off hashing. If you do need sorted traversal, some variation on a B-tree (with blocks tuned to a cache line) is likely to be better.<br>
+<p>
+That said, if it matters, measure alternatives with actual data. The real world of caches and pipelines is full of surprises.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/589672/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor589862"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing VMA caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 7, 2014 2:36 UTC (Fri)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/589862/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Wouldn't a splay tree be ideal for this application? It effectively caches automatically.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/589862/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor589864"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing VMA caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 7, 2014 3:14 UTC (Fri)
+                               by <b>luto</b> (subscriber, #39314)
+                              [<a href="/Articles/589864/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+These trees are read much more often than they are written.  Splay trees need heavyweight synchronization for readers, which will kill multithreaded performance.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/589864/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor589934"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing VMA caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 7, 2014 15:43 UTC (Fri)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/589934/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <P>The hit rate improvements are definitely interesting.  Are there any measurements of how they translate to performance improvements?</P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/589934/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor590013"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing VMA caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 8, 2014 6:07 UTC (Sat)
+                               by <b>jzbiciak</b> (guest, #5246)
+                              [<a href="/Articles/590013/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <P>I guess I should have clicked on the "patch set" link above.  It does have benchmarks of a sort, reporting the number of billions of cycles spent in find_vma() before and after.</P>
+<P>The improvements are definitely visible.  A billion cycles on an 80-core x86-64 may only be a fraction of a second, but a billion here, a billion there, pretty soon you're talking real cycles!  ;-)</P>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590013/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor590635"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Optimizing VMA caching</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 13, 2014 22:01 UTC (Thu)
+                               by <b>jcownie</b> (guest, #3374)
+                              [<a href="/Articles/590635/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Please quote miss-rates, not hit-rates. It's the misses that matter, so a change from 2% miss rate to 1% miss rate is a 2x improvement and looks like it, whereas if you express the same thing as a change from a 98% hit rate to 99% it looks insignificant.<br>
+<p>
+It's the misses that cost, so they're what you want to talk about!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590635/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor590851"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RE: why rbtrees in the kernel?!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2014 3:53 UTC (Mon)
+                               by <b>mmorrow</b> (guest, #83845)
+                              [<a href="/Articles/590851/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+As I see, the reason red-black trees are used in many places in the<br>
+kernel is because, when the rbtree node data is included directly in a<br>
+given struct, they require no dynamic allocation.<br>
+<p>
+This is not the case with (e.g.) radix trees, which are much more<br>
+cache-friendly (they're not binary, less pointer-chasing).<br>
+<p>
+To replace rbtrees in the kernel (without introducing dynamic allocation<br>
+at places it's currently not present), you would need to provide some<br>
+n-ary tree implementation *THAT DOES NOT ONLY HAVE VALUES AT THE LEAVES*<br>
+(because only then can you play the same game as is done with rbtrees<br>
+and node-preallocation-as-part-of-structs-of-rbtree-participants).<br>
+<p>
+Does such an n-ary tree exist?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590851/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor590852"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RE: why rbtrees in the kernel?!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Mar 17, 2014 4:37 UTC (Mon)
+                               by <b>neilbrown</b> (subscriber, #359)
+                              [<a href="/Articles/590852/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The other advantage of rb-trees, over say AVL trees, is that the rebalance operation has a fixed cost (the number of rotations is O(1) for insert).<br>
+<p>
+I think it would be extremely ... challenging to maintain any sort of balance for a multi-way tree which contained data in internal nodes.  I don't say it is impossible, but I think it would be a very heavy cost in the worst case.<br>
+<p>
+My favourite search structure is the skip-list.  This can be implemented as a sorted linked-list using embedded "struct list_head", with extra dynamically allocated structure which accelerate the lookup.  It has the property that it still works if an allocation occasionally fails.  It leaves you with fewer lookup accelerators so search will be a bit slower, but it will still be completely functional.<br>
+i.e. you do pay a cost of dynamic allocation (which is a highly optimised path in the kernel) but it can be a GFP_ATOMIC allocation which never blocks and occasionally might fail.<br>
+<p>
+I'm still waiting for skiplist to appear in the kernel :-)<br>
+<p>
+<a href="https://lwn.net/Articles/551896/">https://lwn.net/Articles/551896/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/590852/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor761809"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">RE: why rbtrees in the kernel?!</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2018 7:32 UTC (Sat)
+                               by <b>sorokin</b> (guest, #88478)
+                              [<a href="/Articles/761809/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The other advantage of rb-trees, over say AVL trees, is that the rebalance operation has a fixed cost</font><br>
+<font class="QuotedText">&gt; (the number of rotations is O(1) for insert).</font><br>
+<p>
+Possible offtopic, but it's just a random thought that came to my mind.<br>
+<p>
+As one commenter (<a href="https://lwn.net/Articles/589864/">https://lwn.net/Articles/589864/</a>) said: "These trees are read much more often than they are written". The cost of read operations is proportional to the height of the tree. That's why, possibly, the cost of rebalance is less important than maintaining the smaller height of the tree. AVL trees have max height of 1.44log(n) against 2log(n) for red-black trees. The average height is also better for AVL trees. Perhaps AVL tree is a better pick for read mostly data-structure than red-black tree.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/761809/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

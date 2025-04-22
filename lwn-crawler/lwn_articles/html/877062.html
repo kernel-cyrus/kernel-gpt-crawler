@@ -1,0 +1,2377 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A different approach to BPF loops [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/877062/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/876364/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/877062/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A different approach to BPF loops</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>This article brought to you by LWN subscribers</b>
+<p>
+Subscribers to LWN.net made this article &mdash; and everything that
+       surrounds it &mdash; possible.  If you appreciate our content, please
+       <a href="/Promo/nst-nag3/subscribe">buy a subscription</a> and make the next
+       set of articles possible.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>November 29, 2021</br>
+           </div>
+One of the key features of the extended BPF virtual machine is the verifier
+built into the kernel that ensures that all BPF programs are safe to run.
+BPF developers often see the verifier as a bit of a mixed blessing, though;
+while it can catch a lot of problems before they happen, it can also be
+hard to please.  Comparisons with a well-meaning but rule-bound and picky
+bureaucracy would not be entirely misplaced.  The <a
+href="/ml/bpf/20211123183409.3599979-1-joannekoong@fb.com/"><tt>bpf_loop()</tt>
+proposal</a> from Joanne Koong is an attempt to make pleasing the BPF
+bureaucrats a bit easier for one type of loop construct.
+<p>
+To do its job, the verifier must simulate the execution of each BPF
+program loaded into the kernel.
+It makes sure that the program does not reference memory that should not be
+available to it, that it doesn't leak kernel memory to user space, and many
+other things — including that the program will actually terminate and not
+lock the kernel into an infinite loop.  Proving that a program will
+terminate is, as any survivor of an algorithms class can attest, a
+difficult problem; indeed, <a
+href="https://en.wikipedia.org/wiki/Halting_problem">it is
+impossible</a> in the general case.  So the BPF verifier has had to find
+ways to simplify the problem.
+<p>
+Initially, "simplifying the problem" meant forbidding loops altogether;
+when a program can only execute in a straight-through manner, with no
+backward jumps, it's clear that the program must terminate in finite time.
+Needless to say, BPF developers found this rule to be a bit constraining.
+To an extent, loops can be simulated by manually unrolling them, but that
+is tiresome for short loops and impractical for longer ones.  So work soon
+began on finding a way to allow BPF programs to contain loops.  Various <a
+href="/Articles/773605/">approaches</a> to the loop problem were tried over
+the years; eventually <a href="/Articles/794934/">bounded loop support</a>
+was added to the 5.3 kernel in 2019.
+<p>
+The problem is thus solved — to an extent.  The verifier checks loops by
+simulating their execution for each combination of initial states and
+demonstrating that each loop terminates 
+before executing the maximum number of allowed instructions.
+This verification can take some time and, for some programs, the verifier
+is simply unable to conclude that the loops will terminate, even though
+those programs may be correct and safe.  There are simply too many possible
+states and iterations to work through.
+<p>
+The difficulty of verifying loops is complicated by the fact that, by
+necessity, the verifier works with BPF code, which is a low-level
+instruction set.  The semantics of a loop encoded in a higher-level
+language are gone by this time.  The code may just iterate over the
+elements of a short array, for example, but the verifier has to piece that
+together from the BPF code.  If there were a way to code a bounded loop in
+a way that the verifier could see, life would be a lot easier.
+<p>
+That, in short, is the purpose of Koong's patch.  It adds a new helper
+function that can be called from BPF code:
+<p>
+<pre>
+    long bpf_loop(u32 iterations, long (*loop_fn)(u32 index, void *ctx),
+    		  void *ctx, u64 flags);
+</pre>
+<p>
+A call to <tt>bpf_loop()</tt> will result in <tt>iterations</tt> calls to
+<tt>loop_fn()</tt>, with the iteration number and the passed-in
+<tt>ctx</tt> as parameters.  The <tt>flags</tt> value is currently unused
+and must be zero.  The <tt>loop_fn()</tt> will normally return zero; a
+return value of one will end the iteration immediately.  No other return
+values are allowed.
+<p>
+Essentially, <tt>bpf_loop()</tt> takes the mechanics of the loop itself out
+of the BPF code and embeds it within the kernel's BPF implementation
+instead.  It allows the verifier to know immediately that the loop will
+terminate, since that is outside the control of the BPF program itself.  It
+is also easy to calculate how many instructions may be executed within the
+loop in the worst case; that and the limit on stack depth will prevent
+programs that run nearly forever as the result of nested loops.
+<p>
+For BPF programmers, the benefit is that any loop that can be implemented
+using <tt>bpf_loop()</tt> becomes much easier to get past the verifier;
+whole layers of bureaucracy have been shorted out, as it were.  Note that
+loops that, for example, follow a linked list are possible with
+<tt>bpf_loop()</tt>; the developer need only supply a maximum possible
+length as the number of iterations, then terminate early when the desired
+element has been found or the end of the list has been hit.  The form of
+programs may shift a bit to fit the template, but it should be possible to
+make that change in many cases.
+
+<p>
+Another significant advantage is that the time required to verify BPF
+programs is greatly reduced, since the verifier does not need to actually
+simulate the execution of all those loops.  Some <a
+href="/ml/bpf/20211123183409.3599979-4-joannekoong@fb.com/">benchmarks</a>
+show what a difference that can make; one program that takes nearly
+30&nbsp;seconds to verify in current kernels can be verified in 0.15s
+instead.  That significantly increases the practicality of many types of
+BPF program.
+<p>
+There are many reasons why Fortran remained dominant in numerical
+applications for so long; one of those is that <tt>do</tt> loops, by their
+predictable structure, are relatively easy to vectorize.  The purpose of
+<tt>bpf_loop()</tt> is different, but it works by the same mechanism:
+constraining what can be expressed in the language to make it easier for
+the computer to understand what is really being done.  That, in turn,
+should make it easier for developers to convince the computer that it can
+safely run their programs.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#BPF-Loops">BPF/Loops</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/877062/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor877121"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 0:04 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/877121/">Link</a>] (73 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Why do we need a verifier, again? Just put an instruction counter in the runtime. Then throw away the BPF nonsense and just use something like LUA or JS.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877121/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877123"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 1:33 UTC (Tue)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/877123/">Link</a>] (34 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There are two ways to do it.<br>
+<p>
+1. The way you noted, with an interpreted program and a limit on the maximum number of instructions to interpret.<br>
+<p>
+2. The current way, which runs faster *compiled* machine code in kernel space, but which requires verification first.<br>
+<p>
+When the execution time of a BPF program is important (eg, inserted into a packet filter or system call) #2 makes more sense.<br>
+<p>
+Use of a lua interpreter has been explored in the pas though: <a href="https://lwn.net/Articles/830154/">https://lwn.net/Articles/830154/</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877123/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877126"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 3:05 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/877126/">Link</a>] (29 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There&#x27;s nothing stopping you compiling to native code, with type verification, but using an instruction counter to bound overall runtime.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877126/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877131"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 6:57 UTC (Tue)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/877131/">Link</a>] (28 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Can&#x27;t use an instruction counter with native code unless the CPU hardware supports it. Best you can do is rely on the scheduler but that defeats the purpose of a lot of BPF hooks.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877131/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877132"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 6:58 UTC (Tue)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/877132/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Otherwise, you&#x27;ve essentially combined GCC with the BPF verifier. Hopefully(?) you&#x27;re doing it in-kernel so that the kernel can trust that the output is safe.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877132/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor877136"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 8:00 UTC (Tue)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/877136/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;Can&#x27;t use an instruction counter with native code</font><br>
+<p>
+Why not?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877136/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877142"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 8:49 UTC (Tue)
+                               by <b>syoc</b> (subscriber, #142594)
+                              [<a href="/Articles/877142/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Take this with a grain of salt. An interpreted program can have it&#x27;s instructions counted because there is some state keeping system (the interpreter) running each instruction on behalf of the program. Compiled languages have it&#x27;s machine code scheduled to the CPU and off it goes. The only option is that the CPU itself needs to count the instructions, there is no other party with &quot;between&quot; the program and the CPU able to keep state.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877142/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877157"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 13:46 UTC (Tue)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/877157/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;The only option is that the CPU itself needs to count the instructions</font><br>
+<p>
+A trusted compiler backend can emit native code that does the counting and bounds checking.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877157/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877195"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 17:30 UTC (Tue)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/877195/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Then you have simply moved the compiler into the kernel and combined it with the verifier. Now the only language BPF programs can be written in is Lua.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877195/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877216"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 21:04 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/877216/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We already have a JIT compiler for BPF in the kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877216/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877458"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2021 19:20 UTC (Thu)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/877458/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is very simple. It just transcribes instructions from one format to another.<br>
+<p>
+Calling it a &quot;JIT compiler&quot; stretches the term to the breaking point. In particular, it does nothing like your typical JIT compiler that interprets code, counting runs until it sees that a section is executed frequently enough, then naively compiles it and counts execution again, noting argument types actually used, and then if warranted generates and substitutes optimized code, possibly several versions according to argument types already seen, reserving the unoptimized version for cases not seen yet.<br>
+<p>
+It&#x27;s not even a compiler as seen for GPU shaders, where the code is compiled and optimized immediately, targeting the GPU, with no runtime counting; it sees no source code.<br>
+<p>
+So, not a JIT compiler as anybody uses the term anywhere else. Optimization in normal terms is expected to be done before the BPF code is seen by the kernel. All types are known beforehand. Certain commonly seen BPF instruction sequences might be mapped to a native version, but that all occurs long before any attempt at actual execution.<br>
+<p>
+So it is really much closer to an ahead-of-time macro-assembler that runs, most usually, only once at program startup, with the output executed with no monitoring beyond the usual event stats counters.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877458/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877500"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2021 1:26 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/877500/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  Calling it a &quot;JIT compiler&quot; stretches the term to the breaking point.</font><br>
+<p>
+That&#x27;s how it&#x27;s called in the kernel (e.g. <a href="https://elixir.bootlin.com/linux/v5.15.6/source/arch/arm64/net/bpf_jit_comp.c">https://elixir.bootlin.com/linux/v5.15.6/source/arch/arm6...</a> ). <br>
+<p>
+<font class="QuotedText">&gt;  In particular, it does nothing like your typical JIT compiler that interprets code, counting runs until it sees that a section is executed frequently enough, then naively compiles it and counts execution again</font><br>
+<p>
+For example, .NET JIT-compiler doesn&#x27;t do that. It just compiles the code as-is, not even de-virtualizing calls.<br>
+<p>
+<font class="QuotedText">&gt; So, not a JIT compiler as anybody uses the term anywhere else. </font><br>
+As usual, it&#x27;s you who&#x27;s inventing strange meanings of commonly accepted terms.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877500/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor877143"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 8:51 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/877143/">Link</a>] (15 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You certainly can. Just use a register for it. You need to increment it at backbranches and returns.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877143/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877196"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 17:32 UTC (Tue)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/877196/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Something needs to actually do that work. In native code it needs to have been compiled or patched in. If you&#x27;re doing the analysis for patching, you&#x27;ve just re-implemented the verifier&#x27;s logic and added counting overhead. If you are doing this with a &quot;trusted compiler&quot; then that compiler needs to be in-kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877196/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877199"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 18:10 UTC (Tue)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/877199/">Link</a>] (12 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; If you&#x27;re doing the analysis for patching, you&#x27;ve just re-implemented the verifier&#x27;s logic and added counting overhead. </font><br>
+<p>
+The logic in question is *very* simple: where are the branch instructions, and how many other instructions are executed before each.  It&#x27;s much simpler than the verifier, but that&#x27;s an apples to oranges comparison because the verifier would still be needed: even if you&#x27;re not relying on the verifier to prove termination, you still need it for type checking.<br>
+<p>
+Yes, adding dynamic checks would have overhead, but probably not very much.  I suspect this bpf_loop patch would have higher overhead (though also not very much), since it involves the JITted code calling C which then calls back into the JITted code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877199/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877203"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 18:41 UTC (Tue)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/877203/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Replying to myself just to clarify.<br>
+<p>
+The goal of runtime termination checking would *not* be to avoid the existing complexity of the verifier.  Not only would the verifier still be required, it would get more complicated.  That&#x27;s not because of the work to patch in the termination check itself, which as I said is simple, but because the bounds checking code would have to know how to approximate how running through a loop an unknown number of times would affect register values.  This approximation has to be conservative enough that it can be calculated without actually simulating the loop once for every possible iteration count (i.e. the current behavior), but not so conservative that it rejects code typically emitted by LLVM.  Indeed, I think one major downside of runtime termination checking is that it might increase the number of situations where LLVM relies on an invariant too subtle for the verifier to understand, resulting in spurious verification failures.  (Though this could potentially be solved by adding optional runtime verification of other things as well…)<br>
+<p>
+Anyway:<br>
+<p>
+Compared to the status quo, the advantage of runtime termination checking would be that you can have potentially-long loops without blowing up verification time (exponentially in the case of nested loops).<br>
+<p>
+Compared to this patch, the advantage of runtime termination checking would be that you can use normal C loops rather than this ugly construct.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877203/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877212"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 20:56 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/877212/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; That&#x27;s not because of the work to patch in the termination check itself, which as I said is simple, but because the bounds checking code would have to know how to approximate how running through a loop an unknown number of times would affect register values.</font><br>
+<p>
+The verifier won&#x27;t have to follow the loop bounds anymore, since out-of-bounds access is now safe (checked in runtime). As an additional implementation detail, the bounds checking elision can be added later.<br>
+<p>
+eBPF is also basically typeless, so there&#x27;s no type checking required.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877212/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877214"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 21:03 UTC (Tue)
+                               by <b>comex</b> (subscriber, #71521)
+                              [<a href="/Articles/877214/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, that is roughly what I meant by &quot;optional runtime verification of other things&quot;.  It&#x27;s just that moving memory access bounds checking to runtime, in addition to termination checking, is a step beyond what you originally mentioned.  But I think it would be a good idea if only from a binary compatibility perspective.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877214/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor877234"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2021 8:14 UTC (Wed)
+                               by <b>matthias</b> (subscriber, #94967)
+                              [<a href="/Articles/877234/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The verifier won&#x27;t have to follow the loop bounds anymore, since out-of-bounds access is now safe (checked in runtime). </font><br>
+<p>
+How do you want to check out-of-bounds access in runtime? Of course you can start up a full blown jvm (or sth. similar) in kernel space that is capable of doing such thing. First, you only wanted some counter in a register. Now, you want to verify every memory access of the program at runtime. Of course this can be done, but I doubt that you can sell this to kernel devs. They usually care about performance.<br>
+<p>
+<font class="QuotedText">&gt; As an additional implementation detail, the bounds checking elision can be added later.</font><br>
+<p>
+You need this from the start. If you do not elide most of the bound checking, performance will be horrible.<br>
+<p>
+<font class="QuotedText">&gt; eBPF is also basically typeless, so there&#x27;s no type checking required.</font><br>
+<p>
+If you want to do out-of-bounds checking, you at least need to distinguish types by their size.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877234/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877235"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2021 8:24 UTC (Wed)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/877235/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; How do you want to check out-of-bounds access in runtime? </font><br>
+<p>
+The kernel already JIT-compiles eBPF code into machine code. eBPF is pretty simple, you can read its spec here: <a href="https://github.com/iovisor/bpf-docs/blob/master/eBPF.md">https://github.com/iovisor/bpf-docs/blob/master/eBPF.md</a><br>
+<p>
+The out-of-bounds access can only happen when running array-access instructions (like ldxw), but all possible arrays _already_ carry the size information, so there&#x27;s no problem whatsoever to compile-in a range check.<br>
+<p>
+<font class="QuotedText">&gt; You need this from the start. If you do not elide most of the bound checking, performance will be horrible.</font><br>
+<font class="QuotedText">&gt; Now, you want to verify every memory access of the program at runtime. Of course this can be done, but I doubt that you can sell this to kernel devs. They usually care about performance.</font><br>
+<p>
+eBPF is already pretty slow in most cases, due to marshaling of the input/output data into (essentially) hash maps. Along with super-inefficient instruction set. If anything eBPF is an example how you can make a Turing machine out of the most Brainfuck-type instruction set.<br>
+<p>
+Replacing eBPF with WebAssembly (or something functionally similar) would likely result in a _speedup_. A certain subset of eBPF can indeed work pretty well, but it&#x27;s even more limited than normal. And can be done for WASM as well.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877235/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877460"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2021 19:38 UTC (Thu)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/877460/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The kernel already JIT-compiles eBPF code into machine code</font><br>
+<p>
+No, it does not. It simply transcribes the eBPF code the first time the code is presented, normally long before any event that would cause execution. That is, by definition, &quot;ahead-of-time&quot;, not &quot;just-in-time&quot;. It is also not compilation at all, by any usual definition. In particular, there is no parsing, no syntax tree, and no flow graph. <br>
+<p>
+<font class="QuotedText">&gt; eBPF is already pretty slow in most cases</font><br>
+<p>
+Yet, it is the favored way to speed up essential kernel operations.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877460/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877501"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2021 1:28 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/877501/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; That is, by definition, &quot;ahead-of-time&quot;, not &quot;just-in-time&quot;.</font><br>
+<p>
+&quot;Ahead of time&quot; is &quot;on a build farm machine&quot;. &quot;Just-in-time&quot; is &quot;immediately as the code is loaded&quot;.<br>
+<p>
+eBPF is JIT-ed.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877501/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877520"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2021 4:13 UTC (Fri)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/877520/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No one can save you from yourself.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877520/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877584"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Let's back off a bit</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2021 14:39 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/877584/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      So, while I might agree that whether BPF's machinery can be called a "JIT" or not is one of the most crucial questions we need to answer in the free-software community, I still think we should be able to get there while being civil toward each other.  To that end, perhaps we can let this burning question, as vitally important to the future of civilization as it is, rest for just a little bit?
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877584/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878251"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Let's back off a bit</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 10, 2021 13:31 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/878251/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+When civilization rebuilds after the radioactive rubble of the JIT Wars stops bouncing, the historians of the future will look back at this thread and say &quot;the antagonists could have settled the question *right there*, if only...&quot;<br>
+<p>
+:)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878251/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor877529"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2021 8:22 UTC (Fri)
+                               by <b>excors</b> (subscriber, #95769)
+                              [<a href="/Articles/877529/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; &quot;Ahead of time&quot; is &quot;on a build farm machine&quot;. &quot;Just-in-time&quot; is &quot;immediately as the code is loaded&quot;.</font><br>
+<p>
+Android&#x27;s ART is called an ahead-of-time compiler, but that runs on the end user&#x27;s phone whenever they install an app, not on a build farm. (...except for pre-installed system apps/libraries which are compiled by dexpreopt as part of the platform build, alongside all the native code)<br>
+<p>
+Newer versions of ART also have a JIT compiler (<a href="https://source.android.com/devices/tech/dalvik/jit-compiler">https://source.android.com/devices/tech/dalvik/jit-compiler</a>) which does run-time profile-guided recompiling of individual methods. If I&#x27;m reading the description correctly, the JIT also saves some profiling information so the AOT compiler can be run again while the phone is idle and charging, which means the AOT compiler can do a lot of traditionally JIT-exclusive profile-guided optimisations.<br>
+<p>
+But eBPF does call itself a JIT too, and I think that&#x27;s quite reasonable. The distinction between AOT and JIT is fuzzy and depends on where you draw the boundary in your architecture diagram - it might be build farm vs device, or installing an app vs running an app, or when the application is stored on disk vs in memory, or userspace vs kernel, etc. And then you might have something like ART that goes back and forth across the boundary. The terminology isn&#x27;t really important since the design space is so wide and varied - anyone who cares about the details of a particular implementation will have to look at the system architecture to find exactly what it means in that context.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877529/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor877209"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 19:42 UTC (Tue)
+                               by <b>matthias</b> (subscriber, #94967)
+                              [<a href="/Articles/877209/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Yes, adding dynamic checks would have overhead, but probably not very much. I suspect this bpf_loop patch would have higher overhead (though also not very much), since it involves the JITted code calling C which then calls back into the JITted code.</font><br>
+<p>
+It should not be too hard to inline that particular function. But on the other hand. If this should be inlined anyway, it would be more straightforward to add a special loop instruction to BPF.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877209/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor877228"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 22:40 UTC (Tue)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/877228/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;If you&#x27;re doing the analysis for patching, you&#x27;ve just re-implemented the verifier&#x27;s logic</font><br>
+<p>
+No, that&#x27;s not true.<br>
+In the static verifier you need to solve the halting problem<br>
+In a dynamic runtime check you don&#x27;t have to solve the halting problem.<br>
+<p>
+That&#x27;s a major reduction in complexity. You pay for with runtime overhead.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877228/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor877151"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 9:29 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/877151/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can add instrumentation to count the number of BPF instructions executed by your compiled code, or the number of BPF branches, or whatever it is you want to apply limits to. Whether you compile to machine code or not is simply an implementation detail.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877151/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877197"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 17:34 UTC (Tue)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/877197/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And how do you add that &quot;instrumentation&quot;? It&#x27;s either compiled or patched in. If patched, you&#x27;ve just re-implemented most of the verifier, just to add overhead to the program. If it&#x27;s compiled in then your compiler needs to be in-kernel to ensure that the code actually came from it. That adds a new parsing-untrusted-strings attack surface to the kernel and limits what languages the BPF programs can be written in.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877197/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877220"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 21:32 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/877220/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The JIT compiler would add the instrumentation and it&#x27;s already in-kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877220/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor877515"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2021 4:11 UTC (Fri)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/877515/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Adding instrumentation would defeat the purpose of the feature. As a reminder, the purpose of eBPF is to enable performance optimizations. Making your performance optimizations radically slower would make the feature useless.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877515/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor877140"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 8:17 UTC (Tue)
+                               by <b>ibukanov</b> (guest, #3942)
+                              [<a href="/Articles/877140/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In the generated code one can add a verification instruction before each jump backwards that adds to a counter the number of the instructions since the last jump and check the counter.<br>
+<p>
+For ultimate performance one can do what JS JITs do. Start a timer when JS is started. Then, when the timer expires, patch the generated code to turn NOP sequences placed before backward jumps into exit jumps.   <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877140/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877198"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 17:39 UTC (Tue)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/877198/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Not only is live patching something that&#x27;s being called during system calls going to add a lot of overhead, you&#x27;re implying moving the compiler that&#x27;s generating the code into the kernel. This limits what languages BPF can be written in and adds a new &quot;parsing untrusted strings&quot; attack surface. If you&#x27;re doing the code generation JIT, you&#x27;re also sacrificing the performance of native code for things like packet filters.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877198/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877219"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 21:24 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/877219/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The kernel already has a JIT compiler that generates machine code from eBPF.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877219/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877459"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2021 19:24 UTC (Thu)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/877459/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+No, it does not. Not for any sensible definition of &quot;JIT compiler&quot;.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877459/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor877130"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 6:47 UTC (Tue)
+                               by <b>pwfxq</b> (subscriber, #84695)
+                              [<a href="/Articles/877130/">Link</a>] (31 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>The article tells you:</p>
+
+<p><i>the verifier [...] makes sure that the program does not reference memory that should not be available to it, that it doesn't leak kernel memory to user space, and many other things</i></p>
+
+<p>How does an instruction counter handle those cases?</p>
+
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877130/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877133"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 7:01 UTC (Tue)
+                               by <b>epa</b> (subscriber, #39769)
+                              [<a href="/Articles/877133/">Link</a>] (21 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Perhaps &quot;the verifier&quot; and &quot;the compiler&quot; are being merged into one concept here.  If we were talking about Rust we would say that the compiler makes sure the program doesn&#x27;t reference memory not available to it.  So you could have a compiled language where the compiler enforces most safety properties but not that of non-termination (which as we all know can&#x27;t be enforced in the general case without limiting the power of the language).  Then an instruction counter (or even a timer interrupt) at run time takes care of the rest.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877133/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877135"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 7:40 UTC (Tue)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/877135/">Link</a>] (20 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Now you have two options, which are both bad:<br>
+<p>
+1. The compiler is part of the kernel. It is written in C, has to consume arbitrary untrusted strings from userspace in a complicated Turing-complete language, and any buffer overrun is potentially a security exploit. Well, maybe you can write the compiler in Rust instead of C, but this is still not the sort of thing you normally want to run in kernel mode.<br>
+2. The compiler is not part of the kernel. Then how does the kernel know that a given binary was actually emitted by the compiler? What if the user compiles a program, then modifies the resulting bytecode (or machine code) such that it does something unsafe? Does the compiler have some sort of magical signature that only it can produce?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877135/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877137"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 8:02 UTC (Tue)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/877137/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think there are some languages for which #1 might be unpleasant but palatable. TCL with it&#x27;s 11-12 very simple parsing rules comes to mind. But the point still stands. Keep complicated functionality handling untrusted input (like compilers) out of the kernel if at all possible.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877137/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877192"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 17:18 UTC (Tue)
+                               by <b>edeloget</b> (subscriber, #88392)
+                              [<a href="/Articles/877192/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Keep complicated functionality handling untrusted input (like compilers) out of the kernel if at all possible.</font><br>
+<p>
+And this is a case where it&#x27;s not possible. So simply put, we *need* the verifier. Without the verifier, BPF cannot be trusted and thus has nothing to do in the kernel itself (and that would be a shame given how useful it is). <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877192/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877208"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 19:39 UTC (Tue)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/877208/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; &gt; Keep complicated functionality handling untrusted input (like compilers) out of the kernel if at all possible.</font><br>
+<p>
+<font class="QuotedText">&gt; And this is a case where it&#x27;s not possible.</font><br>
+<p>
+It is possible to have the compiler and/or verifier run as user-mode helper programs, outside the kernel. What you can do with eBPF is basically a subset of what you could do by compiling and loading a native-code module. In principle a daemon could provide this service (validating eBPF, compiling it, and loading it) without any special kernel involvement other than providing the necessary hooks to attach the module to whatever the eBPF program should control.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877208/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877446"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2021 16:28 UTC (Thu)
+                               by <b>edeloget</b> (subscriber, #88392)
+                              [<a href="/Articles/877446/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It is possible to have the compiler and/or verifier run as user-mode helper programs, </font><br>
+<font class="QuotedText">&gt; outside the kernel. What you can do with eBPF is basically a subset of what you could </font><br>
+<font class="QuotedText">&gt; do by compiling and loading a native-code module. In principle a daemon could </font><br>
+<font class="QuotedText">&gt; provide this service (validating eBPF, compiling it, and loading it) without any special </font><br>
+<font class="QuotedText">&gt; kernel involvement other than providing the necessary hooks to attach the module to </font><br>
+<font class="QuotedText">&gt; whatever the eBPF program should control.</font><br>
+<p>
+No, as this would still allow malicious or simply erroring BPF to be loaded in the kernel. <br>
+<p>
+Replace &quot;BPF&quot; with &quot;ioctl&quot; and &quot;verifier&quot; with &quot;input check&quot; and you&#x27;ll get the reason why a verifier is necessary within the kernel: it simply cannot trust the user space to give it input that will be devoid of error and non malicious. The kernel needs to verify every single input it gets, otherwise it open itself to abuse. <br>
+<p>
+And frankly, I&#x27;m surprised that anybody argues with this: this is both Security 101 and Code Resilience 101.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877446/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877468"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2021 20:22 UTC (Thu)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/877468/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can build and load a malicious or erroneous _module_ into the kernel right now which exports functions to be called from an eBPF filter. There is no verifier for arbitrary native-code modules. And while there are different capabilities involved, most programs with the necessary capabilities to attach eBPF filters are probably running as root and could also load modules. They can even be loaded in response to actions by unprivileged processes, e.g. Bumblebee loads and unloads drivers on demand for systems with hybrid graphics, and various subsystems load modules automatically when the related features are used. Those dynamically loaded modules often include ones which were build locally from source, e.g. with DKMS. It is a short jump from there to having some privileged process verify that a given program in eBPF or WASM or any other language is safe, compile it to a self-contained native-code module with an entry point which can be invoked from eBPF, and load it. The only real question is how much you trust the user-space verifier and compiler to ensure that only safe programs are loaded into the kernel.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877468/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877497"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2021 0:10 UTC (Fri)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/877497/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Which is why the kernel can be configured to permit only appropriately signed kernel modules. It&#x27;s not necessary to restrict what can be loaded into the kernel under all circumstances, but it must be possible to configure it in such a way that what&#x27;s loaded is verifiably trustworthy. Having the ability to load code that can bypass the verifier seems reasonable, as long as there&#x27;s a mechanism for enforcing signatures on it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877497/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878252"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 10, 2021 13:50 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/878252/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well... surely the solution is obvious, then? The verifier etc is moved into an external userspace program (invoked at need, passing info to and from the kernel via one of its multiplicity of existing mechanisms, though frankly just receiving BPF for verification on stdin and passing back verification results on stdout seems simplest), and there is a kernel option just like the option for signed modules which can be used to require the thing to pass signature verification before it is invoked. For extra security, make it so that killing it panics the kernel just like killing init does, and make it unptraceable.<br>
+<p>
+(The protocol can be made as elaborate as you like, e.g. having the kernel describe its helpers to the userspace code, lobbing BTF at it to aid in verification etc.)<br>
+<p>
+Voila, instant as-trusted-as-the-admin-wants verifier that doesn&#x27;t need to be in kernel space.<br>
+<p>
+(IMHO, the real reason why the thing is in kernel space is that the BPF people are kernel people so they prefer to do stuff in kernel space if at all possible.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878252/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878285"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 10, 2021 16:25 UTC (Fri)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/878285/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <p>Doesn't even need to be an external userspace program; it can be part of the kernel, just running as a userspace process not a kernelspace process. That way, you're guaranteed that the verifier and the kernel are in sync, but the verifier can do as much as it wants because it's acting as a normal userspace program, with virtual memory, preemptive scheduling and all the other loveliness of userspace.
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878285/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor878338"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 11, 2021 1:35 UTC (Sat)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/878338/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I can just forsee this wanting be namespaced as well. Is there a reason this would be exempt?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878338/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor877138"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 8:05 UTC (Tue)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/877138/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+3. You compile the high level stuff in userspace and pass the IR (BPF?) to the kernel. Then inside the kernel you compile to native machine code with a much simpler compiler. Isn&#x27;t that how it&#x27;s currently actually done? Except that the compilation to machine code doesn&#x27;t emit checks for memory bounds and runtime limits.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877138/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877139"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 8:13 UTC (Tue)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/877139/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well that&#x27;s just semantics. You can call the BPF-to-machine-code backend a &quot;compiler&quot; or a &quot;verifier&quot; or even a &quot;JITer&quot; if you like. No matter what label you use, at some point, some component of the kernel has to actually verify that the BPF code follows all of the rules, so in contexts where we think this verification step is the bottleneck, you might as well refer to that component of the kernel as &quot;the verifier.&quot;<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877139/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 13:48 UTC (Tue)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/877158/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;Well that&#x27;s just semantics</font><br>
+<p>
+Well, the claim was<br>
+<p>
+<font class="QuotedText">&gt;1. The compiler is part of the kernel. It is written in C, has to consume arbitrary untrusted strings from userspace in a complicated Turing-complete language</font><br>
+<p>
+That&#x27;s simply not true.<br>
+<p>
+Just a subset of &quot;the compiler&quot; has to be in the kernel. That is the point I&#x27;m trying to make.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877193"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 17:24 UTC (Tue)
+                               by <b>edeloget</b> (subscriber, #88392)
+                              [<a href="/Articles/877193/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Just a subset of &quot;the compiler&quot; has to be in the kernel. That is the point I&#x27;m trying to make.</font><br>
+<p>
+So you would introduce a language (say, the mb packet filtering language) that would be compiled in the kernel to native instructions - and if this is too complex for a given architecture, you would implement a interpreter for this language. In other word, a VM with an integrated JIT compiler where it can be implemented. <br>
+<p>
+Which is exactly what BPF is.<br>
+<p>
+And this still requires you to validate the input, as you are still able to produce pre-compiled code that could be used for nefarious purposes. So you&#x27;ll probably introduce a verifier for your intermediate language.<br>
+<p>
+Which is exactly what the BPF subsystem do.<br>
+<p>
+Now, I read this code from times to times. By all means, this is not an overly complex piece of code. I would not say that it&#x27;s simple (the problem to solve is not) but it&#x27;s clearly not an undecipherable code monster. So, in the end: what&#x27;s the problem exactly?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877193/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877225"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 22:27 UTC (Tue)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/877225/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;And this still requires you to validate the input</font><br>
+<p>
+The difference is (1) statically verifying the program vs. (2) dynamically verifying it.<br>
+<p>
+(1) is what the current verifier does, if I understand it correctly. Which is hard due to the halting problem.<br>
+<p>
+(2) is simple w.r.t. halting. But it has some runtime overhead. But I don&#x27;t see why this wouldn&#x27;t be possible with JITed code, if the JIT compiler is trusted.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877225/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877450"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2021 16:36 UTC (Thu)
+                               by <b>edeloget</b> (subscriber, #88392)
+                              [<a href="/Articles/877450/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Neither static nor dynamic verification can detect if a program ever halts. This is impossible. And since there is no difference between &quot;the program is X ins long&quot; and &quot;the program has executed X ins&quot;, why should we paying a runtime penalty when we can avoid it? <br>
+<p>
+After all, the program is loaded once, but it can be executed billions of times -- especially if it respond to every single packet that comes through the network: in this case you definitely don&#x27;t want run time verification : maintaining a 10Gbps bandwdith means you have to process 1 byte of data every 0.8 ns, and a typical 1500 bytes packet would be processed in 1.5 µs. Throw in run time verification in this process and you&#x27;re killing your bandwidth.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877450/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877452"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2021 17:42 UTC (Thu)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/877452/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Neither static nor dynamic verification can detect if a program ever halts. This is impossible. And since there is no difference between &quot;the program is X ins long&quot; and &quot;the program has executed X ins&quot;, why should we paying a runtime penalty when we can avoid it?</font><br>
+<p>
+Actually, it&#x27;s dead easy to detect if SOME programs halt. So while in general what you say may be true, it is not a universal truth. The verifier simply asks the question &quot;Is this program in the set that I can prove  they halt&quot;, and if the answer is &quot;no&quot; the program is rejected.<br>
+<p>
+That&#x27;s the whole point of this loop construct - it MUST (and provably does) halt.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877452/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor877453"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2021 17:45 UTC (Thu)
+                               by <b>farnz</b> (subscriber, #17727)
+                              [<a href="/Articles/877453/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>You can detect if a program ever halts - it's not impossible to do this (look up "totality checking" in the functional programming world, for example). What you can't do is accurately classify programs into "definitely does not halt" and "definitely does halt" - there is always a category of "might not halt" involved, and real world engineering of program verification involves minimising the size of this category, making sure that nothing useful falls into "might not halt", and coming up with a good way to handle "might not halt" programs in your system.
+<p>In the case of BPF, for example, "might not halt" can just be treated in the same way as "definitely does not halt".
+
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877453/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor877223"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 21:58 UTC (Tue)
+                               by <b>NYKevin</b> (subscriber, #129325)
+                              [<a href="/Articles/877223/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Well, the claim was [...]</font><br>
+<p>
+No, it was not. The claim was that *if* you want to combine &quot;the verifier&quot; and &quot;the compiler&quot; into a single component, then you have to do either (1) or (2). Then you proposed splitting &quot;the compiler&quot; into two separate components, which is just going back to the point where we started but with a different naming scheme.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877223/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877226"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 22:37 UTC (Tue)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/877226/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;No, it was not</font><br>
+<p>
+yes, it was. It was a quote. You can read it on the discussion thread, if you forgot.<br>
+<p>
+<font class="QuotedText">&gt;but with a different naming scheme.</font><br>
+<p>
+And with vastly smaller complexity.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877226/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor877141"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 8:14 UTC (Tue)
+                               by <b>developer122</b> (guest, #152928)
+                              [<a href="/Articles/877141/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+side note: I recall long ago infrastructure was merged for packaging special userspace programs into the kernel that it could deploy for special tasks, complete with autogenerated communication channels with the kernel. Not sure what&#x27;s become if it.<br>
+<p>
+It also doesn&#x27;t really help you if the program is exploitable and is taken over to emit malicious machine code to be run in kernel space.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877141/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor877144"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 8:56 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/877144/">Link</a>] (8 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is a solved problem (JS, Java, LUA, ...). Basically, just use bounds-checked array access and accessor functions for kernel-level stuff.<br>
+<p>
+And the total hilariousness is that BPF is step-by-step becoming yet-another-JS-like-JIT these days. But with really custom infrastructure and tooling.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877144/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877150"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 9:27 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/877150/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+More like WebAssembly than JS, but yeah. And it was obvious years ago that this was going to happen.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877150/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877152"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 9:52 UTC (Tue)
+                               by <b>wsy</b> (subscriber, #121706)
+                              [<a href="/Articles/877152/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And wasm has a loop instruction that is more elegant than this hacky loop call.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877152/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877194"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 17:30 UTC (Tue)
+                               by <b>edeloget</b> (subscriber, #88392)
+                              [<a href="/Articles/877194/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; And wasm has a loop instruction that is more elegant than this hacky loop call.</font><br>
+<p>
+Good thing that the kernel is an open source project then, it should be easy for you to make it more elegant and you would have one less reason to complain :)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877194/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877221"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 21:47 UTC (Tue)
+                               by <b>roc</b> (subscriber, #30627)
+                              [<a href="/Articles/877221/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Open-source patch culture doesn&#x27;t really help here. One does not simply submit a patch &quot;since you&#x27;re reimplementing a subset of WebAssembly slowly and poorly, here&#x27;s a patch to rip out BPF and start over with WebAssembly&quot;. The problem is with the big picture.<br>
+<p>
+To be fair, it&#x27;s a common failure pattern and one that is very hard to avoid:<br>
+1) &quot;We need a very small subset of the functionality of &lt;big project X&gt;&quot;<br>
+2) &quot;We can easily reimplement that small subset and tailor it to our needs, much more easily than importing or subsetting &lt;X&gt;&quot;<br>
+3) ... time passes ...<br>
+4) &quot;We need a little bit more of &lt;X&gt;, but it&#x27;s definitely easier to just add that to our own thing instead of ripping out our own thing and using &lt;X&gt; (especially because our thing isn&#x27;t compatible with &lt;X&gt;)&quot;<br>
+5) GOTO 3<br>
+<p>
+Each decision is locally optimal, but eventually you have reimplemented most of &lt;X&gt;. Maybe you&#x27;ve done a better job, but in many cases you haven&#x27;t, e.g. when &lt;X&gt; was designed from scratch by people who understood its problem domain really well, but you only learned the problem domain as you added requirements one at a time.<br>
+<p>
+I&#x27;m certainly not saying that &quot;import the big project&quot; is always the right thing to do. But you do need to plan to avoid this trap. (It needs a catchy name.)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877221/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877237"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 1, 2021 8:41 UTC (Wed)
+                               by <b>taladar</b> (subscriber, #68407)
+                              [<a href="/Articles/877237/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is essentially <a href="https://en.wikipedia.org/wiki/Greenspun%27s_tenth_rule">https://en.wikipedia.org/wiki/Greenspun%27s_tenth_rule</a> in a more general form.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877237/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor877451"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2021 16:48 UTC (Thu)
+                               by <b>edeloget</b> (subscriber, #88392)
+                              [<a href="/Articles/877451/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The kernel did not reimplement a subset of WebAssembly. As far as I know (and I might be wrong, especially since I never followed the development of WebAssembly) eBPF was firstpresented in 2013 (JIT added in 2014 by Eric Dumazet), WebAssembly was first released in 2015. This is not really a case of &quot;reinvent, but worse&quot;.<br>
+<p>
+And the goal would not be to remove BPF and replace it with WebAssembly (that would not have much sense). The goal would be to take the design of the execution loop of WebAssembly and map that to BPF to make it more elegant -- and this would qualify for the open source patch culture. <br>
+<p>
+(As for the catchy name, may I suggest &quot;My One Was Better&quot; or the MOWB effect ?). <br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877451/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877502"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2021 1:38 UTC (Fri)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/877502/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The work on eBPF started around 2013, with the advanced features coming out around 2014-2015 timeframe. This was almost in parallel with WASM development, so it&#x27;s fair to stay that while Linux was not strictly NIH, it was definitely on a parallel evolutionary branch.<br>
+<p>
+And back then there were also other technologies, like NaCl and PNaCl ( <a href="https://developer.chrome.com/docs/native-client/nacl-and-pnacl/">https://developer.chrome.com/docs/native-client/nacl-and-...</a> ) and even LUA (with LuaJIT!)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877502/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877630"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2021 20:43 UTC (Fri)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/877630/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+eBPF came from BPF, which was ancient tech that matured in the BSDs. By the time it got to Linux, it was well-baked.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877630/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor877153"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How to deal with runtime exceptions in kernel context?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 10:49 UTC (Tue)
+                               by <b>matthias</b> (subscriber, #94967)
+                              [<a href="/Articles/877153/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Why do we need a verifier, again? Just put an instruction counter in the runtime. Then throw away the BPF nonsense and just use something like LUA or JS.</font><br>
+<p>
+Apart from all the discussions about efficiency of these runtime checks in the thread above, nobody has asked the question whether runtime checks are even sensible in all the places where BPF is used nowadays. How should the kernel react if some BPF program is terminated because it did some illegal memory access or used up the allowed runtime? <br>
+<p>
+BPF programs are used in all sorts of security related contexts. Should some access be granted or not granted if the responsible BPF program is terminated? Granting will surely lead to security exploits. And non-granting might lead to DOS. Of course the BPF verifier will never be able to check whether the program at hand does (semantically) what it is supposed to do. But having a proper verification that the program does not do unsafe things seems quite valuable to me. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877153/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877155"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How to deal with runtime exceptions in kernel context?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 12:26 UTC (Tue)
+                               by <b>Cyberax</b> (<b>&#x272D; supporter &#x272D;</b>, #52523)
+                              [<a href="/Articles/877155/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Current eBPF requires admin permissions anyway, and in practice you can easily slow down your system to a crawl by adding all kinds of BPF policies. Constant time is not zero time. Attempts to add finer-grained permissions (e.g. for seccomp) mostly fizzled.<br>
+<p>
+For the classic BPF, the situation doesn&#x27;t need to change.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877155/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor877156"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How to deal with runtime exceptions in kernel context?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 12:53 UTC (Tue)
+                               by <b>foom</b> (subscriber, #14868)
+                              [<a href="/Articles/877156/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It should quite clearly not grant access in that case. (I know there are more complex scenarios where the correct answer is less clear, but I&#x27;m sure those could be figured out)<br>
+<p>
+The current state of BPF, where there is no spec for what code you&#x27;re allowed to emit other than &quot;whatever the kernel verifier is clever enough to reverse engineer today&quot; is very unfortunate. How is an optimizing compiler supposed to know what optimizations are okay, and which will turn a verifiable program unverifiable? They cannot. It&#x27;s effectively infeasible to write a C-&gt;BPF compiler (Clang&#x27;s BPF backend notwithstanding).<br>
+<p>
+It would be a very nice improvement to allow the BPF runtime to abort execution and eliminate &quot;verifier failure&quot; as a thing.<br>
+<p>
+If a particular user wants to verify the correctness of their code before putting it into production in order to avoid the possibility of DOSing themselves, they may surely do so via writing/using some external program analysis tool -- one which is NOT built into the kernel.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877156/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877632"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How to deal with runtime exceptions in kernel context?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 3, 2021 20:55 UTC (Fri)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/877632/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; It&#x27;s effectively infeasible to write a C-&gt;BPF compiler (Clang&#x27;s BPF backend notwithstanding)</font><br>
+<p>
+Why does Clang not withstand? It is absolutely the most common way to generate eBPF code. Asserting that something everyone who does any eBPF uses all the time is infeasible does nothing for your credibility.<br>
+<p>
+It is inconvenient that code Clang emitted might be rejected by the verifier, but that probably happens to any person only once; then they take the time to learn the rules. Clang can also emit regular x86 machine code that will never complete, but that does not make emitting x86 infeasible. It is your responsibility to write your program correctly.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877632/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877736"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How to deal with runtime exceptions in kernel context?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 6, 2021 5:48 UTC (Mon)
+                               by <b>foom</b> (subscriber, #14868)
+                              [<a href="/Articles/877736/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The code clang emits can be rejected by the verifier despite the original program following the rules, and despite the output being semantically correct.<br>
+<p>
+<p>
+This can happen due to optimizations that rearrange the code such that the verifier is no longer smart enough to understand it. That, then, results in proposals like <a href="https://lists.llvm.org/pipermail/cfe-dev/2020-June/065894.html">https://lists.llvm.org/pipermail/cfe-dev/2020-June/065894...</a> to try to hack around the problem by disabling various optimizations. Which is a hack, not a principled change -- even if it is generally effective.<br>
+<p>
+It is useful that _in practice_ things often work, despite all that -- without clang understanding anything about which sorts of code transformations are permissible and which are not.<br>
+<p>
+Nevertheless, this is a fundamentally unsound architecture.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877736/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor878254"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">How to deal with runtime exceptions in kernel context?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 10, 2021 13:55 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/878254/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; that probably happens to any person only once; then they take the time to learn the rules</font><br>
+<p>
+Ha ha no. The rules are not especially clear and are not unchanging (though they aren&#x27;t changing too fast any more, that&#x27;s true). You basically have to read the verifier&#x27;s source code from start to end at least once to get a handle on the reasons why it might reject stuff, and it is not an especially simple piece of code. (I&#x27;ve read it multiple times and still spend most of my time in any given BPF-using session cursing the verifier. It slows down development a *lot*, and about half the things it finds are not actually bugs in my code but limitations in the verifier.)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/878254/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor877217"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">FORTRAN loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 21:17 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/877217/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I&#x27;ve said it before, but why not copy FORTRAN?<br>
+<p>
+The DO LOOP variable is read-only, and/or trying to write to it hides the real variable. You could if you wish make the loop terminate based on either the real or the user version of the variable, so the user could terminate early by setting a value that kills the loop. But they can&#x27;t stop the loop terminating when the real value hits that limit, regardless of what they write to their copy of it.<br>
+<p>
+(FORTRAN doesn&#x27;t enforce that, but it *explicitly* says that behaviour is permitted and must be allowed for.)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877217/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor877218"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">FORTRAN loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Nov 30, 2021 21:20 UTC (Tue)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/877218/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Whoops - just realised that that is pretty much what this patch does :-)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877218/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor877419"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A different approach to BPF loops</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Dec 2, 2021 14:20 UTC (Thu)
+                               by <b>smitty_one_each</b> (subscriber, #28989)
+                              [<a href="/Articles/877419/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Maybe the loop is<br>
+Constrained, and so, no sonnets<br>
+But there&#x27;s poetry<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/877419/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2021, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

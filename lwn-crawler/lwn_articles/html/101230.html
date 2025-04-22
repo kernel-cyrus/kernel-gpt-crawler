@@ -1,0 +1,343 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Kswapd and high-order allocations [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/101230/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/100424/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/101230/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Kswapd and high-order allocations</h1>
+<div class="Byline">[Posted September 8, 2004 by corbet]
+               <p>
+               </div>
+</div>
+<div class="ArticleText">
+The core memory allocation mechanism inside the kernel is page-based; it
+will attempt to find a certain number of contiguous pages in response to a
+request (where "a certain number" is always a power of two).  After the
+system has been running for a while, however, "higher-order" allocations
+requiring multiple contiguous pages become hard to satisfy.  The virtual
+memory subsystem fragments physical memory to the point that the free pages
+tend to be separated from each other.
+<p>
+Curious readers can query <tt>/proc/buddyinfo</tt> to see how fragmented
+the currently free pages are.  On a 1GB system, your editor currently sees the
+following:
+<p>
+<pre>
+      Node 0, zone   Normal 258 9 5 0 1 2 0 1 1 0 0
+</pre>
+<p>
+On this system, 258 single pages could be allocated immediately, but only
+nine contiguous pairs exist, and only five groups of four pages can be found.
+If something comes along which needs a lot of higher-order allocations, the
+available memory will be exhausted quickly, and those allocations may start
+to fail.
+<p>
+
+Nick Piggin has recently <a href="/Articles/100877/">looked at this
+issue</a> and found one area where improvements can be made.  The problem
+is with the <tt>kswapd</tt> process, which is charged with running in the
+background and making free pages available to the memory allocator (by
+evicting user pages).  The current <tt>kswapd</tt> code only looks at the
+number of free pages available; if that number is high enough,
+<tt>kswapd</tt> takes a rest regardless of whether any of those pages are
+contiguous with others or not.  That can lead to a situation where
+high-order allocations fail, but the system is not making any particular
+effort to free more contiguous pages.
+<p>
+
+Nick's patch is fairly straightforward; it simply keeps <tt>kswapd</tt>
+from resting until a sufficient number of higher-order allocations are
+possible.  
+
+<p>
+It has been pointed out, however, that the approach used by <tt>kswapd</tt>
+has not really changed: it chooses pages to free without
+regard to whether those pages can be coalesced into larger groups or not.
+As a result, it may have to free a great many pages before it, by chance,
+creates some higher-order groupings of pages.  In prior kernels, no better
+approach was possible, but 2.6 includes the reverse-mapping code.  With
+reverse mapping, it should be possible to target contiguous pages for
+freeing and vastly improve the system's performance in that area.
+<p>
+
+Linus's <a href="/Articles/101238/">objection</a> to this idea is that it
+overrides the current page replacement policy, which does its best to evict
+pages which, with luck, will not be needed in the near future.  Changing
+the policy to target contiguous blocks would make higher-order allocations
+easier, but it could also penalize system performance as a whole by
+throwing out useful pages.  So, says Linus, if a "defragmentation" mode is
+to be implemented at all, it should be run rarely and as a separate
+process. 
+
+<p>
+The other approach to this problem is to simply avoid higher-order
+allocations in the first place.  The switch to 4K kernel stacks was a step
+in this direction; it eliminated a two-page allocation for every process
+created.  In current kernels, one of the biggest users of high-order
+allocations would appear to be high-performance network adapter drivers.
+These adapters can handle large packets which do not fit in a single page,
+so the kernel must perform multi-page allocations to hold those packets.  
+<p>
+
+Actually, those allocations are only required when the driver (and its
+hardware) cannot handle "nonlinear" packets which are spread out in
+memory.  Most modern hardware can do scatter/gather DMA operations, and
+thus does not care whether the packet is stored in a single, contiguous
+area of memory.  Using the hardware's scatter/gather capabilities requires
+additional work when writing the driver, however, and, for a number of
+drivers, that work has not yet been done.  Addressing the high-order
+allocation problem from the demand side may prove to be far more effective
+than adding another objective to the page reclaim code, however.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Kswapd">Kswapd</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Large_allocations">Memory management/Large allocations</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Networking-Nonlinear_packets_v._large_allocations">Networking/Nonlinear packets v. large allocations</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#procbuddyinfo">/proc/buddyinfo</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/101230/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor101351"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not copy around data in physical RAM?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2004 10:27 UTC (Thu)
+                               by <b>scarabaeus</b> (guest, #7142)
+                              [<a href="/Articles/101351/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      If a request for a contiguous memory area fails, why cannot the kernel copy physical memory around while leaving the virtual addresses unchanged? I.e. if physical page n is free, n+1 is not, but m is, and we want two consecutive pages, copy the content of n+1 to m and update the page table accordingly. I'm not a kernel hacker, but my impression was that the reverse-mapping code enables you to do that.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/101351/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor101358"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not copy around data in physical RAM?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2004 10:56 UTC (Thu)
+                               by <b>rwmj</b> (subscriber, #5474)
+                              [<a href="/Articles/101358/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      I actually suggested this on kernel-list many years ago.  Alan Cox's (correct) objection was that it would require scanning lists to find out where a page was used.  As you point out, rmap means you don't need to do that scanning any more.<br>
+<p>
+So the idea would be, if higher-order allocations are not available, pick the  largest available allocation, then start evicting physical pages used above this allocation.<br>
+<p>
+The only case when this wouldn't work is when trying to do an atomic allocation - but it's very hard to satisfy large, atomic allocations anyway.<br>
+<p>
+Rich.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/101358/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor101446"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not copy around data in physical RAM?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2004 14:47 UTC (Thu)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/101446/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      I believe someone mentioned this possibility in the thread, and Linus said that it is much more possible now than it was before rmap, but that rmap isn't actually quite complete, so there are pages you couldn't move. He seemed open to an implementation, but the poster of the original patch says making kswapd do a better job of making space is orthogonal to making kswapd keep trying until it actually makes space, and not what he's working on at the moment.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/101446/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor101452"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not copy around data in physical RAM?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2004 14:56 UTC (Thu)
+                               by <b>joern</b> (guest, #22392)
+                              [<a href="/Articles/101452/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      The big problem with this approach are pointers.  Most pointers contain the virtual address of some memory area, those don't matter.  But some actually contain the physical or bus address.  For example, ethernet hardware usually has DMA engines and writes to certain pages in main memory.  If you tried to move those pages around, you'd have a lot of fun handling the random application coredumps and occasional kernel panic.<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/101452/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor150919"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Why not copy around data in physical RAM?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 9, 2005 1:14 UTC (Fri)
+                               by <b>mmarq</b> (guest, #2332)
+                              [<a href="/Articles/150919/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      i'm not a kernel hacker either... just a curious that try to understand, so...<br>
+<p>
+ "Most pointers contain the virtual address of some memory area, those don't matter. But some actually contain the physical or bus address... If you tried to move those pages around, you'd have a lot of fun handling the random application coredumps and occasional kernel panic. "<br>
+<p>
+ Just dont move them!... but there are many bits residing in physical memory that are obvious candidates, that shouldn't get in the way of those that cannot be moved or vice-versa. Is it something really stupid to advocate the creation of memory pools adressable by the kernel ?<br>
+<p>
+ My idea(stupid or not) is that pages marked as "obvious candidates" for swap should not be imediately swaped but trowned "defragmented" to a *reserved* portion of physical memory, very usefull because i suspect each time more truth that what is swapable now could be absolutely required next second in a highly CPU context swaping of 'highly threaded' world of applications and services... thus making kswapd lasy and stop him from wasting useful CPU cicles better used by a proper defragmentation code.<br>
+<p>
+ Other idea is that disk cache, should always be created as two separeted physical memory pools, program and data. Better, a *program cache pool* should be created, requiring that program bits 'should' enter this pool already in a *continuous order*, that is defragmented(and this is possible because programs bits only change when are upgraded,i.e. almost never in CPU time!), and not trowned in the general physical memory space 'highly competition' pool for any 4K page of physical memory, when or where ever available.<br>
+<p>
+ This program cache is certainly not a hot requirement for server systems, but could be a killer feature for workstation/desktop, because differently from a RAMDisk it would be quicker and more versatile as in the possibility of making their size hot dynamic, holding defragmented program bits from not only any required runtime but also other executables from /bin, /usr/bin or /usr/sbin scheduled from a simple algorithm, based on simple parameters as many times runned and usefulness.<br>
+<p>
+ Belive none of this will deprecate server performance, and in the middle you should get a much bigger pool of continously adressable memory pages. <br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/150919/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor101649"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Which cards can handle scatter DMA?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Sep 10, 2004 23:19 UTC (Fri)
+                               by <b>smoogen</b> (subscriber, #97)
+                              [<a href="/Articles/101649/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      Well which cards are currently written to handle this so as to avoid the high allocation problem? And are those cards any good?<br>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/101649/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2004, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

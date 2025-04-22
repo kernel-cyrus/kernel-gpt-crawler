@@ -1,0 +1,471 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Memory-management short topics: page-table sharing and working sets [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+<link rel="alternate" type="application/rss+xml" title="Comments posted to this article" href="https://lwn.net/headlines/919143/">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+<script type="text/javascript">var p="http",d="static";if(document.location.protocol=="https:"){p+="s";d="engine";}var z=document.createElement("script");z.type="text/javascript";z.async=true;z.src=p+"://"+d+".adzerk.net/ados.js";var s=document.getElementsByTagName("script")[0];s.parentNode.insertBefore(z,s);</script>
+<script type="text/javascript">
+var ados_keywords = ados_keywords || [];
+if( location.protocol=='https:' ) {
+        ados_keywords.push('T:SSL');
+} else {
+        ados_keywords.push('T:HTTP');
+}
+
+var ados = ados || {};
+ados.run = ados.run || [];
+ados.run.push(function() {
+
+ados_add_placement(4669, 20979, "azk13321_leaderboard", 4).setZone(16026);
+
+ados_add_placement(4669, 20979, "azk93271_right_zone", [5,10,6]).setZone(16027);
+
+ados_add_placement(4669, 20979, "azk31017_tracking", 20).setZone(20995);
+
+
+
+ados_setKeywords(ados_keywords.join(', ')); 
+ados_load();
+});</script>
+
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/919119/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="not-handset"
+            	     style="margin-left: 10.5em; display: block;">
+                   <div class="not-print"> <div id="azk13321_leaderboard"></div> </div>
+                </div>
+            <div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/919143/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/Login/newaccount"><b>New account</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Memory-management short topics: page-table sharing and working sets</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>We're bad at marketing</b>
+<p>
+We can admit it, marketing is not our strong suit. Our strength is
+writing the kind of articles that developers, administrators, and
+free-software supporters depend on to know what is going on in the
+Linux world. Please <a href="/Promo/nsn-bad/subscribe">subscribe today</a> to help us keep doing that, and so
+we don’t have to get good at marketing.
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 9, 2023</br>
+           </div>
+The kernel's memory-management developers have been busy before and during
+the holidays; the result is a number of patch sets making significant
+changes to that subsystem.  It is time for a quick look at three of those
+projects.  Two of them aim to increase the sharing of page tables between
+processes, while the third takes advantage of the <a
+href="/Articles/894859/">multi-generational LRU</a> to create a better
+picture of what a process's working set actually is.
+<p>
+<h4>Revisiting msharefs</h4>
+<p>
+Some applications are structured as a large set of independent processes,
+all sharing a (potentially large) region of memory.  Each of those
+processes will have its own set of page tables for that shared region.
+Duplicating page tables imposes a relatively small cost when the number of
+processes is low, but when that number gets large, the memory occupied by
+page tables may exceed the size of the memory region they refer to.  In
+many cases, this duplication of page tables brings no extra value.
+<p>
+For some time, Khaled Aziz has been working on a mechanism to allow
+cooperating processes to share page tables referring to a shared memory
+area; this work has, at times, taken the form of <a
+href="/Articles/895217/">the <tt>mshare()</tt> system call</a> and <a
+href="/Articles/901059/">the msharefs filesystem</a>.  There have been
+concerns raised with both solutions, so now Aziz is back with <a
+href="/ml/linux-kernel/cover.1670287695.git.khalid.aziz@oracle.com/">yet
+another attempt</a>.
+
+This implementation does away with new system calls and filesystems and,
+instead, just adds a new flag (<tt>MAP_SHARED_PT</tt>) to the <a
+href="https://man7.org/linux/man-pages/man2/mmap.2.html"><tt>mmap()</tt></a>
+system call.  If a process maps a shared segment (implying that
+<tt>MAP_SHARED</tt> must also be provided) with this new flag, then the
+page tables mapping this segment will also be shared with the other users,
+saving the overhead of making an independent copy of those tables.
+<p>
+As with the other versions, there are some interesting semantics and
+limitations associated with shared page tables.  Any address-space changes
+(such as an <a
+href="https://man7.org/linux/man-pages/man2/mprotect.2.html"><tt>mprotect()</tt></a>
+call) made to the shared region by one process will apply to every process
+sharing the page tables; that is seen as an advantage for some use cases.
+The memory segment must be aligned at the PMD level (2MB on many
+architectures), and it must be mapped at the same virtual address in all
+processes.  The same-address requirement could perhaps be removed, Aziz
+said, if there is a reason to do so.
+<p>
+Underneath the API, the implementation of page-table sharing follows the
+same lines as before.  A separate <tt>mm_struct</tt> structure is created
+to manage the shared region as if it were a separate address space.
+<p>
+There have been no comments on the new version so far.  One might expect
+that using <tt>mmap()</tt> would address most of the concerns about the
+user-space API for this feature.  But this kind of page-table sharing, with
+its unique semantics, represents a significant memory-management change to
+serve a relatively rare use case.  It is not yet clear that the case has
+been made that this functionality is worth the cost.
+<p>
+<h4>Copy-on-write page tables</h4>
+<p>
+A different, and somewhat more transparent, approach to page-table sharing
+can be found in <a
+href="/ml/linux-kernel/20221220072743.3039060-1-shiyn.lin@gmail.com/">this
+patch set</a> from Chih-En Lin.  When a process calls <a
+href="https://man7.org/linux/man-pages/man2/fork.2.html"><tt>fork()</tt></a>,
+the new child process will share its memory with the parent.  Any writable
+pages are marked copy-on-write (COW); should either process write to a COW
+page, that page will first be copied (breaking the sharing) so that the
+other process does not see the change.  Sharing memory in this way saves a
+lot of copying, especially if the child process will not actually use much
+of the parent's memory.
+<p>
+While the parent's memory is not copied into the child on <tt>fork()</tt>,
+the parent's page tables <i>are</i> copied.  If the parent process has a
+large address space, that copying can still create a significant cost, and
+it may be entirely useless if the child does not access that memory.  Lin
+seeks to reduce that cost by, instead, extending the COW mechanism to the
+bottom (PTE) level of the page-table hierarchy.
+<p>
+A process must opt into the  COW behavior with a new <a
+href="https://man7.org/linux/man-pages/man2/prctl.2.html"><tt>prctl()</tt></a>
+command (<tt>PR_SET_COW_PTE</tt>).  Once that has been done, any new child
+processes will be created with shared page tables.  The usual COW behavior
+applies here; should either process make a change to a PTE page, that page
+will be copied and the sharing will be broken.  An <tt>mprotect()</tt>
+call, for example, would end up copying the affected page-table pages.
+Thus, COW page tables should not result in any behavioral changes visible
+to either side, other than <tt>fork()</tt> calls running a bit more quickly
+and requiring less memory.
+<p>
+Of course, that is not quite true.  While a <tt>fork()</tt> may be a bit
+faster, other operations, including page-fault handling, may be slower due
+to the need to break the sharing of the page-table pages.  Whether this
+sharing is beneficial overall may thus vary depending on the workload;
+benchmark results included in the cover letter show a 3-5% performance
+increase for some workloads, and a slight decrease for others.  This
+variability of results explains the need to opt into the COW behavior; for
+most workloads it probably will not make enough of a difference to be worth
+the trouble.
+<p>
+Here, too, the implementation adds a certain amount of complexity to the
+core memory-management code.  The sharing of page-table pages requires the
+addition of a reference count to each of those pages so the kernel knows
+when they are no longer in use.  There are numerous operations that can
+require the sharing to be broken, including transparent huge-page collapse,
+kernel same-page merging, <a
+href="https://man7.org/linux/man-pages/man2/madvise.2.html"><tt>madvise()</tt></a>
+calls, and more.  The code also has to properly handle page-table pages
+that cannot be shared, including those referring to pages that are pinned
+or mapped to device memory.  The <a
+href="/ml/linux-kernel/20220519183127.3909598-1-shiyn.lin@gmail.com/">first
+posting</a> of this work drew <a
+href="/ml/linux-kernel/d1810538-9b4c-7f19-852f-7f6d255533c7@redhat.com/">some
+questions</a> about whether the added 
+complexity was worth it (and <a
+href="/ml/linux-kernel/YolHr1GwfA++i9jj@casper.infradead.org/">a side
+discussion</a> on better alternatives to <tt>fork()</tt>).  There have been
+few responses to the current version, but it seems likely that this
+discussion has not yet reached its conclusion.
+<p>
+<h4>Working-set estimation</h4>
+<p>
+A process's "working set" is the subset of its pages that it is actually
+using at any given time.  Identifying the working set is a key part of
+effective memory management; if a process's working set can be kept in RAM,
+that process will perform much better than if it must continually fault
+pages in from 
+secondary storage.  Giving a process more memory than is needed to hold the
+working set, though, is wasteful.  So a lot of effort goes into trying to
+give each process just enough memory — but not too much.
+<p>
+In <a
+href="/ml/linux-kernel/20221214225123.2770216-1-yuanchu@google.com/">this
+patch set</a>, Yuanchu Xie notes that the multi-generational LRU (MGLRU)
+work that 
+was merged for the 6.1 kernel provides much of the infrastructure needed to create
+better working-set-size estimates.  The MGLRU organizes a process's pages
+into "generations", with recently-used pages being placed into the youngest
+generation.  Over time, unused pages age into the older generations, until
+they are eventually reclaimed.
+<p>
+The working set should thus be found in the youngest generations.  The only
+problem is that the generational aging does not happen on any sort of set
+schedule; instead, it is done when memory pressure increases and the kernel
+needs to find pages to reclaim.  As a result, the younger generations can
+accumulate pages that have not been used in some time, while pages that are
+part of the working set may remain stuck in the older generations; this
+situation can persist for some time if memory pressure is not high.
+<p>
+As a way of getting better working-set-size estimates out of the MGLRU, Xie
+adds a new mechanism to force aging to happen regularly.  It takes the form
+of a new knob, <tt>memory.periodic_aging</tt>, that is implemented in the
+memory control-group controller, but for the root group only.  It holds the
+aging interval in seconds; setting it to a non-zero value will enable
+periodic MGLRU aging system-wide.  There is a new kernel thread, called
+<tt>kold</tt>, that does this aging work.
+<p>
+If <tt>memory.period_aging</tt> is set to, for example, 60&nbsp;seconds,
+then the youngest generation for any process should contain the pages that
+are known to have been used within the last minute, while the
+second-youngest generation will hold pages that have been idle for more
+than one minute, but less than two.  The kernel could use this information
+to adjust the amount of memory available to each process, but it could also
+be of use to user-space memory-management mechanisms.  Processes could 
+use their own working-set information to optimize their behavior and avoid
+using more memory than is available to them.
+<p>
+Before user space can use this information, though, it needs to be made
+available, which is not currently the case.  So the patch set adds another
+memory-controller file called <tt>memory.page_idle_age</tt> to export
+generational data to user space.  Reading this file will produce a table
+with counts of the number of pages in each of a set of fixed age ranges
+(ranging from one second to just over one hour), with separate lines for
+file-backed and anonymous pages.  This information seems like it could be
+useful in a number of situations, including simply better understanding how
+the generational-aging algorithm is working.
+<p>
+This patch series is on its first posting, and has not yet drawn any review
+comments.  It is far less invasive than the other patches examined here
+and seems like it should be less controversial.  If nothing else,
+though, this work could benefit from some documentation so that potential
+users of the new functionality do not need to reverse-engineer its
+interface from the source.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Page_replacement_algorithms">Memory management/Page replacement algorithms</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Memory_management-Page-table_sharing">Memory management/Page-table sharing</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/919143/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        
+</div> <!-- ArticleText -->
+<p><a name="Comments"></a>
+<a name="CommAnchor919467"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory-management short topics: page-table sharing and working sets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2023 19:31 UTC (Mon)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/919467/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt; A process must opt into the COW behavior with a new prctl() command (PR_SET_COW_PTE)</span><br>
+<p>
+If there's no user-visible behavior change, why make processes opt in?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/919467/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor919468"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory-management short topics: page-table sharing and working sets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2023 19:42 UTC (Mon)
+                               by <b>mb</b> (subscriber, #50428)
+                              [<a href="/Articles/919468/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<span class="QuotedText">&gt;why make processes opt in?</span><br>
+<p>
+There's a whole paragraph in the article about the reasons for why this is opt-in.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/919468/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor919469"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory-management short topics: page-table sharing and working sets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2023 19:54 UTC (Mon)
+                               by <b>quotemstr</b> (subscriber, #45331)
+                              [<a href="/Articles/919469/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, I noticed that. :-) The question stands though: in most other cases, performance optimizations don't have to be individually enabled. (Is there a prctl for folios or EAS?) I understand that the patch currently regresses performance in some use cases, but that's just a signal to me that it's not yet ready. Ideally, the system would tune itself. If it can't --- because the kernel doesn't have enough information to know what a process is going to do --- then the prctl or personality flag or whatever should provide the missing information to the kernel at a high level, not act as a low level toggle for an implementation detail of the mm subsystem.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/919469/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor919489"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory-management short topics: page-table sharing and working sets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2023 22:41 UTC (Mon)
+                               by <b>walters</b> (subscriber, #7396)
+                              [<a href="/Articles/919489/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There's also <a href="https://lwn.net/Articles/908268/">https://lwn.net/Articles/908268/</a> which I didn't see mentioned.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/919489/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor919675"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory-management short topics: page-table sharing and working sets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 11, 2023 18:47 UTC (Wed)
+                               by <b>mmechri</b> (subscriber, #95694)
+                              [<a href="/Articles/919675/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Does anyone know how the work to augment MGLRU for working-set estimation compares to the following approaches?<br>
+<p>
+- Brendan Gregg's WSS tools [1]<br>
+- DAMON [2] [3]<br>
+<p>
+[1] <a href="https://www.brendangregg.com/wss.html">https://www.brendangregg.com/wss.html</a><br>
+[2] <a href="https://damonitor.github.io/test/result/visual/v24/index.html">https://damonitor.github.io/test/result/visual/v24/index....</a><br>
+[3] <a href="https://sjp38.github.io/post/damon_profile_callstack_example/">https://sjp38.github.io/post/damon_profile_callstack_exam...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/919675/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor919846"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Memory-management short topics: page-table sharing and working sets</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 12, 2023 23:02 UTC (Thu)
+                               by <b>Yuanchu</b> (subscriber, #153443)
+                              [<a href="/Articles/919846/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The working set work focuses on understanding the usage pattern of a workload, per page type and per NUMA node, with granularity in minutes. It should also have low enough overhead that it doesn't impact application performance by much (to be evaluated), and could be turned on for most latency tolerant workloads to aid proactive reclaim.<br>
+<p>
+The parallel in Brendan Gregg's WSS would be idle page tracking, which tracks accesses by setting and checking the PG_idle bit. The benefit here is that MGLRU already does almost all of this during aging, and is less clunky than userspace writing to /sys/kernel/mm/page_idle/bitmap.<br>
+<p>
+With DAMON, you can get a lot more, e.g. a heatmap, but there's additional work and tuning required to make use of it. The working set extensions are really about exposing information MGLRU already has.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/919846/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<div id="azk93271_right_zone"></div>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>
