@@ -1,4 +1,4 @@
-# kernel-crawler
+# kernel-gpt-crawler
 
 The crawler will fetch all articles from LWN.net and documentations from kernel repository.
 
